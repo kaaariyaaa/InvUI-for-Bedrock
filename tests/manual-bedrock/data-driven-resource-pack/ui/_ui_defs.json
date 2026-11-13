@@ -1,0 +1,6 @@
+{
+  "ui_defs": [
+    "ui/invui_probe.json",
+    "ui/invui_probe_data_driven.json"
+  ]
+}

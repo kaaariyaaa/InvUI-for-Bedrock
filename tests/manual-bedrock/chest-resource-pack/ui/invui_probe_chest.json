@@ -1,0 +1,29 @@
+{
+  "namespace": "chest",
+  "small_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_desktop_marker@invui_probe.desktop_marker": {}
+          }
+        ]
+      }
+    ]
+  },
+  "large_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_desktop_marker@invui_probe.desktop_marker": {}
+          }
+        ]
+      }
+    ]
+  }
+}

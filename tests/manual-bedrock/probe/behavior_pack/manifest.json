@@ -1,0 +1,30 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "InvUI Phase 0 Probe (DISPOSABLE WORLD ONLY)",
+    "description": "WARNING: Experimental VirtualContainer probe. DISPOSABLE TEST WORLD ONLY. Not for production, shared, or distribution use. Ships NO JSON UI / input bridge. Items are deliberately unprotected and can be taken. Fill is REFUSED while viewers exist because open-screen setItem can duplicate items. itemChange is logged as DANGER and close/dump accounting mismatches STOP the probe. Virtual container contents are NOT saved and are lost on reload/shutdown/disable: never store valuables or real items in it. Verify regular chests before and after.",
+    "uuid": "dceab83f-68ca-48fe-9d55-b9c187d53b9c",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 26, 70]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "36faebb7-9ef6-45ce-af3e-3886c296fda3",
+      "version": [0, 1, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "2.13.0-beta"
+    }
+  ],
+  "metadata": {
+    "authors": ["InvUI for Bedrock probe"],
+    "license": "UNLICENSED",
+    "product_type": "addon"
+  }
+}

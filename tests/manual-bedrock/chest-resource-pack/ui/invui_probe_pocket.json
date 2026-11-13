@@ -1,0 +1,29 @@
+{
+  "namespace": "pocket_containers",
+  "small_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_pocket_marker@invui_probe.pocket_marker": {}
+          }
+        ]
+      }
+    ]
+  },
+  "large_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_pocket_marker@invui_probe.pocket_marker": {}
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "namespace": "invui_probe",
+  "desktop_marker": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 100,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "InvUI probe: chest UI (desktop)",
+    "color": [1, 1, 0, 1],
+    "shadow": true
+  },
+  "pocket_marker": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 100,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "InvUI probe: chest UI (pocket)",
+    "color": [1, 1, 0, 1],
+    "shadow": true
+  }
+}

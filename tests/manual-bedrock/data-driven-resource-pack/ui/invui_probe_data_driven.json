@@ -1,0 +1,29 @@
+{
+  "namespace": "data_driven_container",
+  "desktop_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_desktop_marker@invui_probe.desktop_marker": {}
+          }
+        ]
+      }
+    ]
+  },
+  "pocket_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_probe_pocket_marker@invui_probe.pocket_marker": {}
+          }
+        ]
+      }
+    ]
+  }
+}
