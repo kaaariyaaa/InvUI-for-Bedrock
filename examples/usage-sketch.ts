@@ -2,13 +2,16 @@
  * InvUI for Bedrock — 設計上の利用イメージ（実行不可）
  *
  * 重要:
- * - このファイルはビルド・テストの対象外のスケッチです。実際にはコンパイル・実行しません。
+ * - このファイルはビルド・テストの対象外のスケッチです。型検査のみ手動で行い、実行はしません。
+ *   型検査の前にリポジトリで `npm run build` を実行し、`dist` を作成してください。
  * - ここに現れる API は現行コアに存在しますが、実機での挙動を保証しません。
  *   実装との差は README.md の「現行実装との差」を参照してください。
  * - VirtualContainer は Bedrock Preview/Beta の Experimental API を前提とした設計です。
  * - クリック、アイテム保護、JSON UI、InventoryLink の移動は実機未検証であり、安全に利用できません。
  *   このスケッチのクリック処理を、動作する機能として本番設計へ持ち込まないでください。
- * - 実アダプタでは Window.open() が WindowOpenRejectedError で reject します（画面は開きません）。
+ * - 実アダプタでは Window.open() が WindowOpenRejectedError で reject します。
+ *   Window オブジェクト自体は build() で作成済み（status は "created" のまま）ですが、
+ *   画面（VirtualContainer）は作成も表示もされません。
  */
 
 import type { Player } from "@minecraft/server";
@@ -20,21 +23,6 @@ import {
   Structure,
   Window,
 } from "invui-bedrock";
-
-// --- 宣言型（Options）のスケッチ -------------------------------------------------
-// 設計書 5.1。content には Item など SlotElement の配列を渡す（ここでは空）。
-const shopGui = Gui.paged({
-  structure: [
-    "#########",
-    "#xxxxxxx#",
-    "#########",
-  ],
-  ingredients: {
-    "#": Item.simple(new ItemBuilder("minecraft:gray_stained_glass_pane")),
-    x: Markers.CONTENT_LIST_SLOT_HORIZONTAL,
-  },
-  content: [],
-});
 
 // --- アイテムとクリックのスケッチ -------------------------------------------------
 // 設計書 6.2。クリック通知方式は実機未検証のため、このハンドラーが
@@ -57,6 +45,22 @@ const buyButton = Item.builder()
   .updateOnClick()
   .build();
 
+// --- 宣言型（Options）のスケッチ -------------------------------------------------
+// 設計書 5.1。content には Item など SlotElement の配列を渡す。
+// buyButton は content に含めるので、コンテンツ領域のスロットに並ぶ。
+const shopGui = Gui.paged({
+  structure: [
+    "#########",
+    "#xxxxxxx#",
+    "#########",
+  ],
+  ingredients: {
+    "#": Item.simple(new ItemBuilder("minecraft:gray_stained_glass_pane")),
+    x: Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+  },
+  content: [buyButton],
+});
+
 // --- Builder と Window のスケッチ -------------------------------------------------
 // 設計書 5.2 / 8.2 / 9.1〜9.3。
 const structure = new Structure(
@@ -69,10 +73,10 @@ const structure = new Structure(
 
 const gui = Gui.paged()
   .setStructure(structure)
-  .setContent([])
+  .setContent([buyButton])
   .build();
 
-export function openShop(player: Player): void {
+export async function openShop(player: Player): Promise<void> {
   const window = Window.builder()
     .setViewer(player)
     .setTitle("ショップ")
@@ -91,8 +95,16 @@ export function openShop(player: Player): void {
 
   // 実機未検証。実アダプタ（canOpenScreens = false）では open() が
   // WindowOpenRejectedError で reject し、Container は作成・表示されない。
-  // open() は async のため、実際に呼ぶ場合は await / catch が必要。
-  window.open();
+  // 既定拒否は正常な経路なので、await して catch し、未処理 rejection を残さない。
+  try {
+    await window.open();
+  } catch (error) {
+    // 既定の実アダプタではここに WindowOpenRejectedError が来る。
+    // Window オブジェクトは build() で作成済みで、status は "created" のまま。
+    // VirtualContainer は作成も表示もされておらず、window.container は undefined。
+    // 画面を開くには明示的なテスト用アダプタが必要（このスケッチでは使わない）。
+    console.warn("InvUI: 画面を開けませんでした", error);
+  }
 }
 
 // --- 未検証機能の扱い -------------------------------------------------------------

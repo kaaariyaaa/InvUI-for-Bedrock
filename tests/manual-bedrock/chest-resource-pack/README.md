@@ -3,6 +3,7 @@
 `VirtualContainer` を開いたとき、ゲームが Mojang の **chest 画面**（`chest_screen.json` / `pocket_containers.json` のレイアウト）を使うかを、画面に出る黄色いラベルだけで観察する使い捨て Resource Pack です。ラベルを足すだけで、操作・入力・アイテムには一切触れません。
 
 > [!WARNING]
+> - **参照している samples の版と実行に必要なゲーム版は別です。** このパックが参照する `v1.26.70.23-preview` は UI 構造の参照元にすぎません。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要です（[API-NOTES.md](../API-NOTES.md) 第 1 節）。
 > - **実機未検証。** このパック自体、ラベルの表示、`modifications` の適用可否、`VirtualContainer` がどの画面を使うかは検証していません。この実験で確認する対象そのものです。
 > - **使い捨てワールド専用。** 本番ワールド・配布用ワールド・共有サーバーでは使わないでください。試験後はワールドごと破棄してよい状態にしてください。
 > - **通常のチェストにも影響し得ます。** ラベルはバニラの chest パネル定義へ差し込むため、通常のチェスト・エンダーチェスト・シュルカーボックス・樽にも同じラベルが出ます。これは異常ではなく、このプローブの前提です。通常チェストの移動が壊れた場合は即時中止してください。
@@ -13,7 +14,7 @@
 
 ## 何をするか
 
-公式 `bedrock-samples` のタグ **`v1.26.70.23-preview`**（commit `430142679bb7daf3160671f06ab32ea433be1e1d`）の UI 構造を参照し、次のパネルの `controls` 先頭にラベルを 1 つずつ `insert_front` します。
+公式 `bedrock-samples` のタグ **`v1.26.70.23-preview`**（commit `430142679bb7daf3160671f06ab32ea433be1e1d`。UI 構造の参照元であり、実行に必要なゲーム版ではない）の UI 構造を参照し、次のパネルの `controls` 先頭にラベルを 1 つずつ `insert_front` します。
 
 | ファイル | 名前空間 | 差し込み先 | ラベル |
 |---|---|---|---|
@@ -43,9 +44,9 @@ check.mjs                         JSON 構造チェック（実機の代替で�
 ## 手順
 
 1. 使い捨てワールドを複製し、バックアップを取る。
-2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する（`v1.26.70.23-preview` 系、Experimental 有効）。
+2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要（ゲーム側の版表記は [API-NOTES.md](../API-NOTES.md) 第 8 節で確認）。samples の `v1.26.70.23-preview` は UI 構造の参照元にすぎない。Experimental を有効化する。
 3. **先に通常のチェストを開く。** 黄色いラベルの有無と、末尾が `desktop` か `pocket` かを記録する。ここでラベルが出なければ、パックが読み込まれていない可能性があるため、以降の結果は使わない。
-4. 通常の手順で `VirtualContainer` の画面を開く（現行コアは `Window.open()` を既定で拒否するため、`open()` を許可するテスト用アダプタを組み込んだテストビルドが必要。テスト用アダプタは安全境界ではない）。
+4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。`Window.open()` を許可する custom adapter やテスト用コードは使わない（現行コアは `Window.open()` を既定で拒否する。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。
 5. `VirtualContainer` 側の画面でラベルの有無と種類を記録する。あわせて画面サイズ・UI スケール・言語・入力方式を記録する。
 6. 終了後、通常のチェストでアイテム移動が従来どおり動くことを再確認する。
 

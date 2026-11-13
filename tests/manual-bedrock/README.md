@@ -191,7 +191,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 - 既定の CLI が Behavior Pack / Resource Pack を変更せず、どのファイルにも書き込まない。
 - `--install-resource-pack` 明示時だけ `ui/invui.json` を追加し、既存ファイル（`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` を含む）を変更しない。
-- 同内容の `ui/invui.json` は書き換えず、異なる内容は上書きせず差分を出して中断する。失敗時は部分適用を残さない。
+- 同内容の `ui/invui.json` は書き換えず、異なる内容は上書きせず差分を出して中断する。失敗時は追加済みファイル・一時ファイル・作成した空ディレクトリの削除（ロールバック）を**試みる**が、削除権限がない等の場合は**部分適用が残り得る**。自動テストが確認するのはシミュレートした失敗経路だけであり、すべてのファイルシステム障害を再現するものではない。
 - `--json` が単体でパースできる JSON を標準出力へ出し、`status` に `beta-unverified` を含める。
 - 廃止した `--report` を指定すると引数エラーで失敗し、レポートファイルも作らない。
 - 壊れた `manifest.json` で失敗し、パックを変更しない。

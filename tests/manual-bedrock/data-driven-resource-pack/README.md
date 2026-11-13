@@ -3,9 +3,10 @@
 `VirtualContainer` を開いたとき、ゲームが Mojang の `data_driven_container` 画面を使う**可能性があるか**を、画面に出る可視ラベルだけを手がかりに**推定する**使い捨て Resource Pack です。操作・アイテム・クリックには一切触れません。推定であって判定ではないため、結果は「そうかもしれない」以上の意味を持ちません。
 
 > [!WARNING]
-> - **Mojang 公式はこの画面の変更を非推奨とし、互換性を保証していません。** Minecraft Preview 26.70.23 の告知が `data_driven_container_screen.json` と `data_driven_container` 名前空間への変更を **非推奨（deprecated）** と明記し、**互換性を保証しない**としています（[告知](https://minecraft.net/en-us/article/minecraft-preview-26-70-23)、詳細は [API-NOTES.md](../API-NOTES.md)）。このパックが動く保証はなく、この実験の結果を将来のバージョンへの恒久的な前提にしないでください。
+> - **Mojang 公式はこの画面の変更を控えるよう求め、互換性を保証していません。** Minecraft Preview 26.70.23 の告知は、`data_driven_container_screen.json` と `data_driven_container` 名前空間について、**クリエイターがこの UI を変更しないことを期待しており**、**将来の破壊的変更があり得て後方互換性を保証しない**としています（[告知](https://minecraft.net/en-us/article/minecraft-preview-26-70-23)、詳細は [API-NOTES.md](../API-NOTES.md)）。告知は「非推奨（deprecated）」とは述べていません。このパックが動く保証はなく、この実験の結果を将来のバージョンへの恒久的な前提にしないでください。
+> - **参照する samples の版と実行に必要なゲーム版は別です。** ここで使う `bedrock-samples` の 26.70.23 はパネル名を参照するための版にすぎません。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要です（[API-NOTES.md](../API-NOTES.md) 第 1 節）。
 > - **実機未検証。** このパック自体、ラベルの表示、`modifications` の適用可否は検証していません。
-> - **使い捨てワールド専用。** 本番・配布・共有サーバーでは使わないでください。通常プレイ中の画面にも作用するため、有効化したまま遊ぶと普段のコンテナ画面にマーカーが出ます。
+> - **使い捨てワールド専用。** 本番・配布・共有サーバーでは使わないでください。`modifications` はバニラの `data_driven_container` 名前空間を直接対象にしているため、通常プレイ中の画面にも作用する**可能性があります**（有効化したまま遊ぶと普段のコンテナ画面にマーカーが出るかもしれません。実機未検証です）。
 > - **どの画面を `VirtualContainer` が使うかは未確認**です。この実験で確認する対象そのものです。
 > - **読み込み失敗と画面違いは区別できません。** ラベルが出ない場合、原因は「パックが読み込まれていない」「`modifications` が適用されていない」「ラベルがレイアウトに隠れた」「`VirtualContainer` が別の画面を使っている」のいずれかで、この実験だけでは切り分けられません（[下記](#読み込み失敗と画面違いは区別できない)）。
 > - **通常画面にもマーカーが出る可能性があります。** `data_driven_container` 画面が通常のコンテナと共有されている場合、チェスト等の通常画面でも同じラベルが出るかもしれません。その場合、ラベルの有無は `VirtualContainer` 固有の識別には使えません。このパックの `modifications` はバニラ名前空間 `data_driven_container` を直接対象にしているため、**通常画面にも作用し得る前提**で扱ってください。
@@ -14,7 +15,7 @@
 
 ## 何をするか
 
-`bedrock-samples` preview 1.26.70.23 の `resource_pack/ui/data_driven_container_screen.json`（`data_driven_container` 名前空間）を土台に、次の 2 点だけを追加します。
+`bedrock-samples` preview 1.26.70.23（UI 構造の参照元。実行に必要なゲーム版ではない）の `resource_pack/ui/data_driven_container_screen.json`（`data_driven_container` 名前空間）の既存パネル名を借りて、**バニラ JSON を複製せず**、`modifications` で次の 2 点だけを追加します。
 
 - 独自名前空間 `invui_probe` に黄色いラベルを 2 つ定義（`desktop_marker` / `pocket_marker`）。
 - `data_driven_container.desktop_panel` と `pocket_panel` の `controls` 先頭に、そのラベルを `insert_front` で差し込む。
@@ -30,8 +31,8 @@ check.mjs                        JSON 構造チェック（実機の代替では
 ## 手順
 
 1. 使い捨てワールドを複製し、バックアップを取る。
-2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する（preview 1.26.70.23 系で Experimental を有効化）。
-3. **先に通常のチェストを開く。** ラベルの有無を記録する。
+2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要（ゲーム側の版表記は [API-NOTES.md](../API-NOTES.md) 第 8 節で確認）。samples の 1.26.70.23 は UI 構造の参照元にすぎない。Experimental を有効化する。
+3. 通常チェストでもラベルの有無を参考として記録する。ただし通常チェストは陽性対照ではない。
 4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。危険な custom Window adapter や `Window.open()` を直接叩くテスト用コードは書かない（現行コアは `Window.open()` を既定で拒否する。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。
 5. 表示されたラベルの有無と、末尾が `.desktop` か `.pocket` かを記録する。
 
@@ -52,7 +53,7 @@ check.mjs                        JSON 構造チェック（実機の代替では
 3. `modifications` は適用されたが、ラベルがレイアウトに隠れた（UI スケール、画面サイズ、`insert_front` 先の描画順）。
 4. パックも適用も正常で、`VirtualContainer` が `data_driven_container` 以外の画面を使っている（この実験の本来の対象）。
 
-したがって陰性の結果は「`VirtualContainer` はこの画面を使っていない」の証拠になりません。切り分けるには、**同じパックを有効にしたまま通常チェストを開いてラベルが出ることを先に確認**し、そのうえで UI スケール・画面サイズ・言語・パックの有効化状態を記録してください。手順 3 がそのための確認です。
+したがって陰性の結果は「`VirtualContainer` はこの画面を使っていない」の証拠になりません。通常チェストは samples 上で別の画面を使うため、ラベルが出なくてもこのパックの読み込み失敗を意味せず、陽性対照にはなりません。このパックに独立した陽性対照はありません。UI スケール・画面サイズ・言語・パックの有効化状態を記録してください。
 
 ラベルはパネル左上に固定オフセットで置くため、UI スケールやレイアウト次第で見切れる可能性があります。
 

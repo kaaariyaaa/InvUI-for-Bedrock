@@ -91,12 +91,19 @@ const container = world.virtualContainerManager.create({
 
 `world.afterEvents.virtualContainerItemChange` は、**プレイヤーが画面から**スロットを変更したときに発生する。`beforeItemStack` / `itemStack` / `player` / `slot` を持つ。**スクリプトによる変更では発生しない**。両イベントとも購読オプション `{ containers: [container] }` で対象コンテナを絞れる。
 
-### 画面 UI の実装とその非推奨（`data_driven_container`）
+### 画面 UI の実装と Mojang の互換性方針（`data_driven_container`）
 
 Mojang 公式の Minecraft Preview 26.70.23 告知
 （<https://minecraft.net/en-us/article/minecraft-preview-26-70-23>）は、
-`data_driven_container_screen.json` と `data_driven_container` namespace への変更を
-**非推奨（deprecated）**と明記し、**互換性を保証しない**としている。
+`data_driven_container_screen.json` と `data_driven_container` namespace について、
+**クリエイターはこの UI を変更しないよう期待されている**とし、
+**将来の更新で破壊的変更を受ける可能性があり、後方互換性を保証しない**としている。
+告知は「非推奨（deprecated）」とは述べておらず、そのように読み替えないこと。
+
+この告知の 26.70.23 と、`VirtualContainer` の実行に必要な版（npm beta
+`2.13.0-beta.1.26.70-preview.24`、第 1 節）は別である。26.70.23 系は
+`data_driven_container_screen.json` の構造を参照するための samples の版であり、
+実行時のゲーム版を 26.70.23 と決めるものではない。
 
 このため、以下はこのノートの時点で**確認できていない**。
 
@@ -173,7 +180,7 @@ export function hide(player: Player): void {
 | 10 | 画面からの操作で `virtualContainerItemChange` が 1 操作 1 回届くか、スクリプト変更で来ないか | 操作ログとスクリプト変更を比較 | CLICK-01〜08 |
 | 11 | JSON UI による操作抑制・透明ボタンが VirtualContainer 画面に適用できるか | Resource Pack を入れて確認 | BASE-04、PROT-* |
 | 12 | `InventoryLink` の複製・消失（API 仕様ではなく実装の安全性） | 使い捨てアイテムで移動試験 | INV-01〜06 |
-| 13 | VirtualContainer の画面が `data_driven_container_screen.json` を使うか（公式はこの JSON / namespace の変更を非推奨・互換保証なしと明記） | Resource Pack の有無で表示・挙動が変わるか比較 | BASE-04、COMPAT-01 |
+| 13 | VirtualContainer の画面が `data_driven_container_screen.json` を使うか（公式はこの UI を変更しないよう期待し、将来の破壊的変更・後方互換保証なしと明記） | Resource Pack の有無で表示・挙動が変わるか比較 | BASE-04、COMPAT-01 |
 | 14 | `button.send` がチェスト風画面で機能するか（チェストでの成立は未確認） | ボタンを押してチャット通知が出るか確認 | BASE-04、CLICK-09 |
 | 15 | 画面 ID・スロット番号をスクリプトから自動送信できるか（保証なし） | 送信を試み、UI 側で受信できるか記録 | CLICK-09 |
 
