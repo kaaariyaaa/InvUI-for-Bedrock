@@ -609,6 +609,93 @@ test("clicks route to the Item at the slot only while open", async () => {
   assert.deepEqual(clicks, [{ slot: 1, name: "Steve" }]);
 });
 
+test("display items reject clicks even with handlers (design 10.5)", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const handled = [];
+  const display = Item.simple(() => stack("minecraft:display"));
+  const guardedDisplay = Item.builder()
+    .setItemProvider(() => stack("minecraft:guarded"))
+    .addClickHandler(() => handled.push("guarded"))
+    .build()
+    .setMode("display");
+  const button = Item.builder()
+    .setItemProvider(() => stack("minecraft:button"))
+    .addClickHandler(() => handled.push("button"))
+    .build();
+  const gui = Gui.normal({
+    structure: ["abc"],
+    ingredients: { a: display, b: guardedDisplay, c: button },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[1].typeId, "minecraft:guarded");
+
+  assert.equal(await window.handleClick(0), false);
+  assert.equal(await window.handleClick(1), false);
+  assert.deepEqual(handled, []);
+  assert.deepEqual(errors, []);
+
+  // Button slots keep their existing behavior.
+  assert.equal(await window.handleClick(2), true);
+  assert.deepEqual(handled, ["button"]);
+  window.close();
+});
+
+test("a click whose slot turns display while queued is not run", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const gate = deferred();
+  const handled = [];
+  let calls = 0;
+  const item = Item.builder()
+    .setItemProvider(() => stack("minecraft:button"))
+    .addClickHandler(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await gate.promise;
+      }
+      handled.push(calls);
+    })
+    .build();
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const running = window.handleClick(0);
+  await tick();
+  const queued = window.handleClick(0);
+  await tick();
+  assert.deepEqual(handled, []);
+
+  item.setMode("display");
+  gate.resolve();
+
+  assert.equal(await running, true);
+  assert.equal(await queued, false);
+  assert.deepEqual(handled, [1]);
+  assert.equal(window.status, "open");
+  assert.equal(await window.handleClick(0), false);
+
+  // Switching the Item back to button re-enables clicks; queued-mode changes
+  // are not latched into the Window.
+  item.setMode("button");
+  assert.equal(await window.handleClick(0), true);
+  assert.deepEqual(handled, [1, 2]);
+  window.close();
+});
+
 test("setState re-renders page content", async () => {
   const adapter = new InMemoryTestAdapter();
   const content = [1, 2, 3, 4].map((n) =>

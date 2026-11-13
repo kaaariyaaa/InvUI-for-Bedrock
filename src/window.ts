@@ -199,6 +199,18 @@ function isItemElement(element: SlotElement | null | undefined): element is Item
   return typeof (element as Item | null | undefined)?.resolve === "function";
 }
 
+/**
+ * Only button-mode Items accept a click (design 10.5): a display Item may still
+ * carry handlers, but the Window must not run them or report a click.
+ */
+function isButtonElement(element: SlotElement | null | undefined): element is Item {
+  return (
+    isItemElement(element) &&
+    typeof element.getMode === "function" &&
+    element.getMode() === "button"
+  );
+}
+
 function isInventoryLinkElement(
   element: SlotElement | null | undefined,
 ): element is InventoryLink {
@@ -710,13 +722,16 @@ export class Window {
   }
 
   /**
-   * Routes a click to the Item currently rendered at the logical `slot`.
+   * Routes a click to the button Item currently rendered at the logical `slot`.
+   *
+   * Only `button`-mode Items accept input (design 10.5); a display Item, even
+   * one that carries handlers, returns false without enqueueing anything.
    *
    * Clicks run on the state handle's queue, so shared-state windows process
-   * them in order (design 12.1). The slot and display generation are checked
-   * again when the queued task actually runs: a click that waited behind a
-   * close, reopen, or page/tab change is discarded instead of invoking a stale
-   * handler.
+   * them in order (design 12.1). The slot, display generation, and mode are
+   * checked again when the queued task actually runs: a click that waited
+   * behind a close, reopen, page/tab change, or a slot that turned display
+   * while waiting is discarded instead of invoking a stale handler.
    */
   async handleClick(slot: number): Promise<boolean> {
     if (this.#status !== "open" || !this.#layout || !this.#stateHandle) {
@@ -727,7 +742,7 @@ export class Window {
     }
     const layout = this.#layout;
     const element = layout.slots[slot];
-    if (!isItemElement(element)) {
+    if (!isButtonElement(element)) {
       return false;
     }
     const generation = this.#generation;
@@ -758,6 +773,11 @@ export class Window {
           layout.height !== currentLayout.height ||
           currentLayout.slots[slot] !== element
         ) {
+          return false;
+        }
+        // The same Item may have been switched to display while this click
+        // waited, so the mode is re-validated at execution time too.
+        if (!isButtonElement(element)) {
           return false;
         }
         await element.handleClick({ player: this.viewer, slot, window: this });
