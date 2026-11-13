@@ -341,7 +341,10 @@ function sameFileIdentity(stat, identity) {
 
 // 自分が排他的に作り、dev/ino で同一と確認できたファイルだけを削除する。
 // 別プロセスが置き換えたファイルは決して消さない。
-function removeDestinationIfOwned(destination, identity) {
+// dev/ino が同じでも、別プロセスが in-place で内容を書き直していることがある。
+// 期待する内容（expectedContent）を渡された場合は現物と比較し、異なるなら残して報告する。
+// ponytail: 確認と unlink の間の TOCTOU は塞ぎ切らない。塞ぐなら fd + flock が要る。
+function removeDestinationIfOwned(destination, identity, expectedContent = null) {
   let stat;
   try {
     stat = fs.lstatSync(destination);
@@ -353,6 +356,23 @@ function removeDestinationIfOwned(destination, identity) {
   }
   if (!sameFileIdentity(stat, identity)) {
     return { removed: false, reason: '自分が作成したファイルと確認できないため削除しません' };
+  }
+  if (expectedContent) {
+    let currentContent;
+    try {
+      currentContent = fs.readFileSync(destination);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return { removed: true, reason: null };
+      }
+      return { removed: false, reason: `内容を確認できないため削除しません: ${error.message}` };
+    }
+    if (!currentContent.equals(expectedContent)) {
+      return {
+        removed: false,
+        reason: '配置後に別プロセスが内容を変更しているため削除しません（元の内容と異なります）',
+      };
+    }
   }
   try {
     fs.unlinkSync(destination);
@@ -630,7 +650,7 @@ function applyTemplate(resourcePack) {
   } catch (error) {
     const cleanupErrors = [];
     for (const entry of installed) {
-      const cleanup = removeDestinationIfOwned(entry.destination, entry.identity);
+      const cleanup = removeDestinationIfOwned(entry.destination, entry.identity, entry.templateContent);
       if (!cleanup.removed) {
         cleanupErrors.push(`追加済みファイルを戻せません: ${entry.destination} (${cleanup.reason})`);
       }
@@ -866,14 +886,16 @@ function generateResourcePack(outputRoot) {
       fs.writeFileSync(tempPath, file.content, { flag: 'wx', mode: 0o644 });
       stagedTemps.push(tempPath);
       const identity = placeFileWithoutOverwrite(tempPath, destination);
+      // 配置に成功した時点で記録する。直後の temp 削除が失敗しても、
+      // ロールバックがこのファイルを「作成していない」と誤認して残さないため。
+      createdFiles.push({ destination, identity, relativePath: file.relativePath, content: file.content });
       fs.unlinkSync(tempPath);
       stagedTemps.pop();
-      createdFiles.push({ destination, identity, relativePath: file.relativePath, content: file.content });
     }
   } catch (error) {
     const cleanupErrors = [];
     for (const file of createdFiles) {
-      const cleanup = removeDestinationIfOwned(file.destination, file.identity);
+      const cleanup = removeDestinationIfOwned(file.destination, file.identity, file.content);
       if (!cleanup.removed) {
         cleanupErrors.push(`作成済みファイルを削除できません: ${file.destination} (${cleanup.reason})`);
       }
@@ -1015,6 +1037,12 @@ function printInstallSection(install) {
     out('  注意: このファイルは未検証の隔離プローブです。置いただけではチェスト画面へ適用されません。');
     for (const command of install.restore || []) {
       out(`  復元: ${command}`);
+    }
+    if ((install.restore || []).length > 0) {
+      out(
+        '  注意: 復元コマンドは導入後にこのファイルを編集していた場合、その変更も消します。' +
+          '実行前に内容を確認し、必要なら退避してください。',
+      );
     }
     return;
   }

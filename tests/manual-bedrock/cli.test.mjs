@@ -10,6 +10,7 @@
  * - 未検証の隔離プローブであり、置くだけではチェストへ適用されないと表示すること
  * - generate-resource-pack が init とは別に、新しい出力先へ同梱3ファイルを生成すること
  * - generate-resource-pack が既存パス・シンボリックリンクを拒否し、部分失敗時は自分が作ったものだけを戻すこと
+ * - ロールバックが同一 inode への in-place 書き換えを消さず、temp 削除失敗を残骸として残さないこと
  * - 生成 manifest の UUID が実行ごとに作り直されること
  * - 廃止した --report と、特別扱いしない check を受け付けないこと
  *
@@ -333,6 +334,7 @@ test('--install-resource-pack は ui/invui.json だけを追加し、既存フ�
     assert.match(result.stdout, /隔離プローブ/);
     assert.match(result.stdout, /置いただけではチェスト画面へ適用されません/);
     assert.match(result.stdout, /rm ".*ui\/invui\.json"/);
+    assert.match(result.stdout, /復元コマンドは.*変更も消します/);
 
     const installed = path.join(resourcePack, 'ui', 'invui.json');
     assert.equal(fs.readFileSync(installed, 'utf8'), templateText);
@@ -800,6 +802,85 @@ test(
       assert.match(result.error, /この CLI が作成したものだけ/);
       assert.equal(fs.existsSync(output), false);
       assert.deepEqual(fs.readdirSync(root), []);
+    } finally {
+      fs.writeFileSync = originalWriteFile;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'generate-resource-pack は配置後の temp 削除に失敗しても作成済みファイルを残骸として残さない',
+  { skip: process.platform === 'win32' },
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
+    const output = path.join(root, 'pack');
+    const originalUnlink = fs.unlinkSync;
+    let injected = false;
+    try {
+      fs.unlinkSync = (target) => {
+        if (!injected && typeof target === 'string' && target.endsWith('.tmp')) {
+          injected = true;
+          const error = new Error('simulated temp unlink failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return originalUnlink(target);
+      };
+
+      let result;
+      try {
+        result = generateResourcePack(output);
+      } finally {
+        fs.unlinkSync = originalUnlink;
+      }
+
+      assert.equal(injected, true, 'temp 削除の失敗を注入できた');
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /simulated temp unlink failure/);
+      assert.equal(result.files.length, 0);
+      // 配置済みの manifest.json が「削除成功」と誤報されて残っていない。
+      assert.equal(fs.existsSync(path.join(output, 'manifest.json')), false);
+      assert.equal(fs.existsSync(output), false);
+      assert.deepEqual(fs.readdirSync(root), []);
+    } finally {
+      fs.unlinkSync = originalUnlink;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'generate-resource-pack のロールバックは同一 inode に in-place で書き直された内容を削除しない',
+  { skip: process.platform === 'win32' },
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
+    const output = path.join(root, 'pack');
+    const manifestPath = path.join(output, 'manifest.json');
+    const modified = 'another process rewrote this in place\n';
+    const originalWriteFile = fs.writeFileSync;
+    try {
+      fs.writeFileSync = (target, ...args) => {
+        if (typeof target === 'string' && target.includes('_ui_defs.json')) {
+          // 別プロセスが同じ inode のまま manifest を書き直した状況（dev/ino は変わらない）。
+          originalWriteFile(manifestPath, modified);
+          const error = new Error('simulated write failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return originalWriteFile(target, ...args);
+      };
+
+      let result;
+      try {
+        result = generateResourcePack(output);
+      } finally {
+        fs.writeFileSync = originalWriteFile;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /変更/);
+      assert.equal(fs.readFileSync(manifestPath, 'utf8'), modified);
     } finally {
       fs.writeFileSync = originalWriteFile;
       fs.rmSync(root, { recursive: true, force: true });
