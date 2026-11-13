@@ -98,10 +98,12 @@ const { Item } = await load("../src/item");
 const { VirtualInventory, InventoryLink } = await load("../src/inventory");
 const { StateConflictError, StateManager } = await load("../src/state");
 const {
+  MAX_OPEN_RENDER_PASSES,
   MinecraftVirtualContainerAdapter,
   Window,
   WindowItemChangeDangerError,
   WindowOpenRejectedError,
+  WindowOpenRenderLimitError,
   WindowStateSchemaChangedError,
   minecraftVirtualContainerAdapter,
 } = await load("../src/window");
@@ -1280,6 +1282,81 @@ test("a state change while opening is applied before the screen opens", async ()
 
   assert.equal(window.status, "open");
   assert.equal(adapter.containers[0].items[0].typeId, "minecraft:after");
+  window.close();
+});
+
+test("state changes on every render pass fail the open at a bounded pass limit", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  let window;
+  let passes = 0;
+  // A provider that writes state while it renders makes every pass stale: the
+  // retry loop must stop at a bound instead of never resolving open().
+  const item = Item.simple(() => {
+    passes += 1;
+    window.setState({ page: passes });
+    return stack("minecraft:loop");
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  let rejection;
+  try {
+    await window.open();
+    assert.fail("open() must not resolve while state keeps changing");
+  } catch (error) {
+    rejection = error;
+  }
+
+  assert.ok(rejection instanceof WindowOpenRenderLimitError);
+  assert.equal(rejection.code, "INVUI_WINDOW_OPEN_RENDER_LIMIT");
+  assert.equal(rejection.passes, MAX_OPEN_RENDER_PASSES);
+  assert.equal(passes, MAX_OPEN_RENDER_PASSES);
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(adapter.opened.length, 0);
+  assert.deepEqual(closeReasons, []);
+  assert.deepEqual(
+    errors.map(({ context }) => context.operation),
+    ["open"],
+  );
+  assert.equal(errors[0].error, rejection);
+});
+
+test("a finite number of state changes while opening still opens the window", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  let window;
+  let calls = 0;
+  const finitePasses = 5;
+  const item = Item.simple(() => {
+    calls += 1;
+    if (calls <= finitePasses) {
+      window.setState({ page: calls });
+    }
+    return stack(`minecraft:pass_${calls}`);
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+
+  assert.equal(window.status, "open");
+  assert.equal(calls, finitePasses + 1);
+  assert.equal(window.getState().page, finitePasses);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(adapter.containers[0].items[0].typeId, `minecraft:pass_${calls}`);
+  assert.deepEqual(errors, []);
   window.close();
 });
 

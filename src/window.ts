@@ -144,6 +144,26 @@ export class WindowStateSchemaChangedError extends Error {
 }
 
 /**
+ * Reported through the error handler (operation `open`) and thrown from
+ * `open()` when state or GUI changes keep arriving on every render pass. A
+ * provider that writes state while it renders (or a listener that does so)
+ * would otherwise keep `open()` in its retry loop forever, so the Window fails
+ * closed instead of opening a stale screen.
+ */
+export class WindowOpenRenderLimitError extends Error {
+  readonly code = "INVUI_WINDOW_OPEN_RENDER_LIMIT";
+  readonly passes: number;
+
+  constructor(passes: number) {
+    super(
+      `InvUI: rendering did not settle after ${passes} passes while opening; the Window is closing.`,
+    );
+    this.name = "WindowOpenRenderLimitError";
+    this.passes = passes;
+  }
+}
+
+/**
  * The boundary between Window and the Bedrock screen API.
  *
  * `canOpenScreens` must be true only for an isolated test adapter. It is the
@@ -286,6 +306,20 @@ function schemaNodeOf(gui: Gui, ancestors: readonly Gui[]): unknown {
  * the documented chest layout (design 4).
  */
 const PHYSICAL_COLUMNS = 9;
+
+/**
+ * Maximum render passes `open()` performs before it refuses to keep chasing
+ * changes. A normal open settles in one pass; the extra headroom covers a
+ * provider or listener that changes state a finite number of times while the
+ * screen is being prepared.
+ *
+ * ponytail: a fixed pass count is a blunt ceiling: a legitimately slow but
+ * finite caller (for example one deferred state write per tick) that needs more
+ * than this many passes fails instead of opening. Raise the constant, or
+ * replace the count with a time budget or a state-version comparison, if such
+ * an opening flow ever becomes real.
+ */
+export const MAX_OPEN_RENDER_PASSES = 100;
 
 function containerSizeOf(layout: ResolvedGuiLayout): number {
   return layout.height * PHYSICAL_COLUMNS;
@@ -587,7 +621,14 @@ export class Window {
       let container = createContainer(size);
       this.#container = container;
 
+      let passes = 0;
       while (true) {
+        // A state or GUI change on every pass must not retry forever: bound the
+        // loop and fail closed through the normal open error path below.
+        if (passes >= MAX_OPEN_RENDER_PASSES) {
+          throw new WindowOpenRenderLimitError(passes);
+        }
+        passes += 1;
         // Any state or GUI change after this point makes the pass stale;
         // re-resolve and render again until the rendered inputs are current.
         this.#refreshPending = false;
