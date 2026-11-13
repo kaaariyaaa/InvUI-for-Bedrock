@@ -65,7 +65,7 @@
 
 ### 3.1 Dedicated Server (BDS) に配置する
 
-> 安定版の BDS では `VirtualContainer` が存在せず、このプローブは動作しません。`2.13.0-beta` のモジュールを含む Preview/Beta 系の BDS と、Beta APIs を有効にしたワールドが必要です。
+> 安定版の BDS では `VirtualContainer` が存在せず、このプローブは動作しません。`VirtualContainer` が追加された Preview/Beta 26.70.24 以降に対応する BDS と、Beta APIs を有効にしたワールドが必要です。`2.13.0-beta` のモジュールがあるだけでは十分ではありません。
 
 ```text
 <BDS>/

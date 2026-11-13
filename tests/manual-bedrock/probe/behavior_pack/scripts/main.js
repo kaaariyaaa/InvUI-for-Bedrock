@@ -110,7 +110,7 @@ function requireManager(player) {
   if (!world.virtualContainerManager) {
     reply(
       player,
-      "world.virtualContainerManager がありません。Beta/Experimental API と @minecraft/server 2.13.0-beta が有効か確認してください。",
+      "world.virtualContainerManager がありません。Beta/Experimental API と VirtualContainer 対応の Preview/Beta 26.70.24 以降を確認してください。",
     );
     return undefined;
   }
@@ -748,7 +748,7 @@ world.afterEvents.chatSend.subscribe((event) => {
 
 if (!world.virtualContainerManager) {
   log(
-    "world.virtualContainerManager が見つかりません。Beta/Experimental API と @minecraft/server 2.13.0-beta を確認してください。",
+    "world.virtualContainerManager が見つかりません。Beta/Experimental API と VirtualContainer 対応の Preview/Beta 26.70.24 以降を確認してください。",
   );
 } else {
   log("読み込み完了。使い捨てワールドで `!invui help` を実行してください。");
