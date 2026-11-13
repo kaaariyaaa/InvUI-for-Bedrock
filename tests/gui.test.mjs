@@ -70,6 +70,38 @@ test("declarative options and builder produce the same normalized layout", () =>
   assert.deepEqual(normalFromOptions.resolve(), normalFromBuilder.resolve());
 });
 
+test("PagedGui.itemsBuilder() normalizes like Gui.paged()", () => {
+  const background = item("bg");
+  const structure = new Structure("###", "#x#", "###");
+  const content = [item("a"), item("b"), item("c"), item("d")];
+
+  const fromItemsBuilder = PagedGui
+    .itemsBuilder()
+    .setStructure(structure)
+    .addIngredient("#", background)
+    .addIngredient("x", H)
+    .setContent(content)
+    .build();
+
+  const fromOptions = Gui.paged({
+    structure: new Structure("###", "#x#", "###"),
+    ingredients: { "#": background, x: H },
+    content,
+  });
+
+  assert.ok(fromItemsBuilder instanceof PagedGui);
+  assert.equal(fromItemsBuilder.kind, "paged");
+  assert.deepEqual(fromItemsBuilder.resolve(null, { page: 1 }), fromOptions.resolve(null, { page: 1 }));
+  assert.deepEqual(fromItemsBuilder.resolve(null, { page: 99 }), fromOptions.resolve(null, { page: 99 }));
+
+  // Builder input is normalized at build time: later source mutations do not leak in.
+  structure.addIngredient("#", item("late"));
+  content.push(item("late"));
+  assert.deepEqual(fromItemsBuilder.resolve(null, { page: 0 }), fromOptions.resolve(null, { page: 0 }));
+
+  assert.throws(() => PagedGui.itemsBuilder().build(), /Structure is required/);
+});
+
 test("content list horizontal marker is row-major", () => {
   const content = ["a", "b", "c", "d", "e"].map(item);
   const gui = Gui.normal({
@@ -384,4 +416,206 @@ test("spaces are ordinary characters; unmapped spaces are empty slots", () => {
 test("unknown string ingredients are rejected", () => {
   const gui = Gui.normal({ structure: ["x"], ingredients: { x: "not-a-marker" } });
   assert.throws(() => gui.resolve(), /Unknown ingredient/);
+});
+
+test("Gui.setContent snapshots, validates, and notifies only on change", () => {
+  const gui = Gui.paged({ structure: ["xx"], ingredients: { x: H }, content: [item("a")] });
+  let notified = 0;
+  const unsubscribe = gui.subscribe(() => {
+    notified += 1;
+  });
+
+  const next = [item("b"), item("c"), item("d")];
+  assert.equal(gui.setContent(next), gui);
+  next.push(item("late"));
+  const layout = gui.resolve(null, { page: 0 });
+  assert.deepEqual(ids(layout), ["b", "c"]);
+  assert.equal(layout.pageCount, 2);
+  assert.equal(notified, 1);
+
+  const same = [item("x"), item("y")];
+  gui.setContent(same);
+  assert.equal(notified, 2);
+  gui.setContent(same);
+  assert.equal(notified, 2);
+
+  assert.throws(() => gui.setContent("not-an-array"), /must be an array/);
+  assert.throws(() => gui.setContent([item("ok"), null]), /only Item or InventoryLink/);
+  assert.throws(() => gui.setContent([new GuiLink(gui)]), /only Item or InventoryLink/);
+  assert.equal(notified, 2);
+  assert.deepEqual(ids(gui.resolve()), ["x", "y"]);
+
+  unsubscribe();
+  unsubscribe();
+  gui.setContent([item("after")]);
+  assert.equal(notified, 2);
+});
+
+test("Gui.setIngredient and removeIngredient update slots and notify", () => {
+  const gui = Gui.normal({ structure: ["@."], ingredients: { "@": item("a") } });
+  const layouts = [];
+  gui.subscribe(() => layouts.push(ids(gui.resolve())));
+
+  assert.equal(gui.setIngredient("@", item("b")), gui);
+  assert.deepEqual(ids(gui.resolve()), ["b", null]);
+  assert.equal(layouts.length, 1);
+
+  const current = gui._structure.getIngredient("@");
+  gui.setIngredient("@", current);
+  assert.equal(layouts.length, 1);
+
+  gui.setIngredient(".", item("dot"));
+  assert.deepEqual(ids(gui.resolve()), ["b", "dot"]);
+  assert.equal(layouts.length, 2);
+
+  assert.equal(gui.removeIngredient("."), gui);
+  assert.deepEqual(ids(gui.resolve()), ["b", null]);
+  assert.equal(layouts.length, 3);
+  gui.removeIngredient(".");
+  assert.equal(layouts.length, 3);
+
+  assert.throws(() => gui.setIngredient("!", "not-a-marker"), /Unknown ingredient/);
+  assert.throws(() => gui.setIngredient("ab", item("x")), /one character/);
+  assert.equal(layouts.length, 3);
+});
+
+test("Gui.setIngredient rejects marker conflicts and GuiLink cycles before mutating", () => {
+  const gui = Gui.normal({ structure: ["xy"], ingredients: { x: H } });
+  const before = ids(gui.resolve());
+  let notified = 0;
+  gui.subscribe(() => {
+    notified += 1;
+  });
+
+  assert.throws(() => gui.setIngredient("y", V), /both horizontal and vertical/);
+  assert.equal(notified, 0);
+  assert.deepEqual(ids(gui.resolve()), before);
+
+  assert.doesNotThrow(() => gui.setIngredient("x", V));
+  assert.equal(notified, 1);
+
+  const outer = Gui.normal({ structure: ["@"] });
+  const inner = Gui.normal({ structure: ["@"] });
+  outer._structure.addIngredient("@", new GuiLink(inner));
+  assert.throws(() => inner.setIngredient("@", new GuiLink(outer)), /Cyclic GUI reference/);
+  assert.equal(inner._structure.getIngredient("@"), undefined);
+
+  const tab = Gui.tab({ tabs: [Gui.normal({ structure: ["x"] })] });
+  assert.throws(() => tab.setContent([]), /TabGui does not use content/);
+  assert.throws(() => tab.setIngredient("x", item("x")), /TabGui does not use a rendered Structure/);
+  assert.throws(() => tab.removeIngredient("x"), /TabGui does not use a rendered Structure/);
+});
+
+test("Gui changes propagate through existing GuiLinks to every linked parent", () => {
+  const child = Gui.paged({
+    structure: ["x"],
+    ingredients: { x: H },
+    content: [item("c0")],
+  });
+  const parent = Gui.normal({ structure: ["@"], ingredients: { "@": new GuiLink(child) } });
+  const root = Gui.normal({ structure: ["#"], ingredients: { "#": new GuiLink(parent) } });
+
+  let parentNotified = 0;
+  let rootNotified = 0;
+  const unsubscribeParent = parent.subscribe(() => {
+    parentNotified += 1;
+  });
+  const unsubscribeRoot = root.subscribe(() => {
+    rootNotified += 1;
+  });
+
+  child.setContent([item("c1")]);
+  assert.equal(ids(parent.resolve())[0], "c1");
+  assert.equal(ids(root.resolve())[0], "c1");
+  assert.equal(parentNotified, 1);
+  assert.equal(rootNotified, 1);
+
+  child.setIngredient("x", item("static"));
+  assert.equal(ids(parent.resolve())[0], "static");
+  assert.equal(parentNotified, 2);
+  assert.equal(rootNotified, 2);
+
+  unsubscribeParent();
+  child.setContent([item("c2")]);
+  assert.equal(parentNotified, 2);
+  assert.equal(rootNotified, 3);
+
+  unsubscribeRoot();
+  child.setContent([item("c3")]);
+  assert.equal(parentNotified, 2);
+  assert.equal(rootNotified, 3);
+});
+
+test("retargeting a GuiLink subscribes to the new child and drops the old one", () => {
+  const a = Gui.normal({ structure: ["a"], ingredients: { a: item("a") } });
+  const b = Gui.normal({ structure: ["b"], ingredients: { b: item("b") } });
+  const parent = Gui.normal({ structure: ["@"], ingredients: { "@": new GuiLink(a) } });
+  let notified = 0;
+  parent.subscribe(() => {
+    notified += 1;
+  });
+
+  a.setContent([item("a2")]);
+  assert.equal(notified, 1);
+
+  parent.setIngredient("@", new GuiLink(b));
+  assert.equal(notified, 2);
+  assert.equal(ids(parent.resolve())[0], "b");
+
+  a.setContent([item("a3")]);
+  assert.equal(notified, 2);
+  b.setContent([item("b2")]);
+  assert.equal(notified, 3);
+});
+
+test("TabGui notifies when a tab GUI changes", () => {
+  const tab = Gui.normal({ structure: ["x"], ingredients: { x: item("t0") } });
+  const tabs = Gui.tab({ tabs: [tab] });
+  let notified = 0;
+  tabs.subscribe(() => {
+    notified += 1;
+  });
+
+  tab.setIngredient("x", item("t1"));
+  assert.equal(notified, 1);
+  assert.equal(ids(tabs.resolve())[0], "t1");
+});
+
+test("GuiLink cycles cannot loop change notifications", () => {
+  const a = Gui.normal({ structure: ["@"] });
+  const b = Gui.normal({ structure: ["@"] });
+  a._structure.addIngredient("@", new GuiLink(b));
+  b._structure.addIngredient("@", new GuiLink(a));
+
+  let notified = 0;
+  const unsubscribe = a.subscribe(() => {
+    notified += 1;
+  });
+  a.setContent([item("a")]);
+  assert.equal(notified, 1);
+  b.setContent([item("b")]);
+  assert.equal(notified, 2);
+  unsubscribe();
+  assert.throws(() => a.resolve(), /Cyclic GUI reference/);
+});
+
+test("a failing Gui listener does not block other listeners or the setter", () => {
+  const gui = Gui.normal({ structure: ["x"], ingredients: { x: item("a") } });
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    let received = 0;
+    gui.subscribe(() => {
+      throw new Error("listener boom");
+    });
+    gui.subscribe(() => {
+      received += 1;
+    });
+    assert.doesNotThrow(() => gui.setContent([item("b")]));
+    assert.equal(received, 1);
+    assert.equal(errors.length, 1);
+  } finally {
+    console.error = original;
+  }
 });

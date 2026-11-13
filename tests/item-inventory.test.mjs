@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { registerHooks } from "node:module";
+import { fileURLToPath } from "node:url";
 
 // Minimal @minecraft/server stand-in. Real integration tests can replace this.
 const mockSource = `
@@ -24,6 +26,21 @@ export class ItemStack {
     this.lore = [...lines];
   }
 }
+
+// Fake game clock: item periodic updates call system.runInterval. Tests
+// advance ticks manually through the returned runs.
+export const system = {
+  runs: new Map(),
+  nextRunId: 1,
+  runInterval(callback, ticks = 1) {
+    const runId = this.nextRunId++;
+    this.runs.set(runId, { callback, ticks });
+    return runId;
+  },
+  clearRun(runId) {
+    this.runs.delete(runId);
+  },
+};
 `;
 
 const mockUrl = `data:text/javascript;base64,${Buffer.from(mockSource).toString("base64")}`;
@@ -33,9 +50,25 @@ registerHooks({
     if (specifier === "@minecraft/server") {
       return { url: mockUrl, shortCircuit: true };
     }
+    // Match window.test.mjs: allow src TS imports of "./periodic.js" before build.
+    if (
+      specifier.endsWith(".js") &&
+      context.parentURL?.startsWith("file:") &&
+      context.parentURL.includes("/src/")
+    ) {
+      const target = new URL(specifier, context.parentURL);
+      if (!existsSync(fileURLToPath(target))) {
+        return {
+          url: new URL(specifier.replace(/\.js$/, ".ts"), context.parentURL).href,
+          shortCircuit: true,
+        };
+      }
+    }
     return nextResolve(specifier, context);
   },
 });
+
+const { system } = await import(mockUrl);
 
 // Prefer built .js (ESM output) but fall back to TS so tests run before build.
 async function load(base) {
@@ -139,6 +172,62 @@ test("updatePeriodically validates and stores the tick period", () => {
   assert.equal(item.getUpdatePeriod(), 20);
   assert.throws(() => Item.builder().updatePeriodically(0), RangeError);
   assert.throws(() => item.updatePeriodically(-1), RangeError);
+});
+
+test.afterEach(() => {
+  system.runs.clear();
+});
+
+function fireTick() {
+  for (const run of [...system.runs.values()]) {
+    run.callback();
+  }
+}
+
+test("updatePeriodically ticks only while displayed", () => {
+  let count = 0;
+  const item = Item.builder().updatePeriodically(20).build();
+
+  assert.equal(system.runs.size, 0, "no timer before a Window displays the Item");
+
+  const displayed = item.subscribe(() => count++);
+  assert.equal(system.runs.size, 1);
+  assert.equal([...system.runs.values()][0].ticks, 20);
+
+  fireTick();
+  assert.equal(count, 1, "one notification per displayed subscriber");
+
+  item.notifyWindows();
+  assert.equal(count, 2);
+
+  // A second Window reuses the same interval instead of scheduling another.
+  const secondWindow = item.subscribe(() => count++);
+  assert.equal(system.runs.size, 1);
+
+  displayed();
+  assert.equal(system.runs.size, 1, "still displayed elsewhere");
+
+  secondWindow();
+  assert.equal(system.runs.size, 0, "hidden Item stops periodic updates");
+  fireTick();
+  assert.equal(count, 2);
+});
+
+test("resubscribing restarts periodic updates and period changes take effect", () => {
+  let count = 0;
+  const item = Item.builder().updatePeriodically(10).build();
+  const unsubscribe = item.subscribe(() => count++);
+  assert.equal([...system.runs.values()][0].ticks, 10);
+
+  item.updatePeriodically(40);
+  assert.equal(system.runs.size, 1);
+  assert.equal([...system.runs.values()][0].ticks, 40);
+
+  unsubscribe();
+  assert.equal(system.runs.size, 0);
+
+  item.subscribe(() => count++);
+  assert.equal(system.runs.size, 1);
 });
 
 test("Item.EMPTY resolves to no stack", async () => {

@@ -1,5 +1,6 @@
 import { ItemStack } from "@minecraft/server";
 import type { Player } from "@minecraft/server";
+import { minecraftPeriodicScheduler } from "./periodic.js";
 
 /**
  * Context handed to an Item click handler. The Window/EventRouter owns
@@ -186,6 +187,8 @@ export class Item {
   private updateListeners = new Set<ItemUpdateListener>();
   private updateAfterClick = false;
   private periodTicks: number | undefined;
+  /** Active interval while at least one Window displays this Item (design 11.5). */
+  private cancelPeriodic: (() => void) | undefined;
 
   constructor(provider: ItemProviderSource = () => undefined) {
     this.id = `item-${nextItemId++}`;
@@ -242,6 +245,10 @@ export class Item {
   updatePeriodically(ticks: number): this {
     assertTicks(ticks);
     this.periodTicks = ticks;
+    if (this.cancelPeriodic !== undefined) {
+      this.stopPeriodic();
+      this.startPeriodic();
+    }
     this.notifyWindows();
     return this;
   }
@@ -250,12 +257,57 @@ export class Item {
     return this.periodTicks;
   }
 
-  /** Window/UpdateScheduler registration point. */
+  /**
+   * Window/UpdateScheduler registration point. The first subscriber (a Window
+   * that displays the Item) starts periodic updates; the last one stops them,
+   * so hidden Items never tick (design 6.3 / 11.5).
+   */
   subscribe(listener: ItemUpdateListener): () => void {
     this.updateListeners.add(listener);
+    if (this.updateListeners.size === 1) {
+      this.startPeriodic();
+    }
     return () => {
-      this.updateListeners.delete(listener);
+      if (!this.updateListeners.delete(listener)) {
+        return;
+      }
+      if (this.updateListeners.size === 0) {
+        this.stopPeriodic();
+      }
     };
+  }
+
+  private startPeriodic(): void {
+    if (
+      this.cancelPeriodic !== undefined ||
+      this.periodTicks === undefined ||
+      this.updateListeners.size === 0
+    ) {
+      return;
+    }
+    // ponytail: one interval per Item; a Window refresh unsubscribes and
+    // resubscribes, resetting the phase. Add per-slot scheduling only if a
+    // refresh-heavy GUI measurably starves periodic updates.
+    try {
+      this.cancelPeriodic = minecraftPeriodicScheduler.schedule(
+        () => this.notifyWindows(),
+        this.periodTicks,
+      );
+    } catch (error) {
+      // A failed timer must not break the Window that is merely displaying the
+      // Item; the Item keeps rendering on explicit updates.
+      console.error("InvUI: Item periodic update could not be scheduled.", error);
+    }
+  }
+
+  private stopPeriodic(): void {
+    const cancel = this.cancelPeriodic;
+    this.cancelPeriodic = undefined;
+    try {
+      cancel?.();
+    } catch (error) {
+      console.error("InvUI: Item periodic update could not be cancelled.", error);
+    }
   }
 
   notifyWindows(): void {
