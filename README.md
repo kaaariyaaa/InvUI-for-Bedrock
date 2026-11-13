@@ -6,7 +6,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 > **ベータ / 実機未検証**
 >
 > - バージョンは `0.1.0-beta.1`。**npm には未公開**です。`npm install invui-bedrock` はまだ使えません。
-> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は既定ではすべて拒否され、実機ライフサイクル（close・死亡・退出・shutdown）と入力ブリッジは未実装です。クリック通知、アイテム保護、JSON UI 連携、`InventoryLink` のアイテム移動も未実装または未検証です。
+> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は既定ではすべて拒否され、実機ライフサイクル（close・死亡・退出・shutdown）と入力ブリッジは未実装です。クリック通知、アイテム保護、JSON UI 連携、`InventoryLink` のアイテム移動も未実装または未検証です。`WindowContainerAdapter` には close / itemChange の任意購読フック（`subscribeClose` / `subscribeItemChange`）がありますが、これは Node.js のテスト用モック向けに追加されたもので、既定の `minecraftVirtualContainerAdapter` は購読を実装しておらず、実機イベントとは接続していません。
 > - **`Window.open()` は既定で拒否されますが、これは強制された安全境界ではありません。** 画面のアイテム保護とクリック処理が実機未検証のため、実アダプタ（`minecraftVirtualContainerAdapter`）は `canOpenScreens = false` を返し、`open()` は `WindowOpenRejectedError` を投げます。Container の作成・表示より前に拒否されます。`openContainer()` / `closeContainer()` も同じ例外を投げます。ただし公開 API の `WindowBuilder.setContainerAdapter()` に `canOpenScreens = true` を返すアダプタを渡せば、この既定拒否は迂回できます。実画面を開くと、保護未検証の表示アイテムを取り出して再描画させることで消失・複製事故につながる恐れがあります。実験は「[実機画面を開く実験は使い捨てワールドで](#実機画面を開く実験は使い捨てワールドで)」の条件でのみ行ってください。
 > - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js テスト済みです。**状態更新時の描画はスロット差分ではなく全スロット再評価、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動 migration API までで自動移行・破損復旧は未実装**です。クリック入力を実機イベントへつなぐ仕組みと JSON UI の画面接続は未実装です。`resource_pack/` には未検証の隔離テンプレートだけを同梱し、チェスト画面には接続していません。
 > - この README は、実装済みの範囲と未完成・未検証の機能を区別して記載します。未検証の機能を「完成・動作確認済み」として扱わないでください。
@@ -22,12 +22,12 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)） | GitHub Actions で `npm ci` / `npm run build` / `npm test` / `npm pack --dry-run` を実行 |
 | 実機テスト | **未実施** |
 | 実機画面の表示 | **既定では全拒否**。実アダプタは `canOpenScreens = false` で、`Window.open()` は Container 作成前に `WindowOpenRejectedError`。ただし `setContainerAdapter()` による迂回が可能（強制境界ではない） |
-| 実機ライフサイクル（close・死亡・退出・shutdown・再読み込み） | **未実装**。`virtualContainerClose` 等の実機イベントを購読していない |
+| 実機ライフサイクル（close・死亡・退出・shutdown・再読み込み） | **未実装（既定アダプタ）**。`Window` はアダプタの任意フック `subscribeClose` / `subscribeItemChange` に接続するが、これは Node.js テスト用モック向けで、既定の `minecraftVirtualContainerAdapter` は購読を実装していない。`world.afterEvents.virtualContainerClose` 等の実機イベントは購読していない |
 | 入力ブリッジ | **未実装**。JSON UI の画面接続もない |
-| クリック通知・アイテム保護・JSON UI 連携 | **未実装** |
+| クリック通知・アイテム保護・JSON UI 連携 | **未実装**。itemChange 検出時の危険通知・再描画停止・close 要求は `Window` にあるが、保護でもクリック処理でもない |
 | 差分描画 | **スロット単位の差分なし**。状態更新と明示 `refresh()` は全スロットを再評価・再描画する。要素の更新通知だけが該当スロットを再描画する。理由と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照 |
 | 周期更新（`updatePeriodically()`） | **実装済み（Node.js テスト済み、実機未検証）**。Item を表示している開いた Window がある間だけ `system.runInterval()` で実行し、最後の購読解除または `close()` で停止する |
-| 永続ストアの schema migration | **手動 API のみ**。`StateManager.migrate()` で、宣言した旧 version/schema に一致するレコードだけを明示的に書き換える。`acquire()` は不一致を自動移行せず拒否する |
+| 永続ストアの schema migration | **手動 API のみ**。`StateManager.migrate()` で、宣言した旧 version/schema に一致するレコードだけを明示的に書き換える。`acquire()` は不一致を自動移行せず拒否する。migration のコールバックと書き込みの実行中は、同一 identity の `acquire()` / `migrate()` を `LIVE_STATE` で拒否する |
 | 永続ストアの破損復旧 | **未実装**。壊れた JSON や不正な `guiState` は `StateCorruptionError` で失敗し、レコードを退避・削除・復旧しない |
 | Bedrock 用 `StateStore` | **実装済み（Node.js テスト済み、実機未検証）**。`BedrockWorldStateStore` がワールドの動的プロパティに保存する。非文字列、識別子の長さ超過、UTF-8 換算の値サイズ超過を保存前に拒否する |
 | `InventoryLink` のアイテム移動 | **無効固定**。`moveTo()` は常に `InventoryLinkMoveRejectedError` を投げる |
@@ -50,14 +50,14 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 - **アイテム**: `Item`、`ItemBuilder`、`Item.simple()`、`Item.builder()`、クリックハンドラーの登録と呼び出し順序。`updatePeriodically(ticks)` は、その Item を表示している開いた Window が 1 つ以上ある間だけ `system.runInterval()` に登録し、最後の Window が閉じるか購読を解除すると `clearRun()` で停止します。1 Item につき 1 インターバルで、再購読すると周期の位相はリセットされます。スケジューラの登録失敗は `console.error` に記録され、Item は明示更新では引き続き描画されます。クリックを実機イベントから届ける仕組み（InputBridge / JSON UI）は未実装です。
 - **インベントリ**: メモリ上の `VirtualInventory`（`Inventory` インターフェース実装）。`InventoryLink` はリンク先スロットの読み書きと購読のみ提供し、**別インベントリへの移動は実装していません**。
 - **状態**: `StateManager`。`player` / `shared` のスコープ、`window` / `session` / `persistent` の保存期間、スキーマ不一致の拒否。永続化には注入した `StateStore` が必要です。**`StateManager.migrate()` による明示的な移行は実装済み**ですが、`acquire()` が旧 version/schema を自動変換することはありません。破損レコードの退避・復旧と `StateManager` からの削除は未実装で、破損時は `StateCorruptionError` を投げてレコードを残します。Bedrock 用には `BedrockWorldStateStore`（ワールドの動的プロパティを使用）を公開しています。
-- **Window**: `Window.builder()` の設定、状態の取得・更新、`close()`、クリックのルーティング（`Window.handleClick()`）まで。状態更新・GUI 変更・明示 `refresh()` は全スロットを再評価して描画し、要素の更新通知だけが該当スロットを再描画します。**画面を開く経路は未検証のため既定で拒否されます。** また、`virtualContainerClose` などの実機イベントは購読しておらず、`close(reason)` の `reason` は呼び出し側が渡す値です。死亡・退出・shutdown・スクリプト再読み込み時の後始末や再オープンは実装していません。
+- **Window**: `Window.builder()` の設定、状態の取得・更新、`close()`、クリックのルーティング（`Window.handleClick()`）まで。状態更新・GUI 変更・明示 `refresh()` は全スロットを再評価して描画し、要素の更新通知だけが該当スロットを再描画します。**画面を開く経路は未検証のため既定で拒否されます。** アダプタが任意フック `subscribeClose` / `subscribeItemChange` を実装していれば、`Window` は open 前に購読し、close イベントを close ハンドラーへ、itemChange を `WindowItemChangeDangerError` の通知・再描画停止・`close()` 要求として扱います。ただしこれは Node.js モック向けの接続で、既定の `minecraftVirtualContainerAdapter` は購読を実装しておらず、`close(reason)` の `reason` は呼び出し側が渡す値です。itemChange はクリックではなく、変更されたアイテムを復元する保護でもありません。死亡・退出・shutdown・スクリプト再読み込み時の後始末や再オープンは実装していません。GUI の構造変更（種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI）で state schema が合わなくなった場合、`Window` はエラーハンドラーへ `WindowStateSchemaChangedError`（`INVUI_STATE_SCHEMA_CHANGED`）を報告し、再描画を停止して close します。同じ通知中に走った `setState()` は同じエラーで拒否され、以後の `setState()` は開いていない Window として失敗します。内容変更（`setContent`）は schema を変えないため、通常どおり描画だけ更新します。close が実機で成功するかは未検証です。
 
 ## コアの未完成点（実コードで確認）
 
 「コア実装済み」は実機非依存の計算・状態遷移までを指します。次の項目は未完成、または実装済みでも制約・実機未検証が残ります。
 
 - **実機画面**: 実アダプタは `canOpenScreens = false` を返すため、`Window.open()` は状態取得・Container 作成より前に `WindowOpenRejectedError` で失敗します。`openContainer()` / `closeContainer()` も例外を投げます。既定の経路で実機画面は表示されませんが、`setContainerAdapter()` に任意のアダプタを渡せるため、これは強制された安全境界ではありません。
-- **実機ライフサイクル**: `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` / `system.beforeEvents.shutdown` などを購読していません。`Window` の `status` 遷移、状態ハンドルの解放、`close()` の明示呼び出しはありますが、ゲーム側の close・死亡・退出・shutdown・再読み込みに接続していません。
+- **実機ライフサイクル**: `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` / `system.beforeEvents.shutdown` などを購読していません。`WindowContainerAdapter` の任意フック `subscribeClose` / `subscribeItemChange` には `Window` が接続しますが、これは Node.js テスト用モックで経路を確認するためのもので、既定の `minecraftVirtualContainerAdapter` はフックを実装していません。`Window` の `status` 遷移、状態ハンドルの解放、`close()` の明示呼び出しはありますが、ゲーム側の close・死亡・退出・shutdown・再読み込みに接続していません。
 - **入力**: `Window.handleClick(slot)` は呼び出し側が論理スロットを直接渡す API です。Bedrock のイベントからスロットを特定して呼ぶ経路（InputBridge / JSON UI / `button.send`）はなく、左右・Shift・ダブルクリックの区別もありません。
 - **差分描画**: 状態更新と明示 `refresh()` は、要素参照が変わっていなくても全スロットの provider を再評価して `setItem()` します。Item の provider が状態に依存して同じ Item でも別の表示を返す場合があること、Bedrock の `ItemStack` を全 component まで比較して同値判定することを避けたためです。要素の更新通知だけが該当スロットを再描画します。詳細と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照してください。レイアウトサイズが変わった場合、表示中の Window は再オープンが必要で、`refresh()` はエラーを報告するだけです。
 - **周期更新**: `Item.updatePeriodically()` は実装済みですが、実機未検証です。Bedrock の `system.runInterval()` に接続するのは、その Item を表示している開いた Window がある間だけで、Window を開く前や最後の Window を閉じた後は実行されません。1 Item につき 1 インターバルで、購読の張り替えで周期の位相がリセットされます。スケジューラの登録に失敗した場合は `console.error` に記録され、自動の再試行はありません。
@@ -104,13 +104,14 @@ states.migrate(
 - 注入した `StateStore` が必要です。対象は永続化済みレコードだけで、存在しなければ `MISSING_STATE` で失敗します。
 - `fromVersion` / `fromSchema` / `schema` は必須です。`fromVersion` と `fromSchema` は保存済みレコードの version/schema と完全一致しなければ `VERSION_MISMATCH` / `SCHEMA_MISMATCH` で拒否され、`schema` は移行後のレコードに記録されます。すでに現在の version/schema と同じ組み合わせは「移行不要」として拒否されます。`fromSchema: null` は schema を持たない古い形式を表します。
 - `acquire()` の前、または同じ identity のハンドルをすべて `release()` した後に呼びます。表示中の状態や、`persistent` 以外で登録中の identity は `LIVE_STATE` で拒否されます。
+- **migration 実行中の同一 identity は再入できません。** コールバックとストア書き込みの間、その identity の `acquire()` と `migrate()` は `LIVE_STATE` の `StateConflictError` で失敗します。他の identity は影響を受けません。コールバックが例外を投げてもロックは解放されます。
 - コールバックにはデコード済みの旧レコードがそのまま渡されます。戻り値は現在の `GuiState` として検証・複製され、`STATE_STORAGE_VERSION` と指定した schema で上書き保存されます。
 - コールバックまたは検証が失敗した場合、`StateManager` はストアに書き込みません。ストア書き込みの失敗時はロールバックされず、結果はストアの実装に依存します（次項参照）。失敗前に解放済みのメモリ上の entry は破棄されるため、次回の `acquire()` はストアから読み直します。壊れた JSON はコールバックに渡さず `StateCorruptionError` で失敗します。
 - **注入した外部 `StateStore` の失敗時の状態は、その実装の原子性に依存します。** `StateManager` は 1 レコードにつき `setItem()` を 1 回だけ呼び、失敗したときに再試行・ロールバック・部分書き込みの検出を行いません。したがって、`setItem()` が途中で失敗して値を部分的に残すストア実装では、**部分的な書き込みが残る可能性があります**。`BedrockWorldStateStore` は 1 つの動的プロパティへの単一 `setDynamicProperty()` 呼び出しですが、エンジン側で失敗したときに書き込みが残らないかは実機未検証です。
 - 自動移行は行いません。`acquire()` は version/schema 不一致を `StateConflictError` で拒否します。レコードの退避・復旧・削除を行う API はありません（`StateStore.removeItem()` はありますが、`StateManager` は呼びません）。
-- Window の state schema は GUI 種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI を再帰的に含む JSON 文字列から作る識別子です。古い schema token のレコードは自動変換されず、移行する場合は `fromSchema` にその文字列を指定します。
-- `BedrockWorldStateStore` は、キーを固定幅の `%XXXX` 形式でエンコードした動的プロパティ識別子を使います。識別子は 1024 文字、値は UTF-8 換算で 32,767 バイトを既定の上限として、書き込み前に拒否します（`maxIdentifierLength` / `maxValueLength` で変更可）。32,767 はコミュニティ情報に基づくローカルガードで、エンジンの実上限は未検証です。文字列以外の保存値も拒否します。
-- **以前の可変幅パーセントエンコードで保存した動的プロパティは、このエンコーダでは読みません。** 現在の識別子が存在せず、旧エンコードの識別子に値がある場合、`LEGACY_IDENTIFIER_CONFLICT` で失敗し、旧エンコード側の値は返さず、どちらのプロパティも変更しません。旧エンコードは単射ではなく別キーの値と衝突し得るため、値をこのキーに帰属できません。手動で調査・移行してください。
+- Window の state schema は GUI 種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI を再帰的に含む JSON 文字列から作る識別子です。Window を開いた後にこの構造が変わると、その Window は `WindowStateSchemaChangedError` を報告して close し、古い schema で新しい状態を保存しません。古い schema token のレコードは自動変換されず、移行する場合は `fromSchema` にその文字列を指定します。
+- `BedrockWorldStateStore` は、キーを `%:` の世代 prefix に続けて固定幅の `%XXXX` 形式でエンコードした動的プロパティ識別子を使います（安全な ASCII はそのまま、それ以外は 1 UTF-16 コード単位 = `%` + 16 進4桁）。`%:` は旧エンコーダが生成しないため、新旧の識別子空間は分離されます。識別子は 1024 文字、値は UTF-8 換算で 32,767 バイトを既定の上限として、書き込み前に拒否します（`maxIdentifierLength` / `maxValueLength` で変更可）。32,767 はコミュニティ情報に基づくローカルガードで、エンジンの実上限は未検証です。文字列以外の保存値も拒否します。
+- **以前の可変幅パーセントエンコード（例 `%E9`）で保存した動的プロパティは、このエンコーダでは読みません。** 現在の識別子が存在せず、旧エンコードの識別子に値がある場合、`LEGACY_IDENTIFIER_CONFLICT` で失敗し、旧エンコード側の値は返さず、どちらのプロパティも変更しません。旧エンコードは単射ではなく別キーの値と衝突し得るため、値をこのキーに帰属できません。手動で調査・移行してください。
 
 ## 必要環境
 
@@ -155,13 +156,13 @@ npx esbuild src/main.ts \
 ```
 
 - `manifest.json` の依存バージョンは、実際に確認したゲーム版・`@minecraft/server` 版に合わせてください。
-- `npm test` は `@minecraft/server` をテスト内の最小モック（`ItemStack`、`world.virtualContainerManager.create` など）に差し替えます。モックは実機の挙動を再現しないため、テストが通っても実機の画面表示・入力・アイテム保護の検証にはなりません。
+- `npm test` は `@minecraft/server` をテスト内の最小モック（`ItemStack`、`world.virtualContainerManager.create` など）に差し替えます。モックは実機の挙動を再現しないため、テストが通っても実機の画面表示・入力・アイテム保護の検証にはなりません。close / itemChange の購読も同じモック上での確認に限られます。
 - `npm test` に実機テストは含まれません。クリック・アイテム保護・JSON UI の検証は [tests/manual-bedrock/](tests/manual-bedrock/README.md) の手順で行います。
 - phase0 の `VirtualContainer` プローブは静的検査だけが `npm test` に含まれます。実機での表示・close reason・itemChange の確認手順は [tests/manual-bedrock/probe/README.md](tests/manual-bedrock/probe/README.md) を参照してください。
 
 ## CLI（配布補助・静的検査＋任意のプローブ導入）
 
-`init` は**既定では Behavior Pack / Resource Pack を変更しません**。`--install-resource-pack` で未検証の隔離プローブ `ui/invui.json` を既存 Resource Pack に追加できます。`generate-resource-pack` は新規ディレクトリに単体の実験用パックを生成します。いずれもチェスト画面への接続は行いません。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
+`init` は**既存パックを対象にした検査コマンド**で、既定では Behavior Pack / Resource Pack を変更しません。`--install-resource-pack` を明示した場合だけ、未検証の隔離プローブ `ui/invui.json` を既存 Resource Pack に追加します。`generate-resource-pack` は既存パックを対象にせず、`--output` で指定した**まだ存在しないディレクトリ**へ、同梱テンプレートから独立した実験用 Resource Pack を新規生成します（`init` とは別コマンドで、`init` 用オプションは受け付けません）。いずれもチェスト画面への接続は行いません。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
 
 ```bash
 # 既定: 読み取り専用の静的検査
@@ -182,14 +183,17 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 | 指定 | 内容 |
 |---|---|
-| `init` | Behavior Pack / Resource Pack を静的に検査し、手動で必要な作業を表示する。既定では書き込まない |
-| `generate-resource-pack --output <dir>` | 新しい出力先に manifest と登録済み UI プローブを生成する。既存パスは拒否し、UUID は毎回生成する |
-| `--behavior-pack <dir>` | Behavior Pack のルート。`--install-resource-pack` 指定時は省略可 |
-| `--resource-pack <dir>` | Resource Pack のルート。必須 |
-| `--install-resource-pack` | 未検証プローブ `ui/invui.json` を追加する（明示時のみ） |
+| `init` | 既存の Behavior Pack / Resource Pack を静的に検査し、手動で必要な作業を表示する。既定では書き込まない |
+| `generate-resource-pack --output <dir>` | 既存パックを変更せず、新しい出力先へ `manifest.json`・`ui/_ui_defs.json`・`ui/invui.json` の3ファイルを生成する。UUID（`header` と各 module）は生成のたびに作り直す |
+| `--behavior-pack <dir>` | `init` 用。Behavior Pack のルート。`--install-resource-pack` 指定時は省略可 |
+| `--resource-pack <dir>` | `init` 用。Resource Pack のルート。必須 |
+| `--install-resource-pack` | `init` 用。未検証プローブ `ui/invui.json` を追加する（明示時のみ）。既存ファイルは上書きせず、内容が異なる場合は競合として中断する |
+| `--output <dir>` | `generate-resource-pack` 専用・必須。既存パス、既存パス上のファイル、シンボリックリンク、ファイルシステムのルートは拒否し、上書きしない。`init` に指定すると引数エラー |
 | `--json` | 検査結果と導入結果を JSON として標準出力へ出す |
 | `-h`, `--help` | 使い方を表示する |
 | `-v`, `--version` | バージョンを表示する |
+
+`generate-resource-pack` は `--behavior-pack` / `--resource-pack` / `--install-resource-pack` を受け付けません（指定すると引数エラー）。`--output` 先が既に存在する場合も、既存のファイルとディレクトリは一切変更せず、生成しません。生成中に失敗した場合は、この CLI がその実行で作成したファイルとディレクトリだけを削除し、他プロセスが置いたファイルは消しません。
 
 `check` は設計書にある将来案であり、まだ仕様確定していません。CLI が受け付けるコマンドは `init` と `generate-resource-pack` です。`--install-resource-pack` を指定しない `init` は静的検査だけを行います。
 
@@ -210,10 +214,11 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 ### CLI が行わないこと
 
-- **既存画面へ JSON UI をマージ・接続しない。** `generate-resource-pack` は未接続のテンプレートをコピーし、`--install-resource-pack` で追加するのは隔離プローブ 1 ファイルだけです。
+- **既存画面へ JSON UI をマージ・接続しない。** `generate-resource-pack` は未接続のテンプレートから独立したパックを作り、`--install-resource-pack` で追加するのは隔離プローブ 1 ファイルだけです。
+- **`generate-resource-pack` は既存のパックやパスを変更しない。** 出力先が存在する場合は生成自体を行わず、既存のファイル・ディレクトリ・シンボリックリンクに触れません。生成するのは `manifest.json` / `ui/_ui_defs.json` / `ui/invui.json` の3ファイルだけです。
 - **既存の `chest_screen.json` を上書きしない。** 競合を検出した場合は報告だけ行います。
-- **`_ui_defs.json` を変更しない。** 参照追加は手動マージの対象です。
-- **`manifest.json` を変更せず、Behavior Pack へも書き込まない。**
+- **既存の `_ui_defs.json` を変更しない。** 導入時の参照追加は手動マージの対象です（`generate-resource-pack` は新しいパック内に自身の `_ui_defs.json` を作ります）。
+- **既存の `manifest.json` を変更せず、Behavior Pack へも書き込まない。**
 - **バックアップや復元を自動化しない。** UI を手動マージする場合は、利用者がバックアップを取ってください。
 
 ### 終了コード
@@ -230,6 +235,7 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 - 手順と安全上の注意: [tests/manual-bedrock/README.md](tests/manual-bedrock/README.md)
 - 合否チェックリスト: [tests/manual-bedrock/CHECKLIST.md](tests/manual-bedrock/CHECKLIST.md)
 - phase0 の最小プローブ（`VirtualContainer` の表示・close reason・itemChange）: [tests/manual-bedrock/probe/README.md](tests/manual-bedrock/probe/README.md)
+- `VirtualContainer` が chest 画面を使うかのマーカープローブ（単体 RP・ラベルのみ）: [tests/manual-bedrock/chest-resource-pack/README.md](tests/manual-bedrock/chest-resource-pack/README.md)
 - `data_driven_container` 画面の判定プローブ: [tests/manual-bedrock/data-driven-resource-pack/README.md](tests/manual-bedrock/data-driven-resource-pack/README.md)
 
 CLI の安全側の動作は、次のコマンドで自動確認できます（`npm test` にも含まれます）。
@@ -245,6 +251,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 | 機能 | 現状 | 扱い |
 |---|---|---|
 | `Window.open()` による画面表示 | 実装は既定拒否・実機未検証 | 既定の実アダプタでは常に `WindowOpenRejectedError`。ただし `setContainerAdapter()` で迂回でき、強制境界ではない |
+| close / itemChange のアダプタ購読 | `Window` 側の接続は Node.js モックでテスト済み。既定アダプタは未実装・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない |
 | クリック通知（`button.send` → チャット候補を含む） | ライブラリ実装なし。RP には未接続の試験部品のみ・実機未検証 | 安全に利用不可。有効な機能として案内しない |
 | 表示専用・ボタン用スロットのアイテム保護 | 実装なし・実機未検証 | 安全に利用不可。アイテム移動を許可しない |
 | JSON UI による入力抑制・画面識別 | 未検証の隔離プローブのみ・実機未検証 | チェスト画面へ未接続。通常チェストへの影響も未確認 |
@@ -257,6 +264,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 - **既定拒否は強制された安全境界ではありません。** 実アダプタの `canOpenScreens = false` と `WindowOpenRejectedError` は、呼び出し側を拘束するサンドボックスではありません。公開 API の `WindowBuilder.setContainerAdapter()` は任意の `WindowContainerAdapter` を受け付けます。`canOpenScreens = true` を返し、`world.virtualContainerManager.create()` と実画面の open を包んだアダプタを渡せば、`Window.open()` は実画面を表示します。
 - **消失・複製事故の恐れがあります。** 実画面では表示専用・ボタン用スロットのアイテム保護が未実装・未検証です。プレイヤーが保護未検証の表示アイテムを取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。クリック通知も未検証のため、入力の取りこぼし・遅延入力・意図しないスロットへの適用も保証できません。
+- **itemChange を検出しても保護はされません。** アダプタが `subscribeItemChange` を実装してイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。これはクリック通知ではなく、変更されたスロットを元のアイテムへ戻す保護でもありません。close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。既定の `minecraftVirtualContainerAdapter` はこのフックを実装しておらず、`open()` も拒否したままなので、既定のままではこの経路自体が動きません。
 - **実験は使い捨てのテスト用ワールドだけで行ってください。** 進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
 
 ## Resource Pack テンプレート（実験用・未検証）
@@ -329,6 +337,7 @@ InvUI-for-Bedrock/
 │       │   ├── README.md
 │       │   ├── probe.test.mjs
 │       │   └── behavior_pack/
+│       ├── chest-resource-pack/  # VirtualContainer が chest 画面を使うかのマーカープローブ
 │       └── data-driven-resource-pack/  # data_driven_container 判定用の隔離 RP
 ├── examples/
 │   ├── README.md
