@@ -758,8 +758,13 @@ interface StateEntry {
 interface NotificationPass {
   /** Union of the fields changed by every commit in this cascade, in order. */
   changed: GuiStateField[];
-  /** Listeners that already received a commit in this cascade. */
-  delivered: Set<StateListener>;
+  /**
+   * Listeners that already received a commit in this cascade, keyed by the
+   * handle they subscribed on. Registrations are tracked separately: the same
+   * function subscribed to two handles is two subscribers, so the second one
+   * must still receive the union of the changes it missed.
+   */
+  delivered: Map<StateHandle, Set<StateListener>>;
 }
 
 /**
@@ -814,6 +819,12 @@ export class StateManager {
   readonly #store: StateStore | undefined;
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #entries = new Map<string, StateEntry>();
+  /**
+   * Identities whose migration callback is running. `acquire` and `migrate`
+   * reject these so a reentrant lease cannot resurrect a stale entry that a
+   * successful migration would then leave registered with the old schema.
+   */
+  readonly #migrating = new Set<string>();
 
   constructor(
     store?: StateStore | null,
@@ -859,6 +870,9 @@ export class StateManager {
   /**
    * Registers a Window's interest in a state identity and returns its lease.
    * The state starts from the live value, then persisted data, then `initial`.
+   *
+   * Acquiring an identity whose {@link migrate} callback is running throws a
+   * `LIVE_STATE` {@link StateConflictError}; other identities are unaffected.
    */
   acquire(options: StateAcquireOptions): StateHandle {
     const optionsInput: unknown = options;
@@ -868,6 +882,13 @@ export class StateManager {
       normalized.ownerId,
       normalized.key,
     );
+
+    if (this.#migrating.has(identity)) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated; acquire it after the migration settles`,
+      );
+    }
 
     let entry = this.#entries.get(identity);
     if (entry !== undefined) {
@@ -940,6 +961,12 @@ export class StateManager {
    * state that a later `acquire` reuses to overwrite the persisted record; the
    * next acquisition reloads from the store.
    *
+   * While the callback and the write run, this identity is locked: a reentrant
+   * `acquire` or `migrate` for it throws a `LIVE_STATE`
+   * {@link StateConflictError}, so the callback cannot register a lease that
+   * survives the migration and later writes the old schema back. The lock is
+   * cleared even when the callback throws, and other identities are unaffected.
+   *
    * Call before acquiring, or after releasing every handle. A live state, or a
    * non-persistent registration on the same identity, blocks migration.
    */
@@ -958,6 +985,12 @@ export class StateManager {
       normalized.ownerId,
       normalized.key,
     );
+    if (this.#migrating.has(identity)) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is already being migrated`,
+      );
+    }
     const entry = this.#entries.get(identity);
     if (
       entry !== undefined &&
@@ -976,28 +1009,33 @@ export class StateManager {
       this.#entries.delete(identity);
     }
 
-    const legacy = this.#readStoredObject(identity);
-    if (legacy === null) {
-      throw new StateConflictError(
-        "MISSING_STATE",
-        `No persisted state exists for ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)}`,
-      );
-    }
-    this.#assertMigrationSource(identity, legacy, normalized);
+    this.#migrating.add(identity);
+    try {
+      const legacy = this.#readStoredObject(identity);
+      if (legacy === null) {
+        throw new StateConflictError(
+          "MISSING_STATE",
+          `No persisted state exists for ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)}`,
+        );
+      }
+      this.#assertMigrationSource(identity, legacy, normalized);
 
-    const guiState = cloneState(migrate(legacy), "migrated.guiState");
-    const record: StoredGuiState = {
-      version: STATE_STORAGE_VERSION,
-      scope: normalized.scope,
-      key: normalized.key,
-      ...(normalized.ownerId === undefined
-        ? {}
-        : { ownerId: normalized.ownerId }),
-      lifetime: "persistent",
-      schema: normalized.schema,
-      guiState,
-    };
-    this.#store.setItem(storageKeyOf(identity), JSON.stringify(record));
+      const guiState = cloneState(migrate(legacy), "migrated.guiState");
+      const record: StoredGuiState = {
+        version: STATE_STORAGE_VERSION,
+        scope: normalized.scope,
+        key: normalized.key,
+        ...(normalized.ownerId === undefined
+          ? {}
+          : { ownerId: normalized.ownerId }),
+        lifetime: "persistent",
+        schema: normalized.schema,
+        guiState,
+      };
+      this.#store.setItem(storageKeyOf(identity), JSON.stringify(record));
+    } finally {
+      this.#migrating.delete(identity);
+    }
   }
 
   /** Convenience wrapper for {@link StateHandle.release}. */
@@ -1051,7 +1089,7 @@ export class StateManager {
     const root = entry.notification === undefined;
     const pass: NotificationPass = entry.notification ?? {
       changed: [],
-      delivered: new Set(),
+      delivered: new Map(),
     };
     entry.notification = pass;
     for (const field of merged.changed) {
@@ -1164,11 +1202,17 @@ export class StateManager {
       }
       // A listener that has not received any commit in this cascade missed the
       // superseded changes, so it gets their union; one already notified gets
-      // only what this commit changed.
-      const delivered = pass.delivered.has(listener)
+      // only what this commit changed. Tracked per registration: the same
+      // function on another handle has its own notification state.
+      let deliveredTo = pass.delivered.get(handle);
+      if (deliveredTo === undefined) {
+        deliveredTo = new Set();
+        pass.delivered.set(handle, deliveredTo);
+      }
+      const delivered = deliveredTo.has(listener)
         ? changed
         : Object.freeze([...pass.changed]);
-      pass.delivered.add(listener);
+      deliveredTo.add(listener);
       try {
         listener(state, delivered);
       } catch (error) {

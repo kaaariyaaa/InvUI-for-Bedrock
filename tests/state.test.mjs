@@ -1080,6 +1080,157 @@ test("a migration store write failure also evicts the zero-handle entry", () => 
   assert.equal(store.getItem(storageKey), raw);
 });
 
+test("a migration callback cannot reacquire or re-migrate its own identity", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+  manager
+    .acquire({
+      ownerId: "p",
+      key: "reentry",
+      lifetime: "persistent",
+      schema: "v1",
+      initial: { page: 1 },
+    })
+    .release();
+
+  manager.migrate(
+    {
+      ownerId: "p",
+      key: "reentry",
+      fromVersion: STATE_STORAGE_VERSION,
+      fromSchema: "v1",
+      schema: "v2",
+    },
+    (old) => {
+      // A different identity is untouched by the lock.
+      const other = manager.acquire({
+        ownerId: "other",
+        key: "reentry",
+        lifetime: "persistent",
+        schema: "v1",
+        initial: { page: 7 },
+      });
+      other.set({ page: 8 });
+      other.release();
+
+      // Reacquiring the identity being migrated must not resurrect a
+      // zero-handle entry holding the old schema; if it did, a later set()
+      // would write that stale state over the migrated record.
+      assert.throws(
+        () =>
+          manager.acquire({
+            ownerId: "p",
+            key: "reentry",
+            lifetime: "persistent",
+            schema: "v1",
+          }),
+        (error) => expectCode(error, "LIVE_STATE"),
+      );
+      assert.throws(
+        () =>
+          manager.migrate(
+            {
+              ownerId: "p",
+              key: "reentry",
+              fromVersion: STATE_STORAGE_VERSION,
+              fromSchema: "v1",
+              schema: "v3",
+            },
+            () => ({ page: 0 }),
+          ),
+        (error) => expectCode(error, "LIVE_STATE"),
+      );
+      return { page: old.guiState.page + 1 };
+    },
+  );
+
+  const findMigrated = () =>
+    store.findRecord(
+      (entry) => entry.key === "reentry" && entry.ownerId === "p",
+    ).record;
+  assert.equal(findMigrated().schema, "v2");
+  assert.equal(findMigrated().guiState.page, 2);
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "reentry",
+        lifetime: "persistent",
+        schema: "v1",
+      }),
+    (error) => expectCode(error, "SCHEMA_MISMATCH"),
+    "the old-schema entry must not survive a successful migration",
+  );
+
+  const current = manager.acquire({
+    ownerId: "p",
+    key: "reentry",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+  assert.equal(current.get().page, 2);
+  current.release();
+  assert.equal(findMigrated().schema, "v2");
+});
+
+test("a throwing migration callback releases the identity lock", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+  manager
+    .acquire({
+      ownerId: "p",
+      key: "retry",
+      lifetime: "persistent",
+      schema: "v1",
+      initial: { page: 1 },
+    })
+    .release();
+
+  assert.throws(
+    () =>
+      manager.migrate(
+        {
+          ownerId: "p",
+          key: "retry",
+          fromVersion: STATE_STORAGE_VERSION,
+          fromSchema: "v1",
+          schema: "v2",
+        },
+        () => {
+          assert.throws(
+            () =>
+              manager.acquire({
+                ownerId: "p",
+                key: "retry",
+                lifetime: "persistent",
+                schema: "v1",
+              }),
+            (error) => expectCode(error, "LIVE_STATE"),
+          );
+          throw new Error("migration boom");
+        },
+      ),
+    /migration boom/,
+  );
+
+  // The lock is cleared in a finally block, so the same identity can still be
+  // migrated (and would otherwise be permanently unacquirable).
+  manager.migrate(
+    {
+      ownerId: "p",
+      key: "retry",
+      fromVersion: STATE_STORAGE_VERSION,
+      fromSchema: "v1",
+      schema: "v2",
+    },
+    (old) => ({ page: old.guiState.page + 1 }),
+  );
+  const { record } = store.findRecord((entry) => entry.key === "retry");
+  assert.equal(record.schema, "v2");
+  assert.equal(record.guiState.page, 2);
+});
+
 test("corrupt persisted state fails closed without deleting or overwriting it", () => {
   const store = new MemoryStore();
   const errors = [];
@@ -1408,6 +1559,38 @@ test("a reentrant set on another handle delivers the union to remaining subscrib
 
   writer.set({ page: 1, selection: "s" });
   assert.deepEqual(seen, [[[1, 3], ["page", "selection", "tab"]]]);
+  writer.release();
+  reader.release();
+});
+
+test("the same listener function on two handles gets the union per registration", () => {
+  const manager = new StateManager();
+  const writer = manager.acquire({ ownerId: "p" });
+  const reader = manager.acquire({ ownerId: "p" });
+  const seen = [];
+  const shared = (state, changed) => {
+    seen.push([state.tab, [...changed]]);
+  };
+
+  writer.subscribe(shared);
+  writer.subscribe((state) => {
+    if (state.page === 1) {
+      reader.set({ tab: 3 });
+    }
+  });
+  reader.subscribe(shared);
+
+  writer.set({ page: 1, selection: "s" });
+
+  assert.deepEqual(
+    seen,
+    [
+      [undefined, ["page", "selection"]],
+      [3, ["tab"]],
+      [3, ["page", "selection", "tab"]],
+    ],
+    "the reader registration, which missed the superseded commit, still receives its union even though the same function already ran for the writer",
+  );
   writer.release();
   reader.release();
 });
