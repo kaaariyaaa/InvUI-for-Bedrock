@@ -19,6 +19,7 @@ import type {
   VirtualContainer,
   VirtualContainerOptions,
 } from "@minecraft/server";
+import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
@@ -49,6 +50,12 @@ export interface WindowErrorContext {
 export type WindowErrorHandler = (error: unknown, context: WindowErrorContext) => void;
 export type WindowOpenHandler = () => void;
 export type WindowCloseHandler = (reason: WindowCloseReason) => void;
+
+function assertErrorHandler(handler: WindowErrorHandler): void {
+  if (typeof handler !== "function") {
+    throw new TypeError("InvUI: error handler must be a function.");
+  }
+}
 
 export class WindowOpenRejectedError extends Error {
   readonly code = "INVUI_WINDOW_OPEN_UNVERIFIED";
@@ -115,9 +122,66 @@ function isInventoryLinkElement(
   return typeof (element as InventoryLink | null | undefined)?.getItem === "function";
 }
 
-/** ponytail: kind/structure fingerprint only; use a full hash if schemas collide in practice. */
+/**
+ * Stable serialization of the GUI shape that state compatibility depends on:
+ * kind, rows as an array (so a "/" inside a row cannot collide), scroll
+ * settings, and the recursively referenced tab/link GUIs (link state keys
+ * included). Cycles are rejected instead of recursing forever.
+ *
+ * ponytail: the token is not persisted anywhere except inside state records, so
+ * the format change intentionally makes older persistent records fail with
+ * SCHEMA_MISMATCH rather than silently loading against a different GUI.
+ */
 function schemaOf(gui: Gui): string {
-  return `invui-window:${gui.kind}:${gui._structure.rows.join("/")}`;
+  return `invui-window:${JSON.stringify(schemaNodeOf(gui, []))}`;
+}
+
+function schemaNodeOf(gui: Gui, ancestors: readonly Gui[]): unknown {
+  if (ancestors.includes(gui)) {
+    throw new Error("InvUI: Cyclic GUI reference in Window state schema.");
+  }
+  const stack = [...ancestors, gui];
+  const node: Record<string, unknown> = {
+    kind: gui.kind,
+    rows: [...gui._structure.rows],
+  };
+
+  if (gui instanceof ScrollGui) {
+    node.scroll = {
+      direction: gui.direction,
+      contentWidth: gui.contentWidth ?? null,
+      contentHeight: gui.contentHeight ?? null,
+    };
+  }
+
+  if (gui instanceof TabGui) {
+    node.tabs = gui.tabs.map((tab) => schemaNodeOf(tab, stack));
+  }
+
+  const links: Array<{ key: string | null; gui: unknown }> = [];
+  for (const ingredient of gui._structure._ingredients.values()) {
+    if (ingredient instanceof GuiLink) {
+      links.push({
+        key: ingredient.key ?? null,
+        gui: schemaNodeOf(ingredient.gui, stack),
+      });
+    }
+  }
+  links.sort((a, b) => {
+    const keyA = a.key ?? "";
+    const keyB = b.key ?? "";
+    if (keyA !== keyB) {
+      return keyA < keyB ? -1 : 1;
+    }
+    const guiA = JSON.stringify(a.gui);
+    const guiB = JSON.stringify(b.gui);
+    return guiA < guiB ? -1 : guiA > guiB ? 1 : 0;
+  });
+  if (links.length > 0) {
+    node.links = links;
+  }
+
+  return node;
 }
 
 /**
@@ -256,9 +320,7 @@ export class WindowBuilder {
   }
 
   setErrorHandler(handler: WindowErrorHandler): this {
-    if (typeof handler !== "function") {
-      throw new TypeError("InvUI: error handler must be a function.");
-    }
+    assertErrorHandler(handler);
     this.#errorHandler = handler;
     return this;
   }
@@ -313,9 +375,19 @@ export class Window {
   #layout: ResolvedGuiLayout | undefined;
   #stateHandle: StateHandle | undefined;
   #stateSubscription: (() => void) | undefined;
+  /** Subscription to `upperGui`; covers GuiLink and TabGui children. */
+  #guiSubscription: (() => void) | undefined;
   #elementSubscriptions: Array<() => void> = [];
   /** Per-slot render tokens so an older async provider cannot overwrite a newer result. */
   #slotRenderTokens = new Map<number, number>();
+  /**
+   * Invalidates every in-flight render. Bumped for each render batch and for
+   * each state change: a provider call started before either may have read
+   * stale state even when the slot's element reference is unchanged.
+   */
+  #renderEpoch = 0;
+  /** Set when state or GUI changes while `open()` is still resolving providers. */
+  #refreshPending = false;
   #generation = 0;
 
   constructor(config: WindowConfig) {
@@ -367,31 +439,56 @@ export class Window {
     try {
       const handle = this.#acquireState();
       this.#stateHandle = handle;
+      // Subscribe before the first provider runs: state may change while async
+      // providers are still resolving, and the screen must show the new state.
+      this.#stateSubscription = handle.subscribe(() => this.#onStateChanged());
+      // Same for GUI changes: content/ingredient edits, including GuiLink and
+      // TabGui children, must be visible on the first rendered pass.
+      this.#guiSubscription = this.upperGui.subscribe(() => this.#onGuiChanged());
 
-      const layout = this.upperGui.resolve(this.viewer, handle.get());
-      const size = containerSizeOf(layout);
+      const createContainer = (size: number): VirtualContainer => {
+        const options: VirtualContainerOptions =
+          this.title.length === 0
+            ? { size }
+            : { size, title: this.title };
+        return this.#adapter.createContainer(options);
+      };
+
+      let layout = this.upperGui.resolve(this.viewer, handle.get());
+      let size = containerSizeOf(layout);
       if (size < 1 || size > 54) {
         throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
       }
-      const options: VirtualContainerOptions =
-        this.title.length === 0
-          ? { size }
-          : { size, title: this.title };
-      const container = this.#adapter.createContainer(options);
+      let container = createContainer(size);
       this.#container = container;
-      this.#layout = layout;
 
-      await this.#renderAll(generation);
-      if (generation !== this.#generation || this.#status !== "opening") {
-        return;
+      while (true) {
+        // Any state or GUI change after this point makes the pass stale;
+        // re-resolve and render again until the rendered inputs are current.
+        this.#refreshPending = false;
+        layout = this.upperGui.resolve(this.viewer, handle.get());
+        size = containerSizeOf(layout);
+        if (size < 1 || size > 54) {
+          throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
+        }
+        if (size !== container.size) {
+          // The screen is not shown yet, so the container can be replaced
+          // instead of requiring a close/reopen cycle (design 8.4).
+          container = createContainer(size);
+          this.#container = container;
+        }
+        this.#applyLayout(layout);
+        await this.#renderAll(generation);
+        if (generation !== this.#generation || this.#status !== "opening") {
+          return;
+        }
+        if (!this.#refreshPending) {
+          break;
+        }
       }
 
       this.#adapter.openContainer(container, this.viewer);
       this.#status = "open";
-      this.#subscribeToUpdates();
-      this.#stateSubscription = handle.subscribe(() => {
-        void this.#refresh(false);
-      });
       this.#runOpenHandlers();
     } catch (error) {
       this.#teardown();
@@ -402,21 +499,29 @@ export class Window {
   }
 
   /**
-   * Re-evaluate the GUI state and re-render the same container.
+   * Re-resolve the GUI state and re-render every slot.
    *
-   * Explicit refreshes re-evaluate every slot because item providers may have
-   * changed without changing the slot's element reference.
+   * A state change can change what an Item provider returns without changing
+   * the slot's element reference, so no slot is skipped by element identity.
+   * Resolved ItemStacks are not compared either: Bedrock stacks may carry
+   * components or lore that cannot be compared exhaustively, and treating two
+   * stacks as equal would leave stale display data.
    */
   async refresh(): Promise<void> {
-    await this.#refresh(true);
+    await this.#refresh();
   }
 
   /**
-   * `reRenderUnchanged` is false for state-update refreshes: only slots whose
-   * element reference changed are re-rendered (design 11.4). Item notifications
-   * still re-render their slot directly, and `refresh()` re-renders everything.
+   * Replace the error handler for subsequent failures (design 14.3); errors
+   * already reported are not replayed.
    */
-  async #refresh(reRenderUnchanged: boolean): Promise<void> {
+  setErrorHandler(handler: WindowErrorHandler): this {
+    assertErrorHandler(handler);
+    this.#errorHandler = handler;
+    return this;
+  }
+
+  async #refresh(): Promise<void> {
     if (this.#status !== "open" || !this.#container || !this.#stateHandle) {
       return;
     }
@@ -443,16 +548,9 @@ export class Window {
       );
       return;
     }
-    this.#layout = layout;
+    this.#applyLayout(layout);
     try {
-      if (reRenderUnchanged) {
-        await this.#renderAll(generation);
-      } else {
-        await this.#renderChanged(current, layout, generation);
-      }
-      if (generation === this.#generation) {
-        this.#subscribeToUpdates();
-      }
+      await this.#renderAll(generation);
     } catch (error) {
       // State updates must never surface as an unhandled rejection: report the
       // failure through the Window's error channel and keep the window usable.
@@ -595,37 +693,63 @@ export class Window {
     });
   }
 
+  /** State changed: invalidate in-flight renders and re-evaluate the GUI. */
+  #onStateChanged(): void {
+    this.#scheduleRefresh();
+  }
+
+  /**
+   * GUI content/ingredients changed. Gui forwards GuiLink and TabGui child
+   * changes, so this also covers children of the upper GUI. The state handle
+   * (and its schema) is deliberately left untouched: a GUI update only changes
+   * what is rendered, not which state identity the open Window owns.
+   */
+  #onGuiChanged(): void {
+    this.#scheduleRefresh();
+  }
+
+  #scheduleRefresh(): void {
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    // Every provider call started before this point may have read the previous
+    // state or GUI, even when its slot's element reference did not change.
+    this.#renderEpoch += 1;
+    if (this.#status === "opening") {
+      this.#refreshPending = true;
+      return;
+    }
+    void this.#refresh();
+  }
+
+  #applyLayout(layout: ResolvedGuiLayout): void {
+    this.#layout = layout;
+    // Move element subscriptions as soon as the new layout exists. Waiting for
+    // async renders would let a notification hit the previous slot mapping and
+    // be lost for the slot's new position (design 11.4).
+    this.#subscribeToUpdates();
+  }
+
   async #renderAll(generation: number): Promise<void> {
     const layout = this.#layout;
     if (!layout) {
       return;
     }
+    // A new batch invalidates every result started before it.
+    const epoch = ++this.#renderEpoch;
+    const renders: Array<Promise<void>> = [];
+    // #renderSlot starts its provider synchronously, so every provider is
+    // invoked before the first await: one slow slot must not delay the others.
     for (let slot = 0; slot < layout.slots.length; slot += 1) {
       if (generation !== this.#generation || !this.#container) {
-        return;
+        break;
       }
-      await this.#renderSlot(slot);
+      renders.push(this.#renderSlot(slot, epoch));
     }
+    await Promise.all(renders);
   }
 
-  /** Re-render only slots whose element reference differs between layouts. */
-  async #renderChanged(
-    previous: ResolvedGuiLayout,
-    next: ResolvedGuiLayout,
-    generation: number,
-  ): Promise<void> {
-    for (let slot = 0; slot < next.slots.length; slot += 1) {
-      if (generation !== this.#generation || !this.#container) {
-        return;
-      }
-      if (previous.slots[slot] === next.slots[slot]) {
-        continue;
-      }
-      await this.#renderSlot(slot);
-    }
-  }
-
-  async #renderSlot(slot: number): Promise<void> {
+  async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {
     const layout = this.#layout;
     if (!layout || !this.#container) {
       return;
@@ -646,13 +770,13 @@ export class Window {
       return;
     }
 
-    // Compare the element still occupying the slot rather than the layout
-    // object: a state update replaces the layout, and an in-flight render for an
-    // element that did not move must still apply. A moved/changed element means
-    // this result is stale (design 11.4).
+    // The epoch check discards results whose provider call predates a state
+    // change or a newer render batch; the token check discards an older call
+    // for the same slot within the same epoch.
     const current = this.#layout;
     if (
       generation !== this.#generation ||
+      epoch !== this.#renderEpoch ||
       !this.#container ||
       !current ||
       current.slots[slot] !== element ||
@@ -714,11 +838,14 @@ export class Window {
   #teardown(): void {
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
+    this.#guiSubscription?.();
+    this.#guiSubscription = undefined;
     this.#unsubscribeElements();
     this.#stateHandle?.release();
     this.#stateHandle = undefined;
     this.#container = undefined;
     this.#layout = undefined;
+    this.#refreshPending = false;
     this.#slotRenderTokens.clear();
   }
 

@@ -93,10 +93,10 @@ async function load(base) {
   }
 }
 
-const { Gui, Markers } = await load("../src/gui");
+const { Gui, GuiLink, Markers } = await load("../src/gui");
 const { Item } = await load("../src/item");
 const { VirtualInventory, InventoryLink } = await load("../src/inventory");
-const { StateManager } = await load("../src/state");
+const { StateConflictError, StateManager } = await load("../src/state");
 const {
   MinecraftVirtualContainerAdapter,
   Window,
@@ -145,6 +145,53 @@ const otherPlayer = { id: "p2", name: "Alex" };
 
 function stack(typeId, amount = 1) {
   return { typeId, amount };
+}
+
+function scrollGui(direction) {
+  return Gui.scroll({
+    structure: ["..."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [Item.simple(() => stack("minecraft:scroll_item"))],
+    direction,
+  });
+}
+
+function linkedGui(key, childStructure = "x") {
+  return Gui.normal({
+    structure: ["a"],
+    ingredients: {
+      a: new GuiLink(Gui.normal({ structure: [childStructure] }), { key }),
+    },
+  });
+}
+
+/** A non-trivial GUI covering tabs, a scroll child, and a keyed GuiLink. */
+function schemaGui() {
+  return Gui.tab({
+    tabs: [
+      Gui.normal({
+        structure: ["ab"],
+        ingredients: {
+          a: new GuiLink(Gui.normal({ structure: ["x"] }), { key: "child" }),
+          b: Item.simple(() => stack("minecraft:b")),
+        },
+      }),
+      scrollGui("horizontal"),
+    ],
+  });
+}
+
+function sharedWindow(gui, manager, adapter, key = "schema-key") {
+  return Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
 }
 
 test("Window.builder validates viewer, upper GUI, and shared state key", () => {
@@ -338,6 +385,113 @@ test("shared state is visible to other viewers with the same key", async () => {
 
   first.close();
   second.close();
+});
+
+test("shared state accepts equivalent GUIs and rejects incompatible schemas", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const first = sharedWindow(schemaGui(), manager, adapter);
+  const second = sharedWindow(schemaGui(), manager, adapter);
+
+  await first.open();
+  await second.open();
+  first.setState({ tab: 1 });
+  assert.equal(second.getState().tab, 1);
+  first.close();
+  second.close();
+
+  const cases = [
+    [
+      "GUI kind",
+      Gui.normal({ structure: ["a"] }),
+      Gui.paged({ structure: ["a"] }),
+    ],
+    [
+      "rows containing the old separator",
+      Gui.normal({ structure: ["a/b/c/d"] }),
+      Gui.normal({ structure: ["a/b", "c/d"] }),
+    ],
+    ["rows", Gui.normal({ structure: ["a"] }), Gui.normal({ structure: ["b"] })],
+    ["scroll direction", scrollGui("vertical"), scrollGui("horizontal")],
+    [
+      "tab children",
+      Gui.tab({ tabs: [Gui.normal({ structure: ["a"] })] }),
+      Gui.tab({ tabs: [Gui.normal({ structure: ["b"] })] }),
+    ],
+    ["GuiLink key", linkedGui("one"), linkedGui("two")],
+    ["GuiLink child", linkedGui("child", "x"), linkedGui("child", "y")],
+  ];
+
+  for (const [label, firstGui, secondGui] of cases) {
+    const caseManager = new StateManager();
+    const caseAdapter = new InMemoryTestAdapter();
+    const open = sharedWindow(firstGui, caseManager, caseAdapter, "mismatch");
+    await open.open();
+    const rejected = sharedWindow(secondGui, caseManager, caseAdapter, "mismatch");
+
+    await assert.rejects(
+      rejected.open(),
+      (error) =>
+        error instanceof StateConflictError && error.code === "SCHEMA_MISMATCH",
+      label,
+    );
+    assert.equal(rejected.status, "closed", label);
+    open.close();
+  }
+});
+
+test("cyclic GUI references are rejected before creating a container", async () => {
+  const parent = Gui.normal({ structure: ["a"] });
+  const child = Gui.normal({ structure: ["b"] });
+  parent._structure.addIngredient("a", new GuiLink(child, { key: "child" }));
+  child._structure.addIngredient("b", new GuiLink(parent, { key: "parent" }));
+
+  const adapter = new InMemoryTestAdapter();
+  const window = sharedWindow(parent, new StateManager(), adapter);
+
+  await assert.rejects(() => window.open(), /Cyclic GUI reference/);
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.containers.length, 0);
+});
+
+test("persisted records with the previous schema token are rejected", async () => {
+  const records = new Map();
+  const store = {
+    getItem: (key) => records.get(key) ?? null,
+    setItem: (key, value) => records.set(key, value),
+    removeItem: (key) => records.delete(key),
+  };
+  const key = "legacy-schema";
+  records.set(
+    `invui:gui-state:${JSON.stringify(["shared", null, key])}`,
+    JSON.stringify({
+      version: 1,
+      scope: "shared",
+      key,
+      lifetime: "persistent",
+      // Token emitted by the previous kind + rows.join("/") implementation.
+      schema: "invui-window:normal:a",
+      guiState: {},
+    }),
+  );
+
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("persistent")
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await assert.rejects(
+    () => window.open(),
+    (error) =>
+      error instanceof StateConflictError && error.code === "SCHEMA_MISMATCH",
+  );
+  assert.equal(window.status, "closed");
 });
 
 test("clicks route to the Item at the slot only while open", async () => {
@@ -759,7 +913,7 @@ test("a queued click survives a state update that does not move the slot", async
   window.close();
 });
 
-test("state updates re-render only slots whose element changed", async () => {
+test("state updates re-evaluate every slot, including unchanged elements", async () => {
   const adapter = new InMemoryTestAdapter();
   const icon = Item.simple(() => stack("minecraft:icon"));
   const gui = Gui.paged({
@@ -794,7 +948,9 @@ test("state updates re-render only slots whose element changed", async () => {
   window.setState({ page: 1 });
   await tick();
 
-  assert.deepEqual(writes, [1]);
+  // The icon element did not change, but its provider may read the new state,
+  // so it is re-evaluated too.
+  assert.deepEqual([...writes].sort(), [0, 1]);
   assert.equal(container.items[1].typeId, "minecraft:page_2");
   assert.equal(container.items[0].typeId, "minecraft:icon");
   window.close();
@@ -894,5 +1050,440 @@ test("a state-changed slot discards an older async provider result", async () =>
   pending.resolve(stack("minecraft:stale"));
   await tick();
   assert.equal(container.items[0].typeId, "minecraft:second");
+  window.close();
+});
+
+test("a slow slot does not block rendering of the other slots", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const slow = deferred();
+  const gui = Gui.normal({
+    structure: ["ab"],
+    ingredients: {
+      a: Item.simple(() => slow.promise),
+      b: Item.simple(() => stack("minecraft:fast")),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  const opening = window.open();
+  await tick();
+  const container = adapter.containers[0];
+  assert.equal(container.items[1].typeId, "minecraft:fast");
+
+  slow.resolve(stack("minecraft:slow"));
+  await opening;
+  assert.equal(container.items[0].typeId, "minecraft:slow");
+  window.close();
+});
+
+test("a state change while opening is applied before the screen opens", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const firstRender = deferred();
+  let calls = 0;
+  let label = "before";
+  const item = Item.simple(() => {
+    calls += 1;
+    return calls === 1 ? firstRender.promise : stack(`minecraft:${label}`);
+  });
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  const opening = window.open();
+  await tick();
+
+  label = "after";
+  window.setState({ selection: "after" });
+  firstRender.resolve(stack("minecraft:before"));
+  await opening;
+
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:after");
+  window.close();
+});
+
+test("a state change re-evaluates a provider for an unchanged element", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let label = "before";
+  const icon = Item.simple(() => stack(`minecraft:${label}`));
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: icon } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:before");
+
+  // Same Item instance at the same slot; only the closure's result changes.
+  label = "after";
+  window.setState({ selection: "after" });
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:after");
+  window.close();
+});
+
+test("upper GUI content changes re-render the open window", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const gui = Gui.paged({
+    structure: ["."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [Item.simple(() => stack("minecraft:first"))],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:first");
+
+  gui.setContent([Item.simple(() => stack("minecraft:second"))]);
+  await tick();
+
+  assert.equal(window.status, "open");
+  assert.equal(container.items[0].typeId, "minecraft:second");
+  window.close();
+});
+
+test("GuiLink and TabGui child changes re-render the open window", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const child = Gui.normal({
+    structure: ["x"],
+    ingredients: { x: Item.simple(() => stack("minecraft:child_1")) },
+  });
+  const tab0 = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: new GuiLink(child) },
+  });
+  const tab1 = Gui.normal({
+    structure: ["b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:tab1_1")) },
+  });
+  const gui = Gui.tab({ tabs: [tab0, tab1] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:child_1");
+
+  child.setIngredient(
+    "x",
+    Item.simple(() => stack("minecraft:child_2")),
+  );
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:child_2");
+
+  window.setState({ tab: 1 });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:tab1_1");
+
+  tab1.setIngredient(
+    "b",
+    Item.simple(() => stack("minecraft:tab1_2")),
+  );
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:tab1_2");
+  window.close();
+});
+
+test("a GUI change while opening is applied before the screen opens", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const firstRender = deferred();
+  let calls = 0;
+  const delayed = Item.simple(() => {
+    calls += 1;
+    return calls === 1 ? firstRender.promise : stack("minecraft:late");
+  });
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: delayed },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  const opening = window.open();
+  await tick();
+
+  gui.setIngredient(
+    "a",
+    Item.simple(() => stack("minecraft:replacement")),
+  );
+  firstRender.resolve(stack("minecraft:before"));
+  await opening;
+
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:replacement");
+  window.close();
+});
+
+test("a shared GuiLink child updates every open window; close detaches only that window", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const child = Gui.normal({
+    structure: ["x"],
+    ingredients: { x: Item.simple(() => stack("minecraft:child_1")) },
+  });
+  const firstRoot = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: new GuiLink(child) },
+  });
+  const secondRoot = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: new GuiLink(child) },
+  });
+  const build = (viewer, gui) =>
+    Window.builder()
+      .setViewer(viewer)
+      .setUpperGui(gui)
+      .setContainerAdapter(adapter)
+      .build();
+
+  const first = build(player, firstRoot);
+  const second = build(otherPlayer, secondRoot);
+  await first.open();
+  await second.open();
+
+  const firstContainer = adapter.containers[0];
+  const secondContainer = adapter.containers[1];
+
+  child.setIngredient(
+    "x",
+    Item.simple(() => stack("minecraft:child_2")),
+  );
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:child_2");
+  assert.equal(secondContainer.items[0].typeId, "minecraft:child_2");
+
+  first.close();
+  child.setIngredient(
+    "x",
+    Item.simple(() => stack("minecraft:child_3")),
+  );
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:child_2");
+  assert.equal(secondContainer.items[0].typeId, "minecraft:child_3");
+
+  // The closed Window must not keep listening through its root either.
+  firstRoot.setIngredient(
+    "a",
+    Item.simple(() => stack("minecraft:first_only")),
+  );
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:child_2");
+  assert.equal(secondContainer.items[0].typeId, "minecraft:child_3");
+  second.close();
+});
+
+test("a GUI update discards an in-flight provider result", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = deferred();
+  let phase = "initial";
+  const icon = Item.simple(() => {
+    if (phase === "initial") {
+      return stack("minecraft:initial");
+    }
+    if (phase === "async") {
+      return pending.promise;
+    }
+    return stack("minecraft:after");
+  });
+  const gui = Gui.paged({
+    structure: ["a."],
+    ingredients: {
+      a: icon,
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+    },
+    content: [Item.simple(() => stack("minecraft:page_1"))],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:initial");
+
+  phase = "async";
+  icon.notifyWindows();
+  phase = "after";
+  gui.setContent([Item.simple(() => stack("minecraft:page_2"))]);
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:after");
+  assert.equal(container.items[1].typeId, "minecraft:page_2");
+
+  pending.resolve(stack("minecraft:stale"));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:after");
+  window.close();
+});
+
+test("GUI content updates keep the session state schema compatible", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const gui = Gui.paged({
+    structure: ["."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [1, 2, 3, 4].map((n) =>
+      Item.simple(() => stack(`minecraft:item_${n}`)),
+    ),
+  });
+  const build = () =>
+    Window.builder()
+      .setViewer(player)
+      .setUpperGui(gui)
+      .setStateLifetime("session")
+      .setStateManager(manager)
+      .setContainerAdapter(adapter)
+      .build();
+
+  const first = build();
+  await first.open();
+  first.setState({ page: 1 });
+
+  gui.setContent([
+    Item.simple(() => stack("minecraft:item_5")),
+    Item.simple(() => stack("minecraft:item_6")),
+  ]);
+  await tick();
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:item_6");
+  first.close();
+
+  const reopened = build();
+  await reopened.open();
+  assert.equal(reopened.getState().page, 1);
+  assert.equal(adapter.containers[1].items[0].typeId, "minecraft:item_6");
+  reopened.close();
+});
+
+test("an Item shown in multiple slots and windows updates every display until each close", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let typeId = "minecraft:shared_1";
+  const shared = Item.simple(() => stack(typeId));
+  const gui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: shared, b: shared },
+  });
+  const build = (viewer) =>
+    Window.builder()
+      .setViewer(viewer)
+      .setUpperGui(gui)
+      .setContainerAdapter(adapter)
+      .build();
+
+  const first = build(player);
+  const second = build(otherPlayer);
+  await first.open();
+  await second.open();
+  const [firstContainer, secondContainer] = adapter.containers;
+  assert.deepEqual(
+    [0, 1].map((slot) => firstContainer.items[slot].typeId),
+    ["minecraft:shared_1", "minecraft:shared_1"],
+  );
+  assert.deepEqual(
+    [0, 1].map((slot) => secondContainer.items[slot].typeId),
+    ["minecraft:shared_1", "minecraft:shared_1"],
+  );
+
+  typeId = "minecraft:shared_2";
+  shared.notifyWindows();
+  await tick();
+  assert.deepEqual(
+    [0, 1].map((slot) => firstContainer.items[slot].typeId),
+    ["minecraft:shared_2", "minecraft:shared_2"],
+  );
+  assert.deepEqual(
+    [0, 1].map((slot) => secondContainer.items[slot].typeId),
+    ["minecraft:shared_2", "minecraft:shared_2"],
+  );
+
+  // Closing one Window must detach both of its slot subscriptions.
+  first.close();
+  typeId = "minecraft:shared_3";
+  shared.notifyWindows();
+  await tick();
+  assert.deepEqual(
+    [0, 1].map((slot) => firstContainer.items[slot].typeId),
+    ["minecraft:shared_2", "minecraft:shared_2"],
+  );
+  assert.deepEqual(
+    [0, 1].map((slot) => secondContainer.items[slot].typeId),
+    ["minecraft:shared_3", "minecraft:shared_3"],
+  );
+
+  // After the last Window closes the Item has no listeners left to notify.
+  second.close();
+  typeId = "minecraft:shared_4";
+  shared.notifyWindows();
+  await tick();
+  assert.deepEqual(
+    [0, 1].map((slot) => secondContainer.items[slot].typeId),
+    ["minecraft:shared_3", "minecraft:shared_3"],
+  );
+});
+
+test("Window#setErrorHandler replaces the handler for later failures", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const firstErrors = [];
+  const secondErrors = [];
+  let phase = "ok";
+  const item = Item.simple(() => {
+    if (phase === "ok") {
+      return stack("minecraft:fine");
+    }
+    throw new Error("provider failed");
+  });
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => firstErrors.push({ error, context }))
+    .build();
+
+  await window.open();
+  assert.equal(
+    window.setErrorHandler((error, context) => secondErrors.push({ error, context })),
+    window,
+  );
+  assert.throws(() => window.setErrorHandler("not a function"), TypeError);
+
+  phase = "failed";
+  item.notifyWindows();
+  await tick();
+  await tick();
+
+  assert.deepEqual(firstErrors, []);
+  assert.equal(secondErrors.length, 1);
+  const [{ error, context }] = secondErrors;
+  assert.equal(error.message, "provider failed");
+  assert.equal(context.windowId, window.id);
+  assert.equal(context.operation, "itemProvider");
+  assert.equal(context.slot, 0);
   window.close();
 });
