@@ -55,7 +55,12 @@ export interface StoredGuiState {
 /**
  * Synchronous persistence port. `getItem` returns `null`/`undefined` when the
  * key is absent. Implementations may throw; the error propagates to the caller
- * and no state is committed.
+ * and the in-memory state is not committed.
+ *
+ * Writes are not rolled back. A store that throws after partially applying a
+ * write can leave the new record in place while the in-memory state keeps the
+ * old value, so a later `acquire` may load data the manager never committed.
+ * Implement `setItem` as one atomic write of the whole value to avoid that.
  */
 export interface StateStore {
   getItem(key: string): string | null | undefined;
@@ -91,6 +96,31 @@ export interface StateAcquireOptions {
   initial?: GuiState;
 }
 
+/** Identity and source/target schema for {@link StateManager.migrate}. */
+export interface StateMigrationOptions {
+  /** Defaults to `"player"`. */
+  scope?: StateScope;
+  /** Required for `shared`; defaults to `"default"` for `player`. */
+  key?: string;
+  /** Required for `player`; rejected for `shared`. */
+  ownerId?: string;
+  /** Required. Exact stored `version` the migration expects to read. */
+  fromVersion: number;
+  /**
+   * Required. Exact stored `schema` the migration expects to read. Use `null`
+   * for records written before schemas existed (the design 9.6 shape).
+   */
+  fromSchema: string | null;
+  /** Required. Schema recorded on the migrated state. */
+  schema: string;
+}
+
+/**
+ * Receives the decoded persisted value, which may use any older shape, and
+ * returns the GUI state for the current storage version.
+ */
+export type StateMigration = (legacy: unknown) => GuiState;
+
 export type StateUnsubscribe = () => void;
 
 export type StateListener = (
@@ -117,6 +147,17 @@ export interface StateHandle {
    * Merge a validated patch synchronously. Persistent states are written to
    * the store before the change is committed, and subscribers are notified
    * afterwards.
+   *
+   * A throwing store write aborts the commit: in-memory state and subscribers
+   * stay on the previous value. The write itself is not rolled back, so a
+   * store that partially applied it and then threw may already hold the new
+   * record (see {@link StateStore}).
+   *
+   * Notification is synchronous. A subscriber may call `set` reentrantly; that
+   * newer commit supersedes the notification in progress, so every remaining
+   * subscriber receives the newer snapshot instead of finishing on a stale
+   * one. Remaining subscribers also receive the union of the fields changed by
+   * the superseded commits, since they never saw those notifications.
    */
   set(patch: GuiStatePatch): StateSnapshot;
 
@@ -127,6 +168,13 @@ export interface StateHandle {
    * run strictly one after another; tasks for different identities may overlap.
    * Queued tasks are rejected with {@link StateReleasedError} if this handle
    * (or a `window`-lifetime state) is released before they start.
+   *
+   * The queue is FIFO, so awaiting another `enqueue` or `update` for the same
+   * identity from inside a queued task deadlocks: the inner call cannot start
+   * until the outer task settles, and the outer task is waiting for it.
+   *
+   * `enqueue` only serializes tasks; it does not make read-modify-write atomic.
+   * When the result depends on the current state, use {@link update}.
    */
   enqueue<T>(task: () => T | Promise<T>): Promise<T>;
 
@@ -135,6 +183,9 @@ export interface StateHandle {
    * receives the snapshot at execution time; its result is validated and
    * committed via {@link StateHandle.set}. If the state changed while an async
    * updater was running, or the handle was released, nothing is written.
+   *
+   * Awaiting another `enqueue` or `update` for the same identity from inside
+   * `updater` deadlocks for the same FIFO reason as {@link enqueue}.
    */
   update(
     updater: (
@@ -153,6 +204,8 @@ export type StateErrorCode =
   | "IDENTITY_MISMATCH"
   | "VERSION_MISMATCH"
   | "STALE_STATE"
+  | "LIVE_STATE"
+  | "MISSING_STATE"
   | "RELEASED"
   | "CORRUPT_STORE";
 
@@ -181,7 +234,9 @@ export class StateConflictError extends StateError {
       | "LIFETIME_MISMATCH"
       | "IDENTITY_MISMATCH"
       | "VERSION_MISMATCH"
-      | "STALE_STATE",
+      | "STALE_STATE"
+      | "LIVE_STATE"
+      | "MISSING_STATE",
     message: string,
   ) {
     super(code, message);
@@ -222,6 +277,14 @@ const ACQUIRE_KEYS = new Set([
   "lifetime",
   "schema",
   "initial",
+]);
+const MIGRATION_KEYS = new Set([
+  "scope",
+  "key",
+  "ownerId",
+  "fromVersion",
+  "fromSchema",
+  "schema",
 ]);
 const MANAGER_KEYS = new Set(["onError"]);
 const EMPTY_STATE: StateSnapshot = Object.freeze({});
@@ -528,31 +591,19 @@ interface NormalizedAcquireOptions {
   initial: StateSnapshot;
 }
 
-function normalizeAcquireOptions(input: unknown): NormalizedAcquireOptions {
-  if (!isPlainObject(input)) {
-    throw new StateValidationError("acquire options must be a plain object");
-  }
-  for (const key of Object.keys(input)) {
-    if (!ACQUIRE_KEYS.has(key)) {
-      throw new StateValidationError(`unknown acquire option "${key}"`);
-    }
-  }
+interface NormalizedIdentityOptions {
+  scope: StateScope;
+  key: string;
+  ownerId: string | undefined;
+}
 
+function normalizeIdentityOptions(
+  input: Record<string, unknown>,
+): NormalizedIdentityOptions {
   const scope = input.scope ?? "player";
   if (scope !== "player" && scope !== "shared") {
     throw new StateValidationError(
       'scope must be "player" or "shared"',
-    );
-  }
-
-  const lifetime = input.lifetime ?? "window";
-  if (
-    lifetime !== "window" &&
-    lifetime !== "session" &&
-    lifetime !== "persistent"
-  ) {
-    throw new StateValidationError(
-      'lifetime must be "window", "session", or "persistent"',
     );
   }
 
@@ -575,6 +626,31 @@ function normalizeAcquireOptions(input: unknown): NormalizedAcquireOptions {
     );
   }
 
+  return { scope, key, ownerId };
+}
+
+function normalizeAcquireOptions(input: unknown): NormalizedAcquireOptions {
+  if (!isPlainObject(input)) {
+    throw new StateValidationError("acquire options must be a plain object");
+  }
+  for (const key of Object.keys(input)) {
+    if (!ACQUIRE_KEYS.has(key)) {
+      throw new StateValidationError(`unknown acquire option "${key}"`);
+    }
+  }
+
+  const identity = normalizeIdentityOptions(input);
+  const lifetime = input.lifetime ?? "window";
+  if (
+    lifetime !== "window" &&
+    lifetime !== "session" &&
+    lifetime !== "persistent"
+  ) {
+    throw new StateValidationError(
+      'lifetime must be "window", "session", or "persistent"',
+    );
+  }
+
   const schema =
     input.schema === undefined
       ? "default"
@@ -585,7 +661,51 @@ function normalizeAcquireOptions(input: unknown): NormalizedAcquireOptions {
       ? EMPTY_STATE
       : cloneState(input.initial, "initial");
 
-  return { scope, key, ownerId, lifetime, schema, initial };
+  return { ...identity, lifetime, schema, initial };
+}
+
+interface NormalizedMigrationOptions extends NormalizedIdentityOptions {
+  fromVersion: number;
+  fromSchema: string | null;
+  schema: string;
+}
+
+function normalizeMigrationOptions(
+  input: unknown,
+): NormalizedMigrationOptions {
+  if (!isPlainObject(input)) {
+    throw new StateValidationError("migration options must be a plain object");
+  }
+  for (const key of Object.keys(input)) {
+    if (!MIGRATION_KEYS.has(key)) {
+      throw new StateValidationError(`unknown migration option "${key}"`);
+    }
+  }
+
+  const identity = normalizeIdentityOptions(input);
+  const fromVersion = requireNonNegativeInteger(
+    input.fromVersion,
+    "fromVersion",
+  );
+  if (!hasOwn(input, "fromSchema")) {
+    throw new StateValidationError(
+      'fromSchema is required (use null for records written before schemas existed)',
+    );
+  }
+  const fromSchema =
+    input.fromSchema === null
+      ? null
+      : requireNonEmptyString(input.fromSchema, "fromSchema");
+  if (!hasOwn(input, "schema")) {
+    throw new StateValidationError("migration schema is required");
+  }
+  const schema = requireNonEmptyString(input.schema, "schema");
+  if (fromVersion === STATE_STORAGE_VERSION && fromSchema === schema) {
+    throw new StateValidationError(
+      `migration from version ${fromVersion} schema ${JSON.stringify(fromSchema)} to the same version and schema is rejected; the record is already current`,
+    );
+  }
+  return { ...identity, fromVersion, fromSchema, schema };
 }
 
 function identityOf(
@@ -622,12 +742,73 @@ interface StateEntry {
   state: StateSnapshot;
   readonly handles: Set<StateHandleImpl>;
   tail: Promise<void>;
+  /** Incremented on each committed change; detects reentrant commits. */
+  generation: number;
+  /** Active notification cascade, or undefined outside a commit. */
+  notification: NotificationPass | undefined;
   released: boolean;
+}
+
+/**
+ * Bookkeeping for one synchronous notification cascade. A listener may commit
+ * reentrantly, which aborts the pass in progress; the newest pass then has to
+ * tell the not-yet-notified listeners about every field that changed since
+ * their last delivery.
+ */
+interface NotificationPass {
+  /** Union of the fields changed by every commit in this cascade, in order. */
+  changed: GuiStateField[];
+  /** Listeners that already received a commit in this cascade. */
+  delivered: Set<StateListener>;
+}
+
+/**
+ * Runtime internals of a handle, kept in a module-private WeakMap so the
+ * mutable entry (and the manager itself) is never reachable from the public
+ * `StateHandle` surface. Nothing outside this module can forge or mutate a
+ * contract the manager accepts.
+ */
+interface HandleInternals {
+  readonly manager: StateManager;
+  readonly entry: StateEntry;
+  active: boolean;
+  readonly listeners: Set<StateListener>;
+}
+
+const HANDLE_INTERNALS = new WeakMap<StateHandle, HandleInternals>();
+
+function internalsOf(handle: StateHandle): HandleInternals {
+  const internals = HANDLE_INTERNALS.get(handle);
+  if (internals === undefined) {
+    throw new StateValidationError(
+      "handle was not created by this StateManager",
+    );
+  }
+  return internals;
+}
+
+function requireInternals(
+  handle: StateHandle,
+  manager: StateManager,
+): HandleInternals {
+  const internals = internalsOf(handle);
+  if (internals.manager !== manager) {
+    throw new StateValidationError(
+      "handle was not created by this StateManager",
+    );
+  }
+  return internals;
 }
 
 /**
  * Owns state identities, leases, subscriptions, persistence, and per-identity
  * async ordering. One instance is expected per script generation.
+ *
+ * The manager is the sole writer for the identities it owns: it caches state in
+ * memory and writes whole records. Changes made to the injected store by
+ * another manager or by outside code are neither observed nor merged, and the
+ * next commit overwrites them. Share one manager per store instead of relying
+ * on cross-manager synchronization.
  */
 export class StateManager {
   readonly #store: StateStore | undefined;
@@ -729,6 +910,8 @@ export class StateManager {
       state,
       handles: new Set(),
       tail: Promise.resolve(),
+      generation: 0,
+      notification: undefined,
       released: false,
     };
     this.#entries.set(identity, entry);
@@ -738,13 +921,88 @@ export class StateManager {
     return handle;
   }
 
-  /** Convenience wrapper for {@link StateHandle.release}. */
-  release(handle: StateHandle): void {
-    if (!(handle instanceof StateHandleImpl) || handle.manager !== this) {
+  /**
+   * Explicitly replaces an older persisted record with a current-version one.
+   * The caller must state the exact source `version`/`schema` it expects and
+   * the target schema. Every identity field stored in the record is verified
+   * before the callback runs, so a record that does not match the declaration
+   * (or is already current) is rejected before any write. `migrate` receives
+   * the decoded old value (any shape) and must return the GUI state for
+   * {@link STATE_STORAGE_VERSION}. The record is written only after the
+   * callback and validation succeed, so a decoding, callback, or validation
+   * error leaves the stored value untouched. A store error is not rolled back:
+   * if the store partially applied the write before throwing, the record may
+   * already mix old and new data. Nothing is ever deleted, and
+   * {@link acquire} never invokes this automatically.
+   *
+   * Any released zero-handle entry for the identity is evicted before the
+   * callback runs. A failed migration therefore cannot leave an old in-memory
+   * state that a later `acquire` reuses to overwrite the persisted record; the
+   * next acquisition reloads from the store.
+   *
+   * Call before acquiring, or after releasing every handle. A live state, or a
+   * non-persistent registration on the same identity, blocks migration.
+   */
+  migrate(options: StateMigrationOptions, migrate: StateMigration): void {
+    const normalized = normalizeMigrationOptions(options);
+    if (typeof migrate !== "function") {
+      throw new StateValidationError("migrate must be a function");
+    }
+    if (this.#store === undefined) {
       throw new StateValidationError(
-        "handle was not created by this StateManager",
+        "migration requires an injected state store",
       );
     }
+    const identity = identityOf(
+      normalized.scope,
+      normalized.ownerId,
+      normalized.key,
+    );
+    const entry = this.#entries.get(identity);
+    if (
+      entry !== undefined &&
+      (entry.handles.size > 0 || entry.lifetime !== "persistent")
+    ) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is still in use; release it before migrating`,
+      );
+    }
+    // Evict the released entry before touching the record. If anything below
+    // throws (including a partially applied store write), a later acquire must
+    // reload from the store instead of reusing this entry's stale state and
+    // writing it back over the record.
+    if (entry !== undefined) {
+      this.#entries.delete(identity);
+    }
+
+    const legacy = this.#readStoredObject(identity);
+    if (legacy === null) {
+      throw new StateConflictError(
+        "MISSING_STATE",
+        `No persisted state exists for ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)}`,
+      );
+    }
+    this.#assertMigrationSource(identity, legacy, normalized);
+
+    const guiState = cloneState(migrate(legacy), "migrated.guiState");
+    const record: StoredGuiState = {
+      version: STATE_STORAGE_VERSION,
+      scope: normalized.scope,
+      key: normalized.key,
+      ...(normalized.ownerId === undefined
+        ? {}
+        : { ownerId: normalized.ownerId }),
+      lifetime: "persistent",
+      schema: normalized.schema,
+      guiState,
+    };
+    this.#store.setItem(storageKeyOf(identity), JSON.stringify(record));
+  }
+
+  /** Convenience wrapper for {@link StateHandle.release}. */
+  release(handle: StateHandle): void {
+    requireInternals(handle, this);
     handle.release();
   }
 
@@ -767,11 +1025,16 @@ export class StateManager {
   }
 
   /**
-   * Commits a patch. The patch is validated here so no call path (including a
-   * direct `_set(handle.entry, ...)`) can commit unvalidated state. Store
-   * errors abort the commit.
+   * Commits a patch for a live handle owned by this manager. The handle is
+   * resolved through the private table, so a forged handle/entry cannot reach
+   * a state identity, and the patch is validated before any commit.
    */
-  _set(entry: StateEntry, patch: unknown): StateSnapshot {
+  _set(handle: StateHandle, patch: unknown): StateSnapshot {
+    const internals = requireInternals(handle, this);
+    const entry = internals.entry;
+    if (!internals.active) {
+      throw new StateReleasedError("State handle has been released");
+    }
     if (entry.released) {
       throw new StateReleasedError("State has been released");
     }
@@ -784,24 +1047,43 @@ export class StateManager {
       this.#savePersistent(entry.identity, entry, merged.state);
     }
     entry.state = merged.state;
-    for (const handle of [...entry.handles]) {
-      handle._notify(merged.state, merged.changed);
+    const generation = (entry.generation += 1);
+    const root = entry.notification === undefined;
+    const pass: NotificationPass = entry.notification ?? {
+      changed: [],
+      delivered: new Set(),
+    };
+    entry.notification = pass;
+    for (const field of merged.changed) {
+      if (!pass.changed.includes(field)) {
+        pass.changed.push(field);
+      }
+    }
+    try {
+      for (const target of [...entry.handles]) {
+        this._notify(target, merged.state, merged.changed, generation, pass);
+      }
+    } finally {
+      if (root) {
+        entry.notification = undefined;
+      }
     }
     return merged.state;
   }
 
   _enqueue<T>(
-    handle: StateHandleImpl,
+    handle: StateHandle,
     task: () => T | Promise<T>,
   ): Promise<T> {
-    const entry = handle.entry;
-    if (!handle.active || entry.released) {
+    const internals = requireInternals(handle, this);
+    const entry = internals.entry;
+    if (!internals.active || entry.released) {
       return Promise.reject(
         new StateReleasedError("Cannot enqueue work for a released state"),
       );
     }
     const run = entry.tail.then(() => {
-      if (!handle.active || entry.released) {
+      if (!internals.active || entry.released) {
         throw new StateReleasedError(
           "Queued work was discarded because the state was released",
         );
@@ -816,16 +1098,17 @@ export class StateManager {
   }
 
   _update(
-    handle: StateHandleImpl,
+    handle: StateHandle,
     updater: (
       state: StateSnapshot,
     ) => GuiStatePatch | Promise<GuiStatePatch>,
   ): Promise<StateSnapshot> {
     return this._enqueue(handle, async () => {
-      const entry = handle.entry;
+      const internals = requireInternals(handle, this);
+      const entry = internals.entry;
       const base = entry.state;
       const patch = await updater(base);
-      if (!handle.active || entry.released) {
+      if (!internals.active || entry.released) {
         throw new StateReleasedError(
           "Async update was discarded because the state was released",
         );
@@ -836,17 +1119,19 @@ export class StateManager {
           "State changed while the async updater was running; the update was not applied",
         );
       }
-      return this._set(entry, patch);
+      return this._set(handle, patch);
     });
   }
 
-  _release(handle: StateHandleImpl): void {
-    if (!handle.active) {
+  _release(handle: StateHandle): void {
+    const internals = requireInternals(handle, this);
+    if (!internals.active) {
       return;
     }
-    handle._deactivate();
-    const entry = handle.entry;
-    entry.handles.delete(handle);
+    internals.active = false;
+    internals.listeners.clear();
+    const entry = internals.entry;
+    entry.handles.delete(handle as StateHandleImpl);
     if (entry.handles.size > 0) {
       return;
     }
@@ -859,6 +1144,39 @@ export class StateManager {
     // a later Window starts from the latest value.
   }
 
+  _notify(
+    handle: StateHandle,
+    state: StateSnapshot,
+    changed: readonly GuiStateField[],
+    generation: number,
+    pass: NotificationPass,
+  ): void {
+    const internals = requireInternals(handle, this);
+    // Iterate a snapshot so listeners removed (or released) by an earlier
+    // listener during this pass still receive the change that was committed.
+    for (const listener of [...internals.listeners]) {
+      // A listener may commit a newer state reentrantly (directly or through a
+      // listener on another handle). That commit already notified every
+      // subscriber, so delivering this older `state` afterwards would leave
+      // them with a stale snapshot as their last notification.
+      if (internals.entry.generation !== generation) {
+        return;
+      }
+      // A listener that has not received any commit in this cascade missed the
+      // superseded changes, so it gets their union; one already notified gets
+      // only what this commit changed.
+      const delivered = pass.delivered.has(listener)
+        ? changed
+        : Object.freeze([...pass.changed]);
+      pass.delivered.add(listener);
+      try {
+        listener(state, delivered);
+      } catch (error) {
+        this._reportError(error);
+      }
+    }
+  }
+
   _reportError(error: unknown): void {
     if (this.#onError === undefined) {
       return;
@@ -867,6 +1185,53 @@ export class StateManager {
       this.#onError(error);
     } catch {
       // An error reporter must not break state processing.
+    }
+  }
+
+  /**
+   * Rejects a stored record whose version, schema, identity, or lifetime does
+   * not match what the caller declared, before the callback or any write.
+   * Missing `schema`/`lifetime` are the design 9.6 shape: schema-less and
+   * persistent.
+   */
+  #assertMigrationSource(
+    identity: string,
+    record: Record<string, unknown>,
+    normalized: NormalizedMigrationOptions,
+  ): void {
+    const source = describeIdentity(
+      normalized.scope,
+      normalized.ownerId,
+      normalized.key,
+    );
+    if (record.version !== normalized.fromVersion) {
+      throw new StateConflictError(
+        "VERSION_MISMATCH",
+        `Stored state ${source} has version ${String(record.version)}; migration expects ${normalized.fromVersion}`,
+      );
+    }
+    const storedSchema = hasOwn(record, "schema") ? record.schema : null;
+    if (storedSchema !== normalized.fromSchema) {
+      throw new StateConflictError(
+        "SCHEMA_MISMATCH",
+        `Stored state ${source} has schema ${JSON.stringify(storedSchema)}; migration expects ${JSON.stringify(normalized.fromSchema)}`,
+      );
+    }
+    if (
+      record.scope !== normalized.scope ||
+      record.key !== normalized.key ||
+      (record.ownerId ?? undefined) !== normalized.ownerId
+    ) {
+      throw new StateConflictError(
+        "IDENTITY_MISMATCH",
+        `Stored state under ${storageKeyOf(identity)} describes a different identity than ${source}`,
+      );
+    }
+    if (record.lifetime !== undefined && record.lifetime !== "persistent") {
+      throw new StateConflictError(
+        "LIFETIME_MISMATCH",
+        `Stored state ${source} has lifetime "${String(record.lifetime)}"; migration only rewrites persistent records`,
+      );
     }
   }
 
@@ -898,10 +1263,12 @@ export class StateManager {
     );
   }
 
-  #loadPersistent(
-    normalized: NormalizedAcquireOptions,
-    identity: string,
-  ): StateSnapshot | null {
+  /**
+   * Reads and decodes the record at `identity` without interpreting its
+   * version or schema. Returns `null` when no record exists. Malformed data
+   * throws {@link StateCorruptionError} and is never modified.
+   */
+  #readStoredObject(identity: string): Record<string, unknown> | null {
     const store = this.#store;
     if (store === undefined) {
       return null;
@@ -922,6 +1289,20 @@ export class StateManager {
     }
     if (!isPlainObject(parsed)) {
       this.#corrupt(identity, "stored value is not a JSON object");
+    }
+    return parsed;
+  }
+
+  #loadPersistent(
+    normalized: NormalizedAcquireOptions,
+    identity: string,
+  ): StateSnapshot | null {
+    if (this.#store === undefined) {
+      return null;
+    }
+    const parsed = this.#readStoredObject(identity);
+    if (parsed === null) {
+      return null;
     }
 
     if (parsed.version !== STATE_STORAGE_VERSION) {
@@ -974,80 +1355,72 @@ export class StateManager {
   }
 }
 
+/**
+ * Public handle. It deliberately owns no reachable fields: all mutable state
+ * lives in {@link HANDLE_INTERNALS}, so callers cannot read or replace the
+ * internal entry (`handle.entry`, `handle.manager`, etc. are undefined).
+ */
 class StateHandleImpl implements StateHandle {
-  readonly #manager: StateManager;
-  readonly #entry: StateEntry;
-  readonly #listeners = new Set<StateListener>();
-  #active = true;
-
   constructor(manager: StateManager, entry: StateEntry) {
-    this.#manager = manager;
-    this.#entry = entry;
-  }
-
-  get manager(): StateManager {
-    return this.#manager;
-  }
-
-  get entry(): StateEntry {
-    return this.#entry;
-  }
-
-  get active(): boolean {
-    return this.#active;
+    HANDLE_INTERNALS.set(this, {
+      manager,
+      entry,
+      active: true,
+      listeners: new Set(),
+    });
   }
 
   get scope(): StateScope {
-    return this.#entry.scope;
+    return internalsOf(this).entry.scope;
   }
 
   get key(): string {
-    return this.#entry.key;
+    return internalsOf(this).entry.key;
   }
 
   get lifetime(): StateLifetime {
-    return this.#entry.lifetime;
+    return internalsOf(this).entry.lifetime;
   }
 
   get ownerId(): string | undefined {
-    return this.#entry.ownerId;
+    return internalsOf(this).entry.ownerId;
   }
 
   get schema(): string {
-    return this.#entry.schema;
+    return internalsOf(this).entry.schema;
   }
 
   get released(): boolean {
-    return !this.#active;
+    return !internalsOf(this).active;
   }
 
   get(): StateSnapshot {
-    this.#assertActive();
-    return this.#entry.state;
+    const internals = this.#requireActive();
+    return internals.entry.state;
   }
 
   set(patch: GuiStatePatch): StateSnapshot {
-    this.#assertActive();
-    return this.#manager._set(this.#entry, patch);
+    const internals = this.#requireActive();
+    return internals.manager._set(this, patch);
   }
 
   subscribe(listener: StateListener): StateUnsubscribe {
-    this.#assertActive();
+    const internals = this.#requireActive();
     if (typeof listener !== "function") {
       throw new StateValidationError("listener must be a function");
     }
-    this.#listeners.add(listener);
+    internals.listeners.add(listener);
     return () => {
-      this.#listeners.delete(listener);
+      internals.listeners.delete(listener);
     };
   }
 
   enqueue<T>(task: () => T | Promise<T>): Promise<T> {
-    this.#assertActive();
+    const internals = this.#requireActive();
     if (typeof task !== "function") {
       throw new StateValidationError("task must be a function");
     }
-    return this.#manager._enqueue(this, task);
+    return internals.manager._enqueue(this, task);
   }
 
   update(
@@ -1055,42 +1428,24 @@ class StateHandleImpl implements StateHandle {
       state: StateSnapshot,
     ) => GuiStatePatch | Promise<GuiStatePatch>,
   ): Promise<StateSnapshot> {
-    this.#assertActive();
+    const internals = this.#requireActive();
     if (typeof updater !== "function") {
       throw new StateValidationError("updater must be a function");
     }
-    return this.#manager._update(this, updater);
+    return internals.manager._update(this, updater);
   }
 
   release(): void {
-    this.#manager._release(this);
+    internalsOf(this).manager._release(this);
   }
 
-  _deactivate(): void {
-    this.#active = false;
-    this.#listeners.clear();
-  }
-
-  _notify(
-    state: StateSnapshot,
-    changed: readonly GuiStateField[],
-  ): void {
-    // Iterate a snapshot so listeners removed (or released) by an earlier
-    // listener during this pass still receive the change that was committed.
-    for (const listener of [...this.#listeners]) {
-      try {
-        listener(state, changed);
-      } catch (error) {
-        this.#manager._reportError(error);
-      }
-    }
-  }
-
-  #assertActive(): void {
-    if (!this.#active || this.#entry.released) {
+  #requireActive(): HandleInternals {
+    const internals = internalsOf(this);
+    if (!internals.active || internals.entry.released) {
       throw new StateReleasedError(
-        `State ${describeIdentity(this.#entry.scope, this.#entry.ownerId, this.#entry.key)} has been released`,
+        `State ${describeIdentity(internals.entry.scope, internals.entry.ownerId, internals.entry.key)} has been released`,
       );
     }
+    return internals;
   }
 }
