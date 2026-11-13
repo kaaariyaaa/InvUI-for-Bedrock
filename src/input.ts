@@ -24,7 +24,8 @@
  * "expired" can only mean "the Window is no longer open"; it also defines no
  * rate-limit parameters, no generation/page token in the message, and no
  * mapping from layout elements to the `button`/`display`/`inventory` modes.
- * See `validateInputNotification` for what that leaves unchecked.
+ * See `validateInputNotification` for what that leaves unchecked, and
+ * `checkInputRateLimit` for the caller-injected half of the 10.5 repeat limit.
  */
 
 export const INPUT_NOTIFICATION_PREFIX = "!invui:";
@@ -136,7 +137,8 @@ export type InputValidationResult =
  *
  * Not checked because the design does not define them:
  * - Time-based expiry (10.4 has no timestamp; liveness is the only deadline).
- * - Rate limiting (10.5 requires limiting repeats but gives no count or window).
+ * - Rate limiting (10.5 requires limiting repeats but gives no count or window;
+ *   call `checkInputRateLimit` with a caller-injected clock and interval).
  * - Page/generation identity (the message has no generation token, so a late
  *   click from a previous page cannot be told apart if that slot is a button
  *   again on the new page; the caller's own generation check must handle it).
@@ -171,4 +173,77 @@ export function validateInputNotification(
     return { ok: false, reason: "stale-sequence" };
   }
   return { ok: true, notification };
+}
+
+/**
+ * Caller-owned state for `checkInputRateLimit`. The caller stores the returned
+ * `lastAcceptedAtMs` only for accepted notifications and resets it with the
+ * session, like `lastSequence`.
+ */
+export interface InputRateLimitState {
+  /** Caller clock reading (ms) of the last accepted notification, if any. */
+  readonly lastAcceptedAtMs?: number;
+}
+
+/**
+ * Caller-injected rate-limit parameters; design 10.5 only says repeats must be
+ * limited, so this module invents no default. `minIntervalMs: 0` disables the
+ * interval but keeps the clock checks.
+ */
+export interface InputRateLimitPolicy {
+  /** Minimum caller-clock gap (ms) between two accepted notifications. */
+  readonly minIntervalMs: number;
+}
+
+export type InputRateLimitRejectionReason =
+  | "invalid-input"
+  | "clock-backwards"
+  | "rate-limited";
+
+export type InputRateLimitResult =
+  | { readonly ok: true; readonly lastAcceptedAtMs: number }
+  | { readonly ok: false; readonly reason: InputRateLimitRejectionReason };
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Design 10.5's "limit consecutive notification processing", reduced to the
+ * smallest policy the design actually supports: at most one accepted
+ * notification per caller-injected interval.
+ *
+ * Pure, and no game clock: `nowMs` and `policy` are explicit inputs so tests
+ * and the eventual chat handler can supply the game's own tick/time source.
+ * Fails closed rather than clamping: a non-integer, negative, or non-finite
+ * `nowMs`/`lastAcceptedAtMs`/`minIntervalMs` rejects, and a `nowMs` earlier
+ * than `lastAcceptedAtMs` (clock reset or rollback) rejects even when the
+ * interval would otherwise pass. Rejected calls do not advance the state.
+ *
+ * This is a repeat limit, not authentication and not the design 10.5
+ * generation/page check: a passing result says nothing about who sent the
+ * message or which screen generation it belongs to. Callers still run
+ * `validateInputNotification` and their own generation check, and should
+ * update `lastAcceptedAtMs` from a passing result only after the click is
+ * actually processed.
+ */
+export function checkInputRateLimit(
+  state: InputRateLimitState,
+  nowMs: number,
+  policy: InputRateLimitPolicy,
+): InputRateLimitResult {
+  if (!isNonNegativeSafeInteger(nowMs) || !isNonNegativeSafeInteger(policy.minIntervalMs)) {
+    return { ok: false, reason: "invalid-input" };
+  }
+  const last = state.lastAcceptedAtMs;
+  if (last !== undefined && !isNonNegativeSafeInteger(last)) {
+    return { ok: false, reason: "invalid-input" };
+  }
+  if (last !== undefined && nowMs < last) {
+    return { ok: false, reason: "clock-backwards" };
+  }
+  if (last !== undefined && nowMs - last < policy.minIntervalMs) {
+    return { ok: false, reason: "rate-limited" };
+  }
+  return { ok: true, lastAcceptedAtMs: nowMs };
 }

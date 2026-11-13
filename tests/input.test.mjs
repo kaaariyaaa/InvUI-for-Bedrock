@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   INPUT_NOTIFICATION_PREFIX,
+  checkInputRateLimit,
   parseInputNotification,
   validateInputNotification,
 } from "../src/input.ts";
@@ -220,4 +221,104 @@ test("validation is pure: frozen inputs are accepted and unchanged", () => {
 test("rejections carry only a reason", () => {
   const result = validateInputNotification("!invui:window-1:0:1", "player-2", snapshot());
   assert.deepEqual(Object.keys(result).sort(), ["ok", "reason"]);
+});
+
+test("rate limit accepts the first notification and anything at or past the interval", () => {
+  const policy = { minIntervalMs: 250 };
+  assert.deepEqual(checkInputRateLimit({}, 1000, policy), {
+    ok: true,
+    lastAcceptedAtMs: 1000,
+  });
+  assert.deepEqual(checkInputRateLimit({ lastAcceptedAtMs: 1000 }, 1250, policy), {
+    ok: true,
+    lastAcceptedAtMs: 1250,
+  });
+  assert.deepEqual(checkInputRateLimit({ lastAcceptedAtMs: 1000 }, 9000, policy), {
+    ok: true,
+    lastAcceptedAtMs: 9000,
+  });
+});
+
+test("rate limit rejects repeats inside the injected interval", () => {
+  const policy = { minIntervalMs: 250 };
+  for (const nowMs of [1000, 1001, 1249]) {
+    assert.deepEqual(
+      checkInputRateLimit({ lastAcceptedAtMs: 1000 }, nowMs, policy),
+      { ok: false, reason: "rate-limited" },
+      String(nowMs),
+    );
+  }
+});
+
+test("rate limit fails closed when the caller's clock goes backwards", () => {
+  const policy = { minIntervalMs: 250 };
+  for (const nowMs of [999, 0]) {
+    assert.deepEqual(
+      checkInputRateLimit({ lastAcceptedAtMs: 1000 }, nowMs, policy),
+      { ok: false, reason: "clock-backwards" },
+      String(nowMs),
+    );
+  }
+  // A rejected backwards reading does not advance the stored timestamp.
+  const state = { lastAcceptedAtMs: 1000 };
+  checkInputRateLimit(state, 500, policy);
+  assert.equal(state.lastAcceptedAtMs, 1000);
+  assert.equal(checkInputRateLimit(state, 1250, policy).ok, true);
+});
+
+test("rate limit fails closed on invalid times or limits instead of clamping", () => {
+  const badNumbers = [NaN, Infinity, -Infinity, -1, 1.5, 2 ** 53, "1000", null];
+  for (const nowMs of [...badNumbers, undefined]) {
+    assert.deepEqual(
+      checkInputRateLimit({}, nowMs, { minIntervalMs: 250 }),
+      { ok: false, reason: "invalid-input" },
+      `nowMs ${String(nowMs)}`,
+    );
+  }
+  for (const lastAcceptedAtMs of badNumbers) {
+    assert.deepEqual(
+      checkInputRateLimit({ lastAcceptedAtMs }, 1000, { minIntervalMs: 250 }),
+      { ok: false, reason: "invalid-input" },
+      `lastAcceptedAtMs ${String(lastAcceptedAtMs)}`,
+    );
+  }
+  for (const minIntervalMs of [...badNumbers, undefined]) {
+    assert.deepEqual(
+      checkInputRateLimit({ lastAcceptedAtMs: 1000 }, 2000, { minIntervalMs }),
+      { ok: false, reason: "invalid-input" },
+      `minIntervalMs ${String(minIntervalMs)}`,
+    );
+  }
+  // `undefined` lastAcceptedAtMs means "no notification accepted yet", not a bad number.
+  assert.deepEqual(checkInputRateLimit({ lastAcceptedAtMs: undefined }, 1000, { minIntervalMs: 250 }), {
+    ok: true,
+    lastAcceptedAtMs: 1000,
+  });
+  assert.equal(checkInputRateLimit({}, 1000, { minIntervalMs: 0 }).ok, true);
+});
+
+test("rate limit with a zero interval disables only the interval, not the clock check", () => {
+  const policy = { minIntervalMs: 0 };
+  assert.equal(
+    checkInputRateLimit({ lastAcceptedAtMs: 1000 }, 1000, policy).lastAcceptedAtMs,
+    1000,
+  );
+  assert.deepEqual(
+    checkInputRateLimit({ lastAcceptedAtMs: 1000 }, 999, policy),
+    { ok: false, reason: "clock-backwards" },
+  );
+});
+
+test("rate limit is pure: frozen state is accepted and unchanged", () => {
+  const state = Object.freeze({ lastAcceptedAtMs: 1000 });
+  const policy = Object.freeze({ minIntervalMs: 250 });
+  assert.deepEqual(checkInputRateLimit(state, 1250, policy), {
+    ok: true,
+    lastAcceptedAtMs: 1250,
+  });
+  assert.deepEqual(checkInputRateLimit(state, 1100, policy), {
+    ok: false,
+    reason: "rate-limited",
+  });
+  assert.equal(state.lastAcceptedAtMs, 1000);
 });
