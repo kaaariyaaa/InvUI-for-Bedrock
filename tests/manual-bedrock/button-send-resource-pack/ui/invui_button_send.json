@@ -1,0 +1,96 @@
+{
+  "namespace": "invui_button_send",
+
+  "desktop_positive_control": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 100,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "POSITIVE CONTROL: button.send probe (desktop)",
+    "color": [0.3, 1, 0.3, 1],
+    "shadow": true
+  },
+
+  "pocket_positive_control": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 100,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "POSITIVE CONTROL: button.send probe (pocket)",
+    "color": [0.3, 1, 0.3, 1],
+    "shadow": true
+  },
+
+  "send_button": {
+    "type": "button",
+    "$pressed_button_name": "button.send",
+    "layer": 101,
+    "size": [200, 20],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 22],
+    "sound_name": "random.click",
+    "sound_volume": 1.0,
+    "sound_pitch": 1.0,
+    "default_control": "default",
+    "hover_control": "hover",
+    "pressed_control": "pressed",
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "focused"
+      }
+    ],
+    "controls": [
+      {
+        "default": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_light",
+          "layer": 1
+        }
+      },
+      {
+        "hover": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lighthover",
+          "layer": 1
+        }
+      },
+      {
+        "pressed": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lightpressed",
+          "layer": 1
+        }
+      },
+      {
+        "label": {
+          "type": "label",
+          "size": ["100%", "100%"],
+          "anchor_from": "center",
+          "anchor_to": "center",
+          "text": "Press: button.send (unverified)",
+          "color": [1, 1, 1, 1],
+          "text_alignment": "center",
+          "shadow": false,
+          "layer": 2
+        }
+      }
+    ]
+  }
+}

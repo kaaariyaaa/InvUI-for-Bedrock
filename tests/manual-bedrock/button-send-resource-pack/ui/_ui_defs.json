@@ -1,0 +1,7 @@
+{
+  "ui_defs": [
+    "ui/invui_button_send.json",
+    "ui/invui_button_send_chest.json",
+    "ui/invui_button_send_pocket.json"
+  ]
+}

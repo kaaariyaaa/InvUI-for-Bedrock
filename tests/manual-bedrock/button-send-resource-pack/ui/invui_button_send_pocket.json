@@ -1,0 +1,35 @@
+{
+  "namespace": "pocket_containers",
+  "small_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_button_send_pocket_positive_control@invui_button_send.pocket_positive_control": {}
+          },
+          {
+            "invui_button_send_button@invui_button_send.send_button": {}
+          }
+        ]
+      }
+    ]
+  },
+  "large_chest_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_button_send_pocket_positive_control@invui_button_send.pocket_positive_control": {}
+          },
+          {
+            "invui_button_send_button@invui_button_send.send_button": {}
+          }
+        ]
+      }
+    ]
+  }
+}
