@@ -37,6 +37,14 @@ resource_pack/
 
 CLI はこのファイルを導入しません。手動でコピーした場合だけ配置されます。完成するまで、導入手順・部品名・挙動を確定したものとして扱わず、`invui.json` の確認や CHECKLIST の合否に含めないでください。
 
+## 新規パックの生成
+
+```bash
+node bin/cli.js generate-resource-pack --output ./invui-probe-pack
+```
+
+出力先は未作成である必要があります。生成される manifest の UUID は毎回新しくなりますが、UI 部品は画面未接続・実機未検証です。
+
 ## CLI での導入
 
 ```bash
@@ -84,7 +92,7 @@ node bin/cli.js init \
 3. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。`button.send` 部品からチャット送信が成立するかは未確認であり、送信も保護も保証されない。
 4. `ui/invui_controls.json` は作成中のため、完成後に別途検証する。現時点の手順・部品名・挙動を確定したものとして扱わない。
 
-画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang が非推奨とし、互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレート自身は同名前空間を変更しませんが、接続先として選ぶ場合は検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
+画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレート自身は同名前空間を変更しませんが、接続先として選ぶ場合は検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
 
 これらは `tests/manual-bedrock/` の手順と CHECKLIST で記録してください。合格するまで「チェスト画面で動く」「安全」と表現しないでください。
 
