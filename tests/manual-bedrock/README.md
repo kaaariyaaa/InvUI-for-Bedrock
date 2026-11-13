@@ -12,6 +12,7 @@
 > - **表示専用アイテムの保護はありません。** 画面を開くと表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、入力抑制も JSON UI もないためプレイヤーが取り出せます。さらに `refresh()` や状態更新の再描画で同じアイテムが再設定されるため、**取り出しと再描画の組み合わせでアイテムが複製され得ます**。保護を実装するまで、この経路は安全ではありません。
 > - そのため、環境確認と通常チェストの基準確認以外は、`open()` を明示的に許可するテスト用アダプタと、`invui_probe` を参照する手動のテスト画面が揃うまで実施できません。チェックリストは「未実施」のまま残してください。
 > - **実機での実験は使い捨てワールドだけで行ってください。** 本番ワールド・配布用ワールド・共有サーバーでは実行しないでください。
+> - [`button-send-resource-pack/`](button-send-resource-pack/README.md) は、クリック通知の候補である `button.send` を単独で観察する**実験用 Resource Pack（使い捨てワールド専用）**です。クリック通知は未検証であり、通知文字列を自動で設定する仕組みはなく、入力抑制・アイテム保護もありません。`chest-resource-pack/` や `data-driven-resource-pack/` など**他の Resource Pack との併用は禁止**です。このキットが存在することは、クリック通知の試験を実施済みという意味ではありません。
 > - 現時点で自動で実施できるのは CLI と自動テストだけです。CLI は既定でどのファイルにも書き込まず、`--install-resource-pack` を明示した場合だけ `ui/invui.json` を追加します（`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` は変更しません）。実機のクリック・アイテム保護・`InventoryLink` の安全性を、自動テストで代替しないでください。
 
 ## 1. 目的
@@ -133,6 +134,8 @@
 
 透明ボタン等の入力経路が利用できる場合に限り、通常クリックが Script API へ 1 回だけ届くか確認する。`button.send` → チャット通知は候補であり、採用確定ではありません。現行コアにはクリック入力を実機イベントへつなぐ仕組みも JSON UI もないため、この試験は入力ブリッジと UI を実装したテストビルドでのみ実施できる。チェスト画面で成立しない場合は不合格として記録し、別方式を検討する。
 
+この観察だけを切り出した実験用 Resource Pack が [`button-send-resource-pack/`](button-send-resource-pack/README.md) です。**使い捨てワールド専用**で、陽性対照ラベルと `button.send` を発火させるボタンを 1 つずつ通常チェスト画面へ差し込むだけで、**通知文字列を自動で設定する仕組みはなく**、入力抑制もアイテム保護もありません。**他の Resource Pack との併用はできません。** 同梱の `check.mjs` は JSON 構造だけを検査し、表示・押下・通知受信は確認しません。導入しただけでは `CLICK-01` 〜 `CLICK-09` を「実施済み」にしないでください。
+
 確認項目:
 
 - 1 クリックにつき通知が 1 回か（`CLICK-01` 〜 `CLICK-03`）
@@ -156,7 +159,7 @@
 
 ### G. 競合確認
 
-他の Resource Pack と併用し、通常チェスト・InvUI 画面・UI の表示崩れを確認する。競合をゼロにできるとは保証しない。
+他の Resource Pack と併用し、通常チェスト・InvUI 画面・UI の表示崩れを確認する。競合をゼロにできるとは保証しない。ただし [`button-send-resource-pack/`](button-send-resource-pack/README.md) は単独使用が前提の実験キットであり、この競合試験には併用しない（ラベルが同一位置で重なり、由来を切り分けられなくなる）。
 
 - 対象 ID: `COMPAT-01`
 
@@ -202,6 +205,14 @@ node --test tests/manual-bedrock/cli.test.mjs
 - ゲーム内のクリック、アイテム保護、JSON UI の適用範囲。
 - アイテムの複製・消失。
 - 入力方式ごとの挙動。
+
+`button.send` 実験キットの構造検査は、次のコマンドで実行できます。
+
+```bash
+node tests/manual-bedrock/button-send-resource-pack/check.mjs
+```
+
+確認できるのは JSON の整合性（manifest の警告文、`_ui_defs` の参照先、`button.send` だけを発火するボタン、禁止した入力系 control の不在、`chest` / `pocket_containers` への `insert_front`）だけです。表示・押下・通知の受信・通常チェストへの影響は確認しません。
 
 ## 9. 未確定のまま残す事項
 

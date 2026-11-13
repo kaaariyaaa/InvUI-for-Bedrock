@@ -3,6 +3,8 @@
 試験ごとにこのファイルをコピーして記入してください。手順の背景と安全上の注意は [README.md](README.md) を参照します。
 
 > **未検証機能を「動作確認済み」にしないための記録です。** `resource_pack/` にはテンプレート（`manifest.json`、`ui/invui.json`、`ui/_ui_defs.json`）があり、CLI の `--install-resource-pack` で既存 Resource Pack へ `ui/invui.json` だけを追加できますが、どの画面にも接続されておらず実機未検証です。`invui_probe` を参照するテスト画面とテスト用アダプタが揃うまで、`ENV-*` と `BASE-*` 以外は「未実施」のまま残してください。実施は使い捨てワールドだけで行ってください。
+>
+> `button.send` を単独で観察する [`button-send-resource-pack/`](button-send-resource-pack/README.md) は**使い捨てワールド専用**の別キットです。クリック通知は未検証で、通知文字列を自動設定する仕組みはなく、入力抑制・アイテム保護もありません。**他の Resource Pack との併用は禁止**です。このキットを導入しただけでは `CLICK-*` を実施済みにしないでください。
 
 ## 記録ヘッダー
 
@@ -17,6 +19,7 @@
 | 言語設定 | |
 | Behavior Pack 版 / ハッシュ | |
 | Resource Pack 版 / ハッシュ | |
+| 併用した他の Resource Pack（`button-send-resource-pack` は単独使用） | |
 | `ui/invui.json` の導入方法（CLI `--install-resource-pack` / 手動コピー） | |
 | `ui/_ui_defs.json` への `ui/invui.json` 登録の有無 | |
 | `ui/chest_screen.json` を変更したか | |
@@ -77,6 +80,8 @@
 ## D. クリック通知
 
 入力経路が利用可能な場合だけ実施します。`button.send` → チャット通知は候補であり、チェスト画面で成立するかは未確認です。成立しない場合は「不合格」として記録し、別方式を検討します。
+
+`button.send` の観察だけを行う場合は、[`button-send-resource-pack/`](button-send-resource-pack/README.md) を**使い捨てワールドで単独使用**します。このキットは陽性対照ラベルと押下用ボタンを差し込むだけで、**通知文字列を自動設定する仕組みはなく**、入力抑制・アイテム保護もありません。他の Resource Pack との併用は禁止です。ラベルやボタンが出たこと、押下で見た目が変わったことは、CLICK-* の合格ではありません。
 
 | ID | 手順 | 合格条件 | 結果 | 根拠・メモ |
 |---|---|---|---|---|
