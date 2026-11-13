@@ -100,7 +100,9 @@ const { StateConflictError, StateManager } = await load("../src/state");
 const {
   MinecraftVirtualContainerAdapter,
   Window,
+  WindowItemChangeDangerError,
   WindowOpenRejectedError,
+  WindowStateSchemaChangedError,
   minecraftVirtualContainerAdapter,
 } = await load("../src/window");
 const { createdContainers } = await import(mockUrl);
@@ -114,8 +116,18 @@ class InMemoryTestAdapter {
   containers = [];
   opened = [];
   closed = [];
+  events = [];
+  closeSubscriptions = [];
+  itemChangeSubscriptions = [];
+  failOpen = false;
+  failSubscribeClose = false;
+  failSubscribeItemChange = false;
+  failUnsubscribe = false;
+  reentrantClose = false;
+  closeOnOpen = false;
 
   createContainer(options) {
+    this.events.push("create");
     const container = {
       size: options.size,
       title: options.title ?? "",
@@ -132,11 +144,75 @@ class InMemoryTestAdapter {
   }
 
   openContainer(container, viewer) {
+    if (this.failOpen) {
+      throw new Error("open failed");
+    }
     this.opened.push({ container, viewer });
+    this.events.push("open");
+    if (this.closeOnOpen) {
+      this.emitClose(
+        { container, player: viewer, reason: "ServerClosed" },
+        true,
+      );
+    }
   }
 
   closeContainer(container, viewer) {
     this.closed.push({ container, viewer });
+    this.events.push("close");
+    if (this.reentrantClose) {
+      // Model an in-flight dispatch that still runs callbacks captured before
+      // the Window unsubscribed.
+      this.emitClose({ container, player: viewer, reason: "ServerClosed" }, true);
+    }
+  }
+
+  subscribeClose(handler) {
+    this.events.push("subscribeClose");
+    if (this.failSubscribeClose) {
+      throw new Error("close subscribe failed");
+    }
+    const record = { handler, active: true };
+    this.closeSubscriptions.push(record);
+    return () => {
+      this.events.push("unsubscribeClose");
+      record.active = false;
+      if (this.failUnsubscribe) {
+        throw new Error("close unsubscribe failed");
+      }
+    };
+  }
+
+  subscribeItemChange(handler) {
+    this.events.push("subscribeItemChange");
+    if (this.failSubscribeItemChange) {
+      throw new Error("itemChange subscribe failed");
+    }
+    const record = { handler, active: true };
+    this.itemChangeSubscriptions.push(record);
+    return () => {
+      this.events.push("unsubscribeItemChange");
+      record.active = false;
+      if (this.failUnsubscribe) {
+        throw new Error("itemChange unsubscribe failed");
+      }
+    };
+  }
+
+  emitClose(event, force = false) {
+    for (const record of [...this.closeSubscriptions]) {
+      if (record.active || force) {
+        record.handler(event);
+      }
+    }
+  }
+
+  emitItemChange(event, force = false) {
+    for (const record of [...this.itemChangeSubscriptions]) {
+      if (record.active || force) {
+        record.handler(event);
+      }
+    }
   }
 }
 
@@ -192,6 +268,17 @@ function sharedWindow(gui, manager, adapter, key = "schema-key") {
     .setContainerAdapter(adapter)
     .setErrorHandler(() => {})
     .build();
+}
+
+/** Map-backed StateStore so tests can inspect exactly what was persisted. */
+function memoryStore() {
+  const records = new Map();
+  return {
+    records,
+    getItem: (key) => records.get(key) ?? null,
+    setItem: (key, value) => records.set(key, value),
+    removeItem: (key) => records.delete(key),
+  };
 }
 
 test("Window.builder validates viewer, upper GUI, and shared state key", () => {
@@ -1381,6 +1468,172 @@ test("GUI content updates keep the session state schema compatible", async () =>
   reopened.close();
 });
 
+test("a structural GUI change fails closed and never persists the old schema", async () => {
+  const store = memoryStore();
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:before")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey("schema-change")
+    .setStateLifetime("persistent")
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ page: 1 });
+  const [storedKey] = store.records.keys();
+  const persisted = store.records.get(storedKey);
+  assert.equal(JSON.parse(persisted).guiState.page, 1);
+
+  // A GuiLink ingredient belongs to the state schema, so replacing an Item
+  // with one changes the shape (setContent does not).
+  gui.setIngredient(
+    "a",
+    new GuiLink(Gui.normal({ structure: ["x"] }), { key: "child" }),
+  );
+  await tick();
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(adapter.closed.length, 1);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(errors.length, 1);
+  const [{ error, context }] = errors;
+  assert.ok(error instanceof WindowStateSchemaChangedError);
+  assert.equal(error.code, "INVUI_STATE_SCHEMA_CHANGED");
+  assert.equal(context.operation, "guiChange");
+  // The stale shape was never written: the record still holds the state the
+  // old shape saved.
+  assert.equal(store.records.get(storedKey), persisted);
+  assert.throws(() => window.setState({ page: 2 }), /not open/);
+
+  // Adopting the new shape needs an explicit migration instead of silently
+  // loading the state that belonged to the previous shape.
+  const adopted = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey("schema-change")
+    .setStateLifetime("persistent")
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+  await assert.rejects(
+    () => adopted.open(),
+    (failure) =>
+      failure instanceof StateConflictError && failure.code === "SCHEMA_MISMATCH",
+  );
+});
+
+test("a state write reentering a structural GUI change is refused and reported once", async () => {
+  const store = memoryStore();
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const refused = [];
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:before")) },
+  });
+  let window;
+  // Registered before the Window subscribes, so this listener runs first in
+  // the same synchronous cascade as the structural change: the write sees the
+  // new shape while the state still carries the acquired schema.
+  const unsubscribe = gui.subscribe(() => {
+    try {
+      window.setState({ page: 2 });
+    } catch (failure) {
+      refused.push(failure);
+    }
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey("schema-race")
+    .setStateLifetime("persistent")
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const [storedKey] = store.records.keys();
+  const persisted = store.records.get(storedKey);
+
+  gui.setIngredient(
+    "a",
+    new GuiLink(Gui.normal({ structure: ["x"] }), { key: "child" }),
+  );
+  unsubscribe();
+  await tick();
+
+  assert.deepEqual(
+    refused.map((failure) => failure.code),
+    ["INVUI_STATE_SCHEMA_CHANGED"],
+  );
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.code, "INVUI_STATE_SCHEMA_CHANGED");
+  assert.equal(errors[0].context.operation, "setState");
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(store.records.get(storedKey), persisted);
+  assert.equal(JSON.parse(persisted).guiState.page, undefined);
+});
+
+test("content updates keep the schema and normal state writes", async () => {
+  const store = memoryStore();
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const gui = Gui.paged({
+    structure: ["."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [Item.simple(() => stack("minecraft:first"))],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey("content-change")
+    .setStateLifetime("persistent")
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  const [storedKey] = store.records.keys();
+  const schema = JSON.parse(store.records.get(storedKey)).schema;
+
+  gui.setContent([Item.simple(() => stack("minecraft:second"))]);
+  await tick();
+  assert.equal(window.status, "open");
+  assert.equal(container.items[0].typeId, "minecraft:second");
+
+  // The content change kept the shape, so the persistent write still uses the
+  // acquired schema and the Window keeps working.
+  window.setState({ page: 1 });
+  await tick();
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+  const record = JSON.parse(store.records.get(storedKey));
+  assert.equal(record.schema, schema);
+  assert.equal(record.guiState.page, 1);
+  window.close();
+});
+
 test("an Item shown in multiple slots and windows updates every display until each close", async () => {
   const adapter = new InMemoryTestAdapter();
   let typeId = "minecraft:shared_1";
@@ -1486,4 +1739,385 @@ test("Window#setErrorHandler replaces the handler for later failures", async () 
   assert.equal(context.operation, "itemProvider");
   assert.equal(context.slot, 0);
   window.close();
+});
+
+test("subscriptions are installed before open and removed on open failure", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const gui = Gui.normal({ structure: ["a"] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  assert.ok(
+    adapter.events.indexOf("subscribeClose") < adapter.events.indexOf("open"),
+    "close subscription must exist before the screen is opened",
+  );
+  assert.ok(
+    adapter.events.indexOf("subscribeItemChange") < adapter.events.indexOf("open"),
+    "itemChange subscription must exist before the screen is opened",
+  );
+  window.close();
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+
+  // Open failure after the subscription: every hook is removed again.
+  const failed = new InMemoryTestAdapter();
+  failed.failOpen = true;
+  const failedWindow = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(failed)
+    .setErrorHandler(() => {})
+    .build();
+  await assert.rejects(failedWindow.open(), /open failed/);
+  assert.equal(failedWindow.status, "closed");
+  assert.deepEqual(
+    failed.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(
+    failed.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.equal(failed.opened.length, 0);
+});
+
+test("a failed itemChange subscription removes the successful close subscription", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failSubscribeItemChange = true;
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await assert.rejects(() => window.open(), /itemChange subscribe failed/);
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.equal(adapter.itemChangeSubscriptions.length, 0);
+  assert.equal(adapter.opened.length, 0);
+  assert.deepEqual(
+    errors.map(({ context }) => context.operation),
+    ["open"],
+  );
+});
+
+test("an unsubscribe failure on open failure does not mask the open error", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failOpen = true;
+  adapter.failUnsubscribe = true;
+  const errors = [];
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await assert.rejects(() => window.open(), /open failed/);
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, []);
+  assert.ok(
+    errors.some(
+      ({ error, context }) =>
+        context.operation === "unsubscribe" &&
+        error.message === "close unsubscribe failed",
+    ),
+  );
+  assert.ok(
+    errors.some(
+      ({ error, context }) =>
+        context.operation === "open" && error.message === "open failed",
+    ),
+  );
+});
+
+test("a close event tears down once and ignores other players and containers", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  adapter.emitClose({ container, player: otherPlayer, reason: "PlayerClosed" });
+  adapter.emitClose({ container: {}, player, reason: "PlayerClosed" });
+  assert.equal(window.status, "open");
+  assert.equal(window.container, container);
+  assert.deepEqual(closeReasons, []);
+
+  adapter.emitClose({ container, player, reason: "PlayerClosed" });
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  // The screen was already closed; no second close request is sent.
+  assert.equal(adapter.closed.length, 0);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+
+  // Duplicate/delayed delivery after teardown must not notify again.
+  adapter.emitClose({ container, player, reason: "ServerClosed" }, true);
+  adapter.emitClose({ container, player, reason: "ServerClosed" }, true);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.deepEqual(errors, []);
+});
+
+test("an itemChange reports danger, stops rendering, closes, and is never a click or restore", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const clicks = [];
+  const pending = deferred();
+  let phase = "initial";
+  const item = Item.builder()
+    .setItemProvider(() =>
+      phase === "initial" ? stack("minecraft:display") : pending.promise,
+    )
+    .addClickHandler((click) => clicks.push(click.slot))
+    .build();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:display");
+
+  const writes = [];
+  const originalSetItem = container.setItem.bind(container);
+  container.setItem = (slot, value) => {
+    writes.push({ slot, typeId: value?.typeId });
+    originalSetItem(slot, value);
+  };
+
+  // The screen removed the display item. It must not be restored.
+  container.items[0] = undefined;
+
+  // Start an in-flight provider whose result arrives after the itemChange.
+  phase = "async";
+  item.notifyWindows();
+  adapter.emitItemChange({ container, player, slot: 0 });
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.deepEqual(clicks, []);
+  assert.deepEqual(writes, []);
+  assert.equal(container.items[0], undefined);
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(adapter.closed[0].container, container);
+  assert.equal(adapter.closed[0].viewer, player);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(errors.length, 1);
+  const [{ error, context }] = errors;
+  assert.ok(error instanceof WindowItemChangeDangerError);
+  assert.equal(error.code, "INVUI_CONTAINER_ITEM_CHANGE");
+  assert.equal(error.slot, 0);
+  assert.equal(context.operation, "itemChange");
+  assert.equal(context.slot, 0);
+  assert.equal(await window.handleClick(0), false);
+
+  pending.resolve(stack("minecraft:late"));
+  await tick();
+  await tick();
+  assert.deepEqual(writes, []);
+  assert.equal(container.items[0], undefined);
+
+  // Neither duplicate delivery nor the close event that follows the request
+  // may notify again.
+  adapter.emitItemChange({ container, player, slot: 0 }, true);
+  adapter.emitClose({ container, player, reason: "ServerClosed" }, true);
+  assert.equal(errors.length, 1);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+});
+
+test("an itemChange from another player or container is ignored", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  let typeId = "minecraft:before";
+  const item = Item.simple(() => stack(typeId));
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  adapter.emitItemChange({ container, player: otherPlayer, slot: 0 });
+  adapter.emitItemChange({ container: {}, player, slot: 0 });
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+
+  // The ignored events must not have stopped rendering either.
+  typeId = "minecraft:after";
+  item.notifyWindows();
+  await tick();
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:after");
+
+  adapter.emitItemChange({ container, player, slot: 0 });
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "itemChange");
+});
+
+test("a delayed close event from a previous open is ignored after reopening", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+
+  await window.open();
+  const secondContainer = adapter.containers[1];
+  assert.notEqual(secondContainer, firstContainer);
+
+  // A stale event for the previous container arrives while the new screen is
+  // open: it must not tear the new screen down.
+  adapter.emitClose(
+    { container: firstContainer, player, reason: "PlayerClosed" },
+    true,
+  );
+  assert.equal(window.status, "open");
+  assert.equal(window.container, secondContainer);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+
+  adapter.emitClose({ container: secondContainer, player, reason: "PlayerClosed" });
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
+});
+
+test("a close event dispatched during openContainer resolves open as closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.closeOnOpen = true;
+  const errors = [];
+  const closeReasons = [];
+  let opened = 0;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addOpenHandler(() => opened++)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "closed");
+  assert.equal(opened, 0);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(adapter.closed.length, 0);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(errors, []);
+});
+
+test("a close event dispatched by closeContainer does not notify the close handler twice", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.reentrantClose = true;
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 1);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+});
+
+test("adapters without event hooks keep working", async () => {
+  const containers = [];
+  const adapter = {
+    canOpenScreens: true,
+    createContainer(options) {
+      const container = {
+        size: options.size,
+        items: new Array(options.size).fill(undefined),
+        setItem(slot, value) {
+          this.items[slot] = value;
+        },
+        getItem(slot) {
+          return this.items[slot];
+        },
+      };
+      containers.push(container);
+      return container;
+    },
+    openContainer() {},
+    closeContainer() {},
+  };
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(containers[0].items[0].typeId, "minecraft:a");
+  window.close();
+  assert.equal(window.status, "closed");
 });

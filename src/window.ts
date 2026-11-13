@@ -51,9 +51,46 @@ export type WindowErrorHandler = (error: unknown, context: WindowErrorContext) =
 export type WindowOpenHandler = () => void;
 export type WindowCloseHandler = (reason: WindowCloseReason) => void;
 
+/**
+ * Adapter-side screen events. The Window filters them again by player and
+ * container identity, so an adapter may forward events for other players or
+ * containers without affecting this Window.
+ */
+export interface WindowContainerCloseEvent {
+  readonly container: VirtualContainer;
+  readonly player: Player;
+  readonly reason: WindowCloseReason;
+}
+
+export interface WindowContainerItemChangeEvent {
+  readonly container: VirtualContainer;
+  readonly player: Player;
+  readonly slot: number;
+}
+
+export type WindowContainerCloseHandler = (event: WindowContainerCloseEvent) => void;
+export type WindowContainerItemChangeHandler = (
+  event: WindowContainerItemChangeEvent,
+) => void;
+
 function assertErrorHandler(handler: WindowErrorHandler): void {
   if (typeof handler !== "function") {
     throw new TypeError("InvUI: error handler must be a function.");
+  }
+}
+
+function isSamePlayer(eventPlayer: Player | undefined, viewer: Player): boolean {
+  if (!eventPlayer) {
+    return false;
+  }
+  if (eventPlayer === viewer) {
+    return true;
+  }
+  try {
+    return eventPlayer.id === viewer.id;
+  } catch {
+    // A departed player can be invalid; comparing it must not throw.
+    return false;
   }
 }
 
@@ -69,6 +106,44 @@ export class WindowOpenRejectedError extends Error {
 }
 
 /**
+ * Reported through the error handler (operation `itemChange`) when a player
+ * changes the Window's container through the screen. The change is not treated
+ * as a click and the previous item is not restored: the render is stopped and
+ * the screen is closed instead, because moves/copies through the screen are
+ * unverified.
+ */
+export class WindowItemChangeDangerError extends Error {
+  readonly code = "INVUI_CONTAINER_ITEM_CHANGE";
+  readonly slot: number;
+
+  constructor(slot: number) {
+    super(
+      `InvUI: slot ${slot} of the Window container was changed through the screen. Rendering is stopped and the Window is closing.`,
+    );
+    this.name = "WindowItemChangeDangerError";
+    this.slot = slot;
+  }
+}
+
+/**
+ * Reported through the error handler (operation `guiChange` for a structural
+ * GUI update, `setState` for a write that raced it) when the upper GUI's shape
+ * no longer matches the schema the state was acquired with. The state identity
+ * still describes the old shape, so persisting it would save new state under a
+ * stale schema token: the write is refused and the Window closes instead.
+ */
+export class WindowStateSchemaChangedError extends Error {
+  readonly code = "INVUI_STATE_SCHEMA_CHANGED";
+
+  constructor() {
+    super(
+      "InvUI: the GUI shape changed after the Window state was acquired. State updates are refused and the Window is closing.",
+    );
+    this.name = "WindowStateSchemaChangedError";
+  }
+}
+
+/**
  * The boundary between Window and the Bedrock screen API.
  *
  * `canOpenScreens` must be true only for an isolated test adapter. It is the
@@ -80,6 +155,14 @@ export interface WindowContainerAdapter {
   createContainer(options: VirtualContainerOptions): VirtualContainer;
   openContainer(container: VirtualContainer, viewer: Player): void;
   closeContainer(container: VirtualContainer, viewer: Player): void;
+  /**
+   * Optional event hooks. The Window subscribes before it opens the screen and
+   * unsubscribes on close or on a failed open. Both return an unsubscribe
+   * function; the Window removes a subscription that succeeded even when the
+   * other one throws.
+   */
+  subscribeClose?(handler: WindowContainerCloseHandler): () => void;
+  subscribeItemChange?(handler: WindowContainerItemChangeHandler): () => void;
 }
 
 /**
@@ -374,10 +457,20 @@ export class Window {
   #container: VirtualContainer | undefined;
   #layout: ResolvedGuiLayout | undefined;
   #stateHandle: StateHandle | undefined;
+  /** Schema token the current state handle was acquired with. */
+  #stateSchema: string | undefined;
+  /** Latches the stale-schema fail-closed path against reentrant notifications. */
+  #schemaFault = false;
   #stateSubscription: (() => void) | undefined;
   /** Subscription to `upperGui`; covers GuiLink and TabGui children. */
   #guiSubscription: (() => void) | undefined;
   #elementSubscriptions: Array<() => void> = [];
+  /** Adapter close/itemChange unsubscribe functions, removed on close or failure. */
+  #eventUnsubscribers: Array<() => void> = [];
+  /** Set once `openContainer` has been called, before the screen may emit events. */
+  #screenRequested = false;
+  /** Set when an item change through the screen must not be rendered over. */
+  #renderingHalted = false;
   /** Per-slot render tokens so an older async provider cannot overwrite a newer result. */
   #slotRenderTokens = new Map<number, number>();
   /**
@@ -434,11 +527,22 @@ export class Window {
     }
 
     this.#status = "opening";
+    this.#renderingHalted = false;
+    this.#screenRequested = false;
+    this.#schemaFault = false;
     const generation = ++this.#generation;
 
     try {
+      // Subscribe before the screen can emit anything. A close event during
+      // opening (for example UserBusy) must still tear the Window down.
+      if (!this.#subscribeToContainerEvents(generation)) {
+        return;
+      }
       const handle = this.#acquireState();
       this.#stateHandle = handle;
+      // Remember the shape the state belongs to. A later structural GUI change
+      // must not write state under this token (see #onGuiChanged).
+      this.#stateSchema = handle.schema;
       // Subscribe before the first provider runs: state may change while async
       // providers are still resolving, and the screen must show the new state.
       this.#stateSubscription = handle.subscribe(() => this.#onStateChanged());
@@ -487,7 +591,13 @@ export class Window {
         }
       }
 
+      this.#screenRequested = true;
       this.#adapter.openContainer(container, this.viewer);
+      // A close event may have been dispatched synchronously from
+      // openContainer; it already tore the Window down.
+      if (generation !== this.#generation || this.#status !== "opening") {
+        return;
+      }
       this.#status = "open";
       this.#runOpenHandlers();
     } catch (error) {
@@ -522,7 +632,12 @@ export class Window {
   }
 
   async #refresh(): Promise<void> {
-    if (this.#status !== "open" || !this.#container || !this.#stateHandle) {
+    if (
+      this.#renderingHalted ||
+      this.#status !== "open" ||
+      !this.#container ||
+      !this.#stateHandle
+    ) {
       return;
     }
     const generation = this.#generation;
@@ -562,10 +677,20 @@ export class Window {
 
   /** Patch the Window's state. Subscribers (including this Window) refresh. */
   setState(patch: GuiStatePatch): StateSnapshot {
-    if (!this.#stateHandle) {
+    const handle = this.#stateHandle;
+    if (!handle) {
       throw new Error(`InvUI: Window ${this.id} is not open.`);
     }
-    return this.#stateHandle.set(patch);
+    // Another GUI listener can run before this Window's own listener in the
+    // same synchronous notification cascade, so a write must re-check the
+    // shape itself. Persisting after a structural change would store the new
+    // state under the schema the old shape was acquired with.
+    if (!this.#stateSchemaMatches()) {
+      const error = new WindowStateSchemaChangedError();
+      this.#failStateSchema("setState", error);
+      throw error;
+    }
+    return handle.set(patch);
   }
 
   getState(): StateSnapshot {
@@ -640,6 +765,15 @@ export class Window {
   }
 
   close(reason: WindowCloseReason = "ServerClosed"): void {
+    this.#performClose(reason, true);
+  }
+
+  /**
+   * The single close path for explicit close calls and adapter close events.
+   * `requestAdapterClose` is false for a close event: the screen is already
+   * closing, and asking again is neither needed nor safe.
+   */
+  #performClose(reason: WindowCloseReason, requestAdapterClose: boolean): void {
     if (this.#status === "closed") {
       return;
     }
@@ -648,11 +782,16 @@ export class Window {
       return;
     }
 
-    const wasOpen = this.#status === "open";
+    const wasVisible = this.#status === "open" || this.#screenRequested;
     this.#status = "closing";
     this.#generation++;
+    this.#stopRendering();
 
-    if (wasOpen && this.#container) {
+    // Detach before touching the adapter: closeContainer may dispatch the
+    // close event synchronously and must not run this path twice.
+    this.#unsubscribeFromContainerEvents();
+
+    if (requestAdapterClose && wasVisible && this.#container) {
       try {
         this.#adapter.closeContainer(this.#container, this.viewer);
       } catch (error) {
@@ -663,7 +802,8 @@ export class Window {
     this.#teardown();
     this.#status = "closed";
 
-    if (wasOpen) {
+    // Exactly once: a duplicate or delayed close event sees status `closed`.
+    if (wasVisible) {
       for (const handler of [...this.#closeHandlers]) {
         try {
           handler(reason);
@@ -672,6 +812,126 @@ export class Window {
         }
       }
     }
+  }
+
+  #onContainerClose(generation: number, event: WindowContainerCloseEvent): void {
+    if (generation !== this.#generation) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    const container = this.#container;
+    if (!container || event.container !== container) {
+      return;
+    }
+    if (!isSamePlayer(event.player, this.viewer)) {
+      return;
+    }
+    this.#performClose(event.reason, false);
+  }
+
+  /**
+   * A player changed the container through the screen. This is not a click and
+   * the previous item is not restored: report the danger, stop rendering (so a
+   * late provider cannot write over the changed slot), and request close.
+   */
+  #onContainerItemChange(
+    generation: number,
+    event: WindowContainerItemChangeEvent,
+  ): void {
+    if (generation !== this.#generation) {
+      return;
+    }
+    if (this.#status !== "open") {
+      return;
+    }
+    const container = this.#container;
+    if (!container || event.container !== container) {
+      return;
+    }
+    if (!isSamePlayer(event.player, this.viewer)) {
+      return;
+    }
+    this.#report(new WindowItemChangeDangerError(event.slot), "itemChange", event.slot);
+    this.#performClose("ServerClosed", true);
+  }
+
+  /**
+   * Subscribes to the adapter's optional close/itemChange hooks before opening.
+   * Returns false when an event delivered during subscription already closed
+   * the Window. Subscriptions made before a failure are always removed.
+   */
+  #subscribeToContainerEvents(generation: number): boolean {
+    const unsubscribers: Array<() => void> = [];
+    const track = (unsubscribe: unknown, kind: string): void => {
+      if (typeof unsubscribe !== "function") {
+        throw new TypeError(
+          `InvUI: adapter ${kind} subscription must return an unsubscribe function.`,
+        );
+      }
+      unsubscribers.push(unsubscribe as () => void);
+    };
+
+    try {
+      if (this.#adapter.subscribeClose) {
+        track(
+          this.#adapter.subscribeClose((event) =>
+            this.#onContainerClose(generation, event),
+          ),
+          "close",
+        );
+      }
+      // A handler may have closed the Window while the first subscription was
+      // being installed; do not install the second one then.
+      if (generation !== this.#generation || this.#status !== "opening") {
+        this.#disposeEventSubscriptions(unsubscribers);
+        return false;
+      }
+      if (this.#adapter.subscribeItemChange) {
+        track(
+          this.#adapter.subscribeItemChange((event) =>
+            this.#onContainerItemChange(generation, event),
+          ),
+          "itemChange",
+        );
+      }
+    } catch (error) {
+      this.#disposeEventSubscriptions(unsubscribers);
+      throw error;
+    }
+
+    if (generation !== this.#generation || this.#status !== "opening") {
+      this.#disposeEventSubscriptions(unsubscribers);
+      return false;
+    }
+    this.#eventUnsubscribers = unsubscribers;
+    return true;
+  }
+
+  #unsubscribeFromContainerEvents(): void {
+    const unsubscribers = this.#eventUnsubscribers;
+    this.#eventUnsubscribers = [];
+    this.#disposeEventSubscriptions(unsubscribers);
+  }
+
+  #disposeEventSubscriptions(unsubscribers: Array<() => void>): void {
+    for (const unsubscribe of unsubscribers) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        // A broken unsubscribe must not keep the Window open or mask the
+        // original open/close failure.
+        this.#report(error, "unsubscribe");
+      }
+    }
+  }
+
+  #stopRendering(): void {
+    this.#renderingHalted = true;
+    this.#renderEpoch += 1;
+    this.#refreshPending = false;
+    this.#slotRenderTokens.clear();
   }
 
   #acquireState(): StateHandle {
@@ -700,15 +960,65 @@ export class Window {
 
   /**
    * GUI content/ingredients changed. Gui forwards GuiLink and TabGui child
-   * changes, so this also covers children of the upper GUI. The state handle
-   * (and its schema) is deliberately left untouched: a GUI update only changes
-   * what is rendered, not which state identity the open Window owns.
+   * changes, so this also covers children of the upper GUI.
+   *
+   * A content change (setContent) keeps the shape, so the open state stays
+   * valid and only the render refreshes. A structural change makes the schema
+   * token stale: the state handle would persist new state under the schema of
+   * the previous shape, so the Window fails closed instead.
    */
   #onGuiChanged(): void {
+    if (this.#schemaFault || this.#renderingHalted) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    if (!this.#stateSchemaMatches()) {
+      this.#failStateSchema("guiChange");
+      return;
+    }
     this.#scheduleRefresh();
   }
 
+  /** True while the acquired state still describes the current upper GUI. */
+  #stateSchemaMatches(): boolean {
+    const acquired = this.#stateSchema;
+    if (acquired === undefined) {
+      return true;
+    }
+    try {
+      return schemaOf(this.upperGui) === acquired;
+    } catch {
+      // A shape that cannot be described cannot be matched to the state.
+      return false;
+    }
+  }
+
+  /**
+   * Refuse further work on a state whose schema no longer describes the GUI:
+   * report once, then close (which stops rendering and releases the handle).
+   * The latch makes reentrant notifications from a GUI listener, the error
+   * handler, or the close handlers harmless.
+   */
+  #failStateSchema(
+    operation: string,
+    error = new WindowStateSchemaChangedError(),
+  ): void {
+    if (this.#schemaFault) {
+      return;
+    }
+    this.#schemaFault = true;
+    this.#report(error, operation);
+    if (this.#status === "opening" || this.#status === "open") {
+      this.#performClose("ServerClosed", true);
+    }
+  }
+
   #scheduleRefresh(): void {
+    if (this.#renderingHalted) {
+      return;
+    }
     if (this.#status !== "opening" && this.#status !== "open") {
       return;
     }
@@ -732,7 +1042,7 @@ export class Window {
 
   async #renderAll(generation: number): Promise<void> {
     const layout = this.#layout;
-    if (!layout) {
+    if (!layout || this.#renderingHalted) {
       return;
     }
     // A new batch invalidates every result started before it.
@@ -751,7 +1061,7 @@ export class Window {
 
   async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {
     const layout = this.#layout;
-    if (!layout || !this.#container) {
+    if (!layout || !this.#container || this.#renderingHalted) {
       return;
     }
     const generation = this.#generation;
@@ -836,6 +1146,7 @@ export class Window {
   }
 
   #teardown(): void {
+    this.#unsubscribeFromContainerEvents();
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
     this.#guiSubscription?.();
@@ -843,8 +1154,10 @@ export class Window {
     this.#unsubscribeElements();
     this.#stateHandle?.release();
     this.#stateHandle = undefined;
+    this.#stateSchema = undefined;
     this.#container = undefined;
     this.#layout = undefined;
+    this.#screenRequested = false;
     this.#refreshPending = false;
     this.#slotRenderTokens.clear();
   }
