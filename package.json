@@ -1,0 +1,39 @@
+{
+  "name": "invui-bedrock",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "description": "GUI library for Minecraft Bedrock Edition Script API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "invui-bedrock": "./bin/cli.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "resource_pack",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "pack": "npm pack --dry-run",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@minecraft/server": "2.13.0-beta.1.26.70-preview.24"
+  },
+  "devDependencies": {
+    "@minecraft/server": "2.13.0-beta.1.26.70-preview.24",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
