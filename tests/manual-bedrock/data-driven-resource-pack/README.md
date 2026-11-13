@@ -40,7 +40,7 @@ check.mjs                        JSON 構造チェック（実機の代替では
 
 | 観察 | 推定される解釈 |
 |---|---|
-| `VirtualContainer` の画面にラベルが出た | その画面が `data_driven_container` 系列を使っている**可能性がある**（desktop / pocket も判別できるかもしれない）。ただし通常画面でも出得るため、ラベルだけで VirtualContainer 専用とは言えない |
+| `VirtualContainer` の画面にラベルが出た | その画面が `data_driven_container` 系列を使っている**可能性がある**（desktop / pocket も判別できるかもしれない）。ただし data-driven ブロックなど他の利用箇所でも出得るため、ラベルだけで VirtualContainer 専用とは言えない |
 | ラベルが出ない | `data_driven_container` を使っていない**かもしれない**。**または** パック未適用・`modifications` 非対応・ラベルがレイアウトに隠れた。**1 回の陰性では何も断定できない** |
 | 通常チェストでもラベルが出た | `data_driven_container` が通常コンテナと共有されている**可能性がある**。VirtualContainer だけの識別には使えない |
 
