@@ -13,13 +13,87 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { registerHooks } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+
+/*
+ * Stand-in for @minecraft/server. The package only imports ItemStack, world,
+ * and system at runtime; every one of them is provided here so the packed ESM
+ * can be evaluated outside Minecraft.
+ */
+const minecraftServerMockSource = `
+export class ItemStack {
+  constructor(typeId, amount = 1) {
+    if (typeof typeId !== "string" || typeId.length === 0) {
+      throw new TypeError("ItemStack requires a non-empty type id");
+    }
+    this.typeId = typeId;
+    this.amount = amount;
+    this.nameTag = "";
+    this.lore = [];
+  }
+  clone() {
+    const copy = new ItemStack(this.typeId, this.amount);
+    copy.nameTag = this.nameTag;
+    copy.lore = [...this.lore];
+    return copy;
+  }
+  setLore(lines) {
+    this.lore = [...lines];
+  }
+}
+
+export const world = {
+  containers: [],
+  virtualContainerManager: {
+    create(options) {
+      if (!options || !Number.isInteger(options.size)) {
+        throw new TypeError("VirtualContainerOptions.size is required");
+      }
+      const container = {
+        size: options.size,
+        title: options.title,
+        items: new Map(),
+        setItem(slot, item) {
+          if (!Number.isInteger(slot) || slot < 0 || slot >= this.size) {
+            throw new RangeError("slot out of range");
+          }
+          if (item === undefined) {
+            this.items.delete(slot);
+          } else {
+            this.items.set(slot, item.clone());
+          }
+        },
+        getItem(slot) {
+          const item = this.items.get(slot);
+          return item === undefined ? undefined : item.clone();
+        },
+      };
+      world.containers.push(container);
+      return container;
+    },
+  },
+};
+
+export const system = {
+  runs: new Map(),
+  nextRunId: 1,
+  runInterval(callback, ticks = 1) {
+    const runId = this.nextRunId++;
+    this.runs.set(runId, { callback, ticks });
+    return runId;
+  },
+  clearRun(runId) {
+    this.runs.delete(runId);
+  },
+};
+`;
 
 const consumerSource = `
 import type { Player } from "@minecraft/server";
@@ -192,6 +266,16 @@ test("packed package contents and consumer type check", async (t) => {
       assert.ok(packedSet.has(required), `missing packed file: ${required}`);
     }
 
+    // The packed CLI resolves --install-resource-pack from its own package root,
+    // so these template files must be part of the tarball, not just the repo.
+    for (const required of [
+      "resource_pack/manifest.json",
+      "resource_pack/ui/_ui_defs.json",
+      "resource_pack/ui/invui.json",
+    ]) {
+      assert.ok(packedSet.has(required), `missing packed resource pack file: ${required}`);
+    }
+
     const cli = packed.files.find((file) => file.path === "bin/cli.js");
     assert.ok((cli.mode & 0o111) !== 0, "bin/cli.js must stay executable in the tarball");
 
@@ -236,6 +320,22 @@ test("packed package contents and consumer type check", async (t) => {
   const installedDir = path.join(consumerDir, "node_modules", "invui-bedrock");
   fs.mkdirSync(path.dirname(installedDir), { recursive: true });
   fs.renameSync(packageDir, installedDir);
+
+  await t.test("tarball carries the resource pack files byte-for-byte", () => {
+    for (const relativePath of [
+      "resource_pack/manifest.json",
+      "resource_pack/ui/_ui_defs.json",
+      "resource_pack/ui/invui.json",
+    ]) {
+      const extracted = path.join(installedDir, relativePath);
+      assert.ok(fs.existsSync(extracted), `tarball is missing ${relativePath}`);
+      assert.deepEqual(
+        fs.readFileSync(extracted),
+        fs.readFileSync(path.join(repoRoot, relativePath)),
+        `tarball content differs from repository for ${relativePath}`,
+      );
+    }
+  });
 
   const minecraftScopeDir = path.join(consumerDir, "node_modules", "@minecraft");
   fs.mkdirSync(minecraftScopeDir, { recursive: true });
@@ -292,6 +392,250 @@ test("packed package contents and consumer type check", async (t) => {
       result.status,
       0,
       `consumer type check failed (exit ${result.status})\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  });
+
+  await t.test("packed ESM imports and runs against a fake @minecraft/server", async () => {
+    const mockUrl = `data:text/javascript;base64,${Buffer.from(minecraftServerMockSource).toString("base64")}`;
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier === "@minecraft/server") {
+          return { url: mockUrl, shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      },
+    });
+
+    const minecraft = await import(mockUrl);
+    const packageUrl = pathToFileURL(path.join(installedDir, "dist", "index.js")).href;
+    const {
+      Gui,
+      Item,
+      ItemBuilder,
+      Markers,
+      StateManager,
+      Window,
+      WindowOpenRejectedError,
+    } = await import(packageUrl);
+
+    const clicks = [];
+    const button = Item.builder()
+      .setItemProvider(
+        new ItemBuilder("minecraft:diamond").setName("Buy").addLoreLines("Click to buy"),
+      )
+      .addClickHandler((click) => {
+        clicks.push(`${click.player.id}:${click.slot}`);
+      })
+      .build();
+    const ticking = Item.builder()
+      .setItemProvider(new ItemBuilder("minecraft:clock"))
+      .updatePeriodically(20)
+      .build();
+
+    const gui = Gui.paged({
+      structure: ["xx"],
+      ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+      content: [button, ticking],
+    });
+    const viewer = { id: "player-1", name: "Steve" };
+    const opened = [];
+    const closed = [];
+    const adapter = {
+      canOpenScreens: true,
+      createContainer: (options) => minecraft.world.virtualContainerManager.create(options),
+      openContainer: (container) => opened.push(container),
+      closeContainer: (container) => closed.push(container),
+    };
+
+    const window = Window.builder()
+      .setViewer(viewer)
+      .setTitle("Shop")
+      .setUpperGui(gui)
+      .setStateManager(new StateManager())
+      .setContainerAdapter(adapter)
+      .build();
+
+    await window.open();
+    assert.equal(window.status, "open");
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0].size, 9);
+    assert.equal(opened[0].title, "Shop");
+
+    const display = opened[0].getItem(0);
+    assert.ok(display instanceof minecraft.ItemStack, "content slot must use the fake ItemStack");
+    assert.equal(display.typeId, "minecraft:diamond");
+    assert.equal(display.nameTag, "Buy");
+    assert.deepEqual(display.lore, ["Click to buy"]);
+
+    assert.equal(minecraft.system.runs.size, 1, "periodic item must schedule through fake system");
+    const [periodicRun] = [...minecraft.system.runs.values()];
+    assert.equal(periodicRun.ticks, 20);
+
+    assert.equal(await window.handleClick(0), true);
+    assert.deepEqual(clicks, ["player-1:0"]);
+
+    window.setState({ page: 1 });
+    assert.equal(window.getState().page, 1);
+
+    window.close("PlayerClosed");
+    assert.equal(window.status, "closed");
+    assert.equal(closed.length, 1);
+    assert.equal(minecraft.system.runs.size, 0, "closing must cancel periodic updates");
+
+    // The production adapter must reject before creating any container.
+    const guarded = Window.builder().setViewer(viewer).setUpperGui(gui).build();
+    await assert.rejects(guarded.open(), WindowOpenRejectedError);
+    assert.equal(guarded.status, "created", "rejected open must not leave the window half-open");
+    assert.equal(minecraft.world.containers.length, 1, "real adapter must not create a container");
+  });
+
+  await t.test("packed bin CLI runs", () => {
+    const cli = path.join(installedDir, "bin", "cli.js");
+    const packedPackage = JSON.parse(fs.readFileSync(path.join(installedDir, "package.json"), "utf8"));
+
+    const version = runOrFail(process.execPath, [cli, "--version"], { cwd: tmp });
+    assertSucceeded(version, "cli --version");
+    assert.equal(version.stdout.trim(), `invui-bedrock ${packedPackage.version}`);
+
+    const help = runOrFail(process.execPath, [cli, "--help"], { cwd: tmp });
+    assertSucceeded(help, "cli --help");
+    assert.match(help.stdout, /invui-bedrock — setup helper/);
+    assert.match(help.stdout, /\binit\b/);
+
+    const behaviorPack = path.join(tmp, "behavior_pack");
+    const resourcePack = path.join(tmp, "resource_pack");
+    fs.mkdirSync(path.join(behaviorPack, "scripts"), { recursive: true });
+    fs.mkdirSync(resourcePack, { recursive: true });
+    fs.writeFileSync(
+      path.join(behaviorPack, "manifest.json"),
+      JSON.stringify(
+        {
+          format_version: 2,
+          header: {
+            name: "Test BP",
+            description: "",
+            uuid: "00000000-0000-0000-0000-000000000001",
+            version: [1, 0, 0],
+            min_engine_version: [1, 21, 0],
+          },
+          modules: [
+            {
+              type: "script",
+              language: "javascript",
+              uuid: "00000000-0000-0000-0000-000000000002",
+              version: [1, 0, 0],
+              entry: "scripts/main.js",
+            },
+          ],
+          dependencies: [{ module_name: "@minecraft/server", version: "1.0.0" }],
+        },
+        null,
+        2,
+      ),
+    );
+    fs.writeFileSync(path.join(behaviorPack, "scripts", "main.js"), "// test entry\n");
+    fs.writeFileSync(
+      path.join(resourcePack, "manifest.json"),
+      JSON.stringify(
+        {
+          format_version: 2,
+          header: {
+            name: "Test RP",
+            description: "",
+            uuid: "00000000-0000-0000-0000-000000000003",
+            version: [1, 0, 0],
+            min_engine_version: [1, 21, 0],
+          },
+          modules: [
+            {
+              type: "resources",
+              uuid: "00000000-0000-0000-0000-000000000004",
+              version: [1, 0, 0],
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const init = runOrFail(
+      process.execPath,
+      [cli, "init", "--behavior-pack", behaviorPack, "--resource-pack", resourcePack, "--json"],
+      { cwd: tmp },
+    );
+    assertSucceeded(init, "cli init --json");
+
+    const report = JSON.parse(init.stdout);
+    assert.equal(report.tool, "invui-bedrock");
+    assert.equal(report.toolVersion, packedPackage.version);
+    assert.equal(report.status, "beta-unverified");
+    assert.equal(report.inputs.behaviorPack, behaviorPack);
+    assert.equal(report.inputs.resourcePack, resourcePack);
+    assert.match(report.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.ok(
+      report.checks.some(
+        (check) => check.area === "behavior-pack" && check.id === "bp.script-module" && check.level === "ok",
+      ),
+      "behavior pack script module should be detected",
+    );
+    assert.ok(
+      report.checks.some(
+        (check) => check.area === "resource-pack" && check.id === "manifest.exists" && check.level === "ok",
+      ),
+      "resource pack manifest should be detected",
+    );
+    assert.equal(fs.existsSync(path.join(resourcePack, "ui")), false, "CLI must not create UI files");
+
+    const missingArgs = runOrFail(process.execPath, [cli, "init"], { cwd: tmp });
+    assert.equal(missingArgs.status, 1);
+    assert.match(missingArgs.stderr, /--behavior-pack/);
+
+    // The opt-in probe must come from the packed resource_pack template and
+    // land in a valid Resource Pack without touching existing files.
+    const packedTemplate = path.join(installedDir, "resource_pack", "ui", "invui.json");
+    assert.ok(fs.existsSync(packedTemplate), "packed resource pack template is missing");
+    const manifestBefore = fs.readFileSync(path.join(resourcePack, "manifest.json"), "utf8");
+
+    const install = runOrFail(
+      process.execPath,
+      [
+        cli,
+        "init",
+        "--behavior-pack",
+        behaviorPack,
+        "--resource-pack",
+        resourcePack,
+        "--install-resource-pack",
+        "--json",
+      ],
+      { cwd: tmp },
+    );
+    assertSucceeded(install, "cli init --install-resource-pack --json");
+
+    const installReport = JSON.parse(install.stdout);
+    assert.equal(installReport.resourcePackInstall.status, "installed");
+    assert.deepEqual(
+      installReport.resourcePackInstall.files.map((file) => [file.path, file.action]),
+      [["ui/invui.json", "created"]],
+    );
+
+    const installedProbe = path.join(resourcePack, "ui", "invui.json");
+    assert.ok(fs.existsSync(installedProbe), "packed CLI did not install ui/invui.json");
+    assert.deepEqual(
+      fs.readFileSync(installedProbe),
+      fs.readFileSync(packedTemplate),
+      "installed probe must match the packed template",
+    );
+    assert.deepEqual(
+      fs.readFileSync(installedProbe),
+      fs.readFileSync(path.join(repoRoot, "resource_pack", "ui", "invui.json")),
+      "installed probe must match the repository template",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(resourcePack, "manifest.json"), "utf8"),
+      manifestBefore,
+      "install must not rewrite the Resource Pack manifest",
     );
   });
 });

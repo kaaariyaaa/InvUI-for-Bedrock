@@ -1,0 +1,227 @@
+{
+  "namespace": "invui_controls_probe",
+  "invui_controls_probe_root": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "controls": [
+      {
+        "probe_panel@invui_controls_probe.invui_controls_probe_panel": {
+          "anchor_from": "center",
+          "anchor_to": "center"
+        }
+      }
+    ]
+  },
+  "invui_controls_probe_panel": {
+    "type": "stack_panel",
+    "orientation": "vertical",
+    "size": [300, "100%c"],
+    "anchor_from": "center",
+    "anchor_to": "center",
+    "controls": [
+      {
+        "title": {
+          "type": "label",
+          "size": ["100%", "default"],
+          "text": "InvUI controls probe",
+          "color": [1.0, 1.0, 1.0],
+          "shadow": false
+        }
+      },
+      {
+        "title_padding": {
+          "type": "panel",
+          "size": [0, 4]
+        }
+      },
+      {
+        "text_input@invui_controls_probe.invui_controls_probe_text_input": {}
+      },
+      {
+        "input_padding": {
+          "type": "panel",
+          "size": [0, 4]
+        }
+      },
+      {
+        "button@invui_controls_probe.invui_controls_probe_button": {}
+      },
+      {
+        "note_padding": {
+          "type": "panel",
+          "size": [0, 4]
+        }
+      },
+      {
+        "note": {
+          "type": "label",
+          "size": ["100%", "default"],
+          "text": "Not connected to any chest screen",
+          "color": [0.7, 0.7, 0.7],
+          "shadow": false
+        }
+      }
+    ]
+  },
+  "invui_controls_probe_text_input": {
+    "type": "edit_box",
+    "size": [300, 24],
+    "layer": 1,
+    "enabled": true,
+    "text_box_name": "invui_controls_probe_text_box",
+    "text_type": "ExtendedASCII",
+    "max_length": 64,
+    "text_control": "display_text",
+    "place_holder_control": "place_holder_control",
+    "default_control": "default",
+    "hover_control": "hover",
+    "pressed_control": "pressed",
+    "locked_control": "locked",
+    "controls": [
+      {
+        "default": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/edit_box_indent",
+          "layer": 1
+        }
+      },
+      {
+        "hover": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/edit_box_indent_hover",
+          "layer": 1
+        }
+      },
+      {
+        "pressed": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/edit_box_indent_hover",
+          "layer": 1
+        }
+      },
+      {
+        "locked": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/edit_box_indent",
+          "alpha": 0.5,
+          "layer": 1
+        }
+      },
+      {
+        "display_text": {
+          "type": "label",
+          "size": ["100% - 6px", "default"],
+          "offset": [3, 0],
+          "anchor_from": "left_middle",
+          "anchor_to": "left_middle",
+          "text": "#item_name",
+          "color": [1.0, 1.0, 1.0],
+          "shadow": false,
+          "localize": false,
+          "layer": 2,
+          "property_bag": {
+            "#property_field": "#item_name"
+          }
+        }
+      },
+      {
+        "place_holder_control": {
+          "type": "label",
+          "size": ["100% - 6px", "default"],
+          "offset": [3, 0],
+          "anchor_from": "left_middle",
+          "anchor_to": "left_middle",
+          "text": "probe input",
+          "color": [0.7, 0.7, 0.7],
+          "shadow": false,
+          "localize": false,
+          "layer": 2,
+          "bindings": [
+            {
+              "binding_type": "view",
+              "source_control_name": "display_text",
+              "source_property_name": "(#item_name = '')",
+              "target_property_name": "#visible",
+              "resolve_sibling_scope": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "invui_controls_probe_button": {
+    "type": "button",
+    "size": [300, 28],
+    "layer": 1,
+    "sound_name": "random.click",
+    "sound_volume": 1.0,
+    "sound_pitch": 1.0,
+    "default_control": "default",
+    "hover_control": "hover",
+    "pressed_control": "pressed",
+    "locked_control": "locked",
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "button.invui_controls_probe_submit",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "button.invui_controls_probe_submit",
+        "mapping_type": "focused"
+      }
+    ],
+    "controls": [
+      {
+        "default": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_light",
+          "layer": 1
+        }
+      },
+      {
+        "hover": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lighthover",
+          "layer": 1
+        }
+      },
+      {
+        "pressed": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lightpressed",
+          "layer": 1
+        }
+      },
+      {
+        "locked": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/disabledButtonNoBorder",
+          "layer": 1
+        }
+      },
+      {
+        "label": {
+          "type": "label",
+          "size": ["100%", "100%"],
+          "anchor_from": "center",
+          "anchor_to": "center",
+          "text": "Submit probe (not wired)",
+          "color": [1.0, 1.0, 1.0],
+          "text_alignment": "center",
+          "shadow": false,
+          "layer": 2
+        }
+      }
+    ]
+  }
+}

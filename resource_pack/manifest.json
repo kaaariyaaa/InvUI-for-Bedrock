@@ -1,0 +1,22 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "InvUI for Bedrock Resource Pack (EXPERIMENTAL / UNVERIFIED)",
+    "description": "EXPERIMENTAL TEMPLATE. NOT VERIFIED IN-GAME. The pack version [0,1,0] and min_engine_version [1,26,70] are placeholders; the matching game version is unconfirmed. How this pack is applied (activation, load order, and the ui/_ui_defs.json registration) is also unverified. Test only in a disposable world with backups. This pack does not modify vanilla chest screens and provides no item protection.",
+    "uuid": "4c834aa4-4f77-420b-a28f-043640f7bb08",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 26, 70]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "132bffc6-2ee5-4b2b-bef8-001b9a6fb5c1",
+      "version": [0, 1, 0]
+    }
+  ],
+  "metadata": {
+    "authors": ["InvUI for Bedrock"],
+    "license": "UNLICENSED",
+    "product_type": "addon"
+  }
+}

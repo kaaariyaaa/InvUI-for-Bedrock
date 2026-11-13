@@ -1,0 +1,126 @@
+{
+  "namespace": "invui_probe",
+  "invui_probe_root": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "controls": [
+      {
+        "probe_panel@invui_probe.invui_probe_panel": {
+          "anchor_from": "center",
+          "anchor_to": "center"
+        }
+      }
+    ]
+  },
+  "invui_probe_panel": {
+    "type": "stack_panel",
+    "orientation": "vertical",
+    "size": [360, "100%c"],
+    "controls": [
+      {
+        "title": {
+          "type": "label",
+          "size": ["100%", "default"],
+          "text": "InvUI probe (experimental, unverified)",
+          "color": [1.0, 1.0, 1.0],
+          "shadow": false
+        }
+      },
+      {
+        "title_padding": {
+          "type": "panel",
+          "size": [0, 6]
+        }
+      },
+      {
+        "send_button@invui_probe.invui_probe_send_button": {}
+      },
+      {
+        "note_padding": {
+          "type": "panel",
+          "size": [0, 6]
+        }
+      },
+      {
+        "note": {
+          "type": "label",
+          "size": ["100%", "default"],
+          "text": "Press to try button.send. Unverified: it may do nothing, and no script listens for it. Not attached to any screen.",
+          "color": [0.7, 0.7, 0.7],
+          "shadow": false
+        }
+      }
+    ]
+  },
+  "invui_probe_send_button": {
+    "type": "button",
+    "size": [360, 28],
+    "layer": 1,
+    "sound_name": "random.click",
+    "sound_volume": 1.0,
+    "sound_pitch": 1.0,
+    "default_control": "default",
+    "hover_control": "hover",
+    "pressed_control": "pressed",
+    "locked_control": "locked",
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "button.send",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "button.send",
+        "mapping_type": "focused"
+      }
+    ],
+    "controls": [
+      {
+        "default": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_light",
+          "layer": 1
+        }
+      },
+      {
+        "hover": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lighthover",
+          "layer": 1
+        }
+      },
+      {
+        "pressed": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/button_borderless_lightpressed",
+          "layer": 1
+        }
+      },
+      {
+        "locked": {
+          "type": "image",
+          "size": ["100%", "100%"],
+          "texture": "textures/ui/disabledButtonNoBorder",
+          "layer": 1
+        }
+      },
+      {
+        "label": {
+          "type": "label",
+          "size": ["100%", "100%"],
+          "anchor_from": "center",
+          "anchor_to": "center",
+          "text": "Try button.send (unverified)",
+          "color": [1.0, 1.0, 1.0],
+          "text_alignment": "center",
+          "shadow": false,
+          "layer": 2
+        }
+      }
+    ]
+  }
+}
