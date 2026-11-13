@@ -71,7 +71,7 @@
 1. テスト用ワールドを複製し、バックアップを取る。
 2. 対象の Preview/Beta で Experimental API を有効にする。必要な設定はゲーム版によって異なるため、実際の画面で確認して記録する。
 3. Behavior Pack を配置する。現行のコアは `Window.open()` を既定で拒否するため、実機試験には `canOpenScreens = true` を返すテスト専用アダプタを `setContainerAdapter()` で組み込んだテストビルドが必要。ただしこれは安全境界ではなく、使い捨てワールドでのみ実行する（本番用アダプタでは画面を開けないだけ）。
-4. **`ui/_ui_defs.json` へ登録する前に**、通常チェストの基準動作を確認する（手順 A、および CHECKLIST の ENV-05 で導入後に再確認）。
+4. **`ui/_ui_defs.json` へ登録する前に**、通常チェストの基準動作を確認する（手順 A、および CHECKLIST の BASE-04 で導入後に再確認）。
 5. Resource Pack を用意する。テンプレートは `resource_pack/` にあり、`manifest.json` と `ui/_ui_defs.json`（`ui/invui.json` の登録）を含む。既存 Resource Pack へ入れる場合は、`ui/invui.json` を CLI の `--install-resource-pack` で追加し、`ui/_ui_defs.json` への登録はバックアップと差分を確認して手動で行う。テンプレートはどの画面からも参照されていないため、導入直後は表示が変わらない。
 6. 検査だけなら、次の CLI を実行して静的状態を確認できる。既定ではどのファイルにも書き込まない。
 
