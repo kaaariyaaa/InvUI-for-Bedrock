@@ -2452,6 +2452,97 @@ test("a schema failure whose error handler reopens does not close the new genera
   assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
 });
 
+test("a close handler that reopens stops the remaining handlers from closing the new generation", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const calls = [];
+  let reopen = true;
+  let reopened;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => {
+      calls.push(`first:${reason}`);
+      if (reopen) {
+        reopen = false;
+        reopened = window.open();
+      }
+    })
+    .addCloseHandler((reason) => {
+      // Belongs to the closed generation; running it would close the screen
+      // the previous handler just reopened.
+      calls.push(`second:${reason}`);
+      window.close("ServerClosed");
+    })
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  window.close("PlayerClosed");
+  await reopened;
+
+  assert.deepEqual(calls, ["first:PlayerClosed"]);
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+
+  // The reopened generation still closes and notifies normally.
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.deepEqual(calls, [
+    "first:PlayerClosed",
+    "first:PlayerClosed",
+    "second:PlayerClosed",
+  ]);
+  assert.equal(adapter.closed.length, 2);
+});
+
+test("a throwing close handler that reopened does not report its stale error to the new generation", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  let handlerRuns = 0;
+  let reopened;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      // Delivering an exception from the closed generation here would tear
+      // down the screen that the failing handler just reopened.
+      window.close("ServerClosed");
+    })
+    .addCloseHandler(() => {
+      handlerRuns += 1;
+      if (handlerRuns === 1) {
+        reopened = window.open();
+        throw new Error("close handler failed");
+      }
+    })
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  window.close("PlayerClosed");
+  await reopened;
+
+  assert.deepEqual(errors, []);
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.equal(handlerRuns, 2);
+});
+
 test("a close failure whose error handler closes and reopens keeps the new open", async () => {
   const adapter = new InMemoryTestAdapter();
   adapter.failClose = true;

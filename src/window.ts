@@ -49,6 +49,14 @@ export interface WindowErrorContext {
 
 export type WindowErrorHandler = (error: unknown, context: WindowErrorContext) => void;
 export type WindowOpenHandler = () => void;
+/**
+ * Called once per close, in registration order.
+ *
+ * A handler may close and reopen the Window, which starts a new generation:
+ * the remaining handlers then belong to the generation that is already gone and
+ * are not called, and an exception thrown by such a handler is not reported
+ * either (the error handler could close the reopened Window).
+ */
 export type WindowCloseHandler = (reason: WindowCloseReason) => void;
 
 /**
@@ -834,6 +842,14 @@ export class Window {
     }
   }
 
+  /**
+   * Closes the Window and notifies the close handlers once.
+   *
+   * A handler that closes and reopens the Window starts a new generation; the
+   * notification for the closed generation stops there, so a later handler
+   * cannot tear the reopened screen down and a stale handler exception is not
+   * reported to it (see `WindowCloseHandler`).
+   */
   close(reason: WindowCloseReason = "ServerClosed"): void {
     this.#performClose(reason, true);
   }
@@ -842,6 +858,11 @@ export class Window {
    * The single close path for explicit close calls and adapter close events.
    * `requestAdapterClose` is false for a close event: the screen is already
    * closing, and asking again is neither needed nor safe.
+   *
+   * Close handlers run in registration order. One of them may close and reopen
+   * the Window, starting a new generation: the notification then belongs to the
+   * generation that is gone, so the remaining handlers are skipped and a
+   * throwing handler's error is not reported (see `WindowCloseHandler`).
    */
   #performClose(reason: WindowCloseReason, requestAdapterClose: boolean): void {
     if (this.#status === "closed") {
@@ -886,9 +907,21 @@ export class Window {
     // Exactly once: a duplicate or delayed close event sees status `closed`.
     if (wasVisible) {
       for (const handler of [...this.#closeHandlers]) {
+        // A handler may close and reopen the Window, starting a new generation.
+        // The rest of this notification belongs to the generation that is gone:
+        // calling a later handler would close the reopened screen.
+        if (generation !== this.#generation) {
+          return;
+        }
         try {
           handler(reason);
         } catch (error) {
+          // Same generation check before reporting: the throwing handler may
+          // have reopened the Window, and the error handler could close that new
+          // generation if the old exception were delivered to it.
+          if (generation !== this.#generation) {
+            return;
+          }
           this.#report(error, "closeHandler");
         }
       }
