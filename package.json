@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@minecraft/server": "2.13.0-beta.1.26.70-preview.24",
-    "@types/node": "^26.6.6",
+    "@types/node": "^24.19.2",
     "typescript": "^7.0.2"
   }
 }
