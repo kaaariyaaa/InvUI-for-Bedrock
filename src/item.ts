@@ -28,6 +28,12 @@ export type ItemProviderSource = ItemProvider | ItemProviderFunction | ItemStack
 
 export type ItemUpdateListener = () => void;
 
+/**
+ * Internal operation role for an Item (design 7.1). Inventory slots are not an
+ * Item mode: they are represented by `InventoryLink`.
+ */
+export type ItemMode = "display" | "button";
+
 let nextItemId = 1;
 
 function cloneItem(stack: ItemStack): ItemStack {
@@ -186,6 +192,7 @@ export class Item {
   private clickHandlers: ClickHandler[] = [];
   private updateListeners = new Set<ItemUpdateListener>();
   private updateAfterClick = false;
+  private explicitMode: ItemMode | undefined;
   private periodTicks: number | undefined;
   /** Active interval while at least one Window displays this Item (design 11.5). */
   private cancelPeriodic: (() => void) | undefined;
@@ -222,8 +229,33 @@ export class Item {
     return this;
   }
 
+  /**
+   * Effective classification (design 7.1). Unset items keep the behavior they
+   * had before modes existed: handlers make a button, otherwise it is display.
+   * This is metadata plus an Item-level handler guard only; it does not prove
+   * or replace the JSON UI-side operation protection from design 7.2/10.1.
+   */
+  getMode(): ItemMode {
+    return this.explicitMode ?? (this.clickHandlers.length > 0 ? "button" : "display");
+  }
+
+  /**
+   * Explicitly classify the Item. Changing the mode neither adds nor removes
+   * click handlers; it only decides whether {@link handleClick} runs them.
+   */
+  setMode(mode: ItemMode): this {
+    if (mode !== "display" && mode !== "button") {
+      throw new TypeError(`InvUI: item mode must be "display" or "button" (got ${String(mode)}).`);
+    }
+    this.explicitMode = mode;
+    return this;
+  }
+
   /** Handlers run sequentially; handler errors propagate to the Window. */
   async handleClick(context: ClickContext): Promise<void> {
+    if (this.getMode() === "display") {
+      return;
+    }
     for (const handler of [...this.clickHandlers]) {
       await handler(context);
     }

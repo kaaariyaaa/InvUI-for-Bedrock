@@ -155,6 +155,37 @@ test("Item.builder runs click handlers in order and updates on click", async () 
   assert.equal(item.getUpdateOnClick(), true);
 });
 
+test("Item mode defaults to display without handlers and button with handlers", () => {
+  const display = Item.simple(new ItemBuilder("minecraft:stone"));
+  const button = Item.builder()
+    .setItemProvider(new ItemBuilder("minecraft:diamond"))
+    .addClickHandler(() => {})
+    .build();
+
+  assert.equal(display.getMode(), "display");
+  assert.equal(button.getMode(), "button");
+  assert.equal(Item.EMPTY.getMode(), "display");
+});
+
+test("setMode classifies the Item and display mode does not run handlers", async () => {
+  const calls = [];
+  const item = Item.builder()
+    .addClickHandler(() => calls.push("click"))
+    .build();
+
+  assert.equal(item.setMode("display"), item);
+  assert.equal(item.getMode(), "display");
+  await item.handleClick({ player: { name: "Steve" }, slot: 0, window: {} });
+  assert.deepEqual(calls, [], "display Items keep their handlers but do not run them");
+
+  item.setMode("button");
+  await item.handleClick({ player: { name: "Steve" }, slot: 0, window: {} });
+  assert.deepEqual(calls, ["click"], "button Items keep the pre-classification behavior");
+
+  assert.throws(() => item.setMode("inventory"), TypeError);
+  assert.throws(() => item.setMode(undefined), TypeError);
+});
+
 test("notifyWindows notifies current subscribers only", () => {
   const item = Item.simple(new ItemBuilder("minecraft:stone"));
   let count = 0;
