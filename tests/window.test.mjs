@@ -122,6 +122,7 @@ class InMemoryTestAdapter {
   closeSubscriptions = [];
   itemChangeSubscriptions = [];
   failOpen = false;
+  failClose = false;
   failSubscribeClose = false;
   failSubscribeItemChange = false;
   failUnsubscribe = false;
@@ -169,6 +170,9 @@ class InMemoryTestAdapter {
   closeContainer(container, viewer) {
     this.closed.push({ container, viewer });
     this.events.push("close");
+    if (this.failClose) {
+      throw new Error("close failed");
+    }
     if (this.reentrantClose) {
       // Model an in-flight dispatch that still runs callbacks captured before
       // the Window unsubscribed.
@@ -2443,6 +2447,63 @@ test("a schema failure whose error handler reopens does not close the new genera
   // The adopted shape keeps its state: writes go through the new handle.
   window.setState({ page: 1 });
   assert.equal(window.getState().page, 1);
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
+});
+
+test("a close failure whose error handler closes and reopens keeps the new open", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failClose = true;
+  const errors = [];
+  const closeReasons = [];
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:display")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "close" || reopening) {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  window.close("PlayerClosed");
+  await reopened;
+
+  assert.equal(errors[0].error.message, "close failed");
+  assert.equal(errors[0].context.operation, "close");
+  // The failed close belonged to the old generation: its teardown must not
+  // destroy the screen the handler just opened.
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.opened.length, 2);
+  assert.ok(
+    adapter.closed.every(({ container }) => container === firstContainer),
+    "the old teardown must not close the new generation's screen",
+  );
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+
+  // The reopened generation's state handle is still live.
+  window.setState({ page: 1 });
+  assert.equal(window.getState().page, 1);
+
   window.close("PlayerClosed");
   assert.equal(window.status, "closed");
   assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);

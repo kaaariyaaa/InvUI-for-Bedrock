@@ -854,18 +854,29 @@ export class Window {
 
     const wasVisible = this.#status === "open" || this.#screenRequested;
     this.#status = "closing";
-    this.#generation++;
+    const generation = ++this.#generation;
     this.#stopRendering();
 
     // Detach before touching the adapter: closeContainer may dispatch the
     // close event synchronously and must not run this path twice.
     this.#unsubscribeFromContainerEvents();
+    // An unsubscribe failure is reported, and the error handler may have closed
+    // and reopened the Window: the rest of this close belongs to a generation
+    // that is gone, and its teardown must not destroy the reopened screen.
+    if (generation !== this.#generation) {
+      return;
+    }
 
     if (requestAdapterClose && wasVisible && this.#container) {
       try {
         this.#adapter.closeContainer(this.#container, this.viewer);
       } catch (error) {
         this.#report(error, "close");
+        // Same hazard as above: a failed closeContainer is reported, and a
+        // handler that closes and reopens must keep the new generation.
+        if (generation !== this.#generation) {
+          return;
+        }
       }
     }
 
