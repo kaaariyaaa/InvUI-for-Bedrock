@@ -905,6 +905,11 @@ export class Window {
    * A player changed the container through the screen. This is not a click and
    * the previous item is not restored: report the danger, stop rendering (so a
    * late provider cannot write over the changed slot), and request close.
+   *
+   * The `opening` status is covered too: `openContainer` may dispatch the event
+   * synchronously, before `open()` sets `open`. Dropping that event would let
+   * the following render pass put the item the player already took back into
+   * the container (a duplicate), so it fails closed like an open one.
    */
   #onContainerItemChange(
     generation: number,
@@ -913,7 +918,7 @@ export class Window {
     if (generation !== this.#generation) {
       return;
     }
-    if (this.#status !== "open") {
+    if (this.#status !== "opening" && this.#status !== "open") {
       return;
     }
     const container = this.#container;
@@ -924,6 +929,11 @@ export class Window {
       return;
     }
     this.#report(new WindowItemChangeDangerError(event.slot), "itemChange", event.slot);
+    // The error handler may have closed and reopened the Window; this event
+    // still belongs to the previous generation and must not close the new one.
+    if (generation !== this.#generation) {
+      return;
+    }
     this.#performClose("ServerClosed", true);
   }
 
@@ -1078,8 +1088,14 @@ export class Window {
     if (this.#schemaFault) {
       return;
     }
+    const generation = this.#generation;
     this.#schemaFault = true;
     this.#report(error, operation);
+    // A handler that closed and reopened the Window leaves this failure behind:
+    // closing here would tear down a generation that never saw the stale shape.
+    if (generation !== this.#generation) {
+      return;
+    }
     if (this.#status === "opening" || this.#status === "open") {
       this.#performClose("ServerClosed", true);
     }

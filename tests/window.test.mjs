@@ -127,6 +127,7 @@ class InMemoryTestAdapter {
   failUnsubscribe = false;
   reentrantClose = false;
   closeOnOpen = false;
+  itemChangeOnOpen = false;
 
   createContainer(options) {
     this.events.push("create");
@@ -151,6 +152,12 @@ class InMemoryTestAdapter {
     }
     this.opened.push({ container, viewer });
     this.events.push("open");
+    if (this.itemChangeOnOpen) {
+      // The screen can report the change synchronously while the Window is
+      // still `opening`, after the player already took the display item.
+      container.items[0] = undefined;
+      this.emitItemChange({ container, player: viewer, slot: 0 });
+    }
     if (this.closeOnOpen) {
       this.emitClose(
         { container, player: viewer, reason: "ServerClosed" },
@@ -2284,4 +2291,159 @@ test("adapters without event hooks keep working", async () => {
   assert.equal(containers[0].items[0].typeId, "minecraft:a");
   window.close();
   assert.equal(window.status, "closed");
+});
+
+test("an itemChange dispatched during openContainer halts rendering and closes", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.itemChangeOnOpen = true;
+  const errors = [];
+  const closeReasons = [];
+  const openHandlers = [];
+  let typeId = "minecraft:display";
+  const item = Item.simple(() => stack(typeId));
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addOpenHandler(() => openHandlers.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+
+  // The event arrived while the Window was still `opening`; ignoring it would
+  // let the next render pass put the taken item back (a duplicate).
+  const container = adapter.containers[0];
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.equal(window.container, undefined);
+  assert.deepEqual(openHandlers, []);
+  assert.equal(container.items[0], undefined);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(adapter.closed[0].container, container);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.equal(errors[0].error.slot, 0);
+  assert.equal(errors[0].context.operation, "itemChange");
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+
+  // A later refresh or item notification must not resurrect the taken item.
+  typeId = "minecraft:again";
+  await window.refresh();
+  item.notifyWindows();
+  await tick();
+  await tick();
+  assert.equal(container.items[0], undefined);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(adapter.closed.length, 1);
+});
+
+test("an itemChange error handler that closes and reopens keeps the new open", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:display")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "itemChange" || reopening) {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  adapter.emitItemChange({ container: firstContainer, player, slot: 0 });
+  await reopened;
+
+  // The event belonged to the closed generation: the reopened screen keeps
+  // running and the close handlers saw only the handler's own close.
+  assert.equal(errors.length, 1);
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+
+  // The new generation still closes normally.
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 2);
+  assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
+});
+
+test("a schema failure whose error handler reopens does not close the new generation", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  let reopened;
+  let reopening = false;
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:before")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "guiChange" || reopening) {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  // A GuiLink ingredient belongs to the state schema: the open fails closed.
+  gui.setIngredient(
+    "a",
+    new GuiLink(Gui.normal({ structure: ["x"] }), { key: "child" }),
+  );
+  await reopened;
+
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowStateSchemaChangedError);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+
+  // The adopted shape keeps its state: writes go through the new handle.
+  window.setState({ page: 1 });
+  assert.equal(window.getState().page, 1);
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
 });
