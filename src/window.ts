@@ -464,7 +464,16 @@ export class Window {
   #stateSubscription: (() => void) | undefined;
   /** Subscription to `upperGui`; covers GuiLink and TabGui children. */
   #guiSubscription: (() => void) | undefined;
-  #elementSubscriptions: Array<() => void> = [];
+  /**
+   * Per-slot element subscription, tagged with the element it was made for.
+   * Re-subscribing an unchanged slot would stop and restart the Item's
+   * periodic timer on every refresh, resetting its phase (see
+   * #subscribeToUpdates).
+   */
+  #elementSubscriptions = new Map<
+    number,
+    { element: SlotElement; unsubscribe: () => void }
+  >();
   /** Adapter close/itemChange unsubscribe functions, removed on close or failure. */
   #eventUnsubscribers: Array<() => void> = [];
   /** Set once `openContainer` has been called, before the screen may emit events. */
@@ -1111,38 +1120,62 @@ export class Window {
     return undefined;
   }
 
+  /**
+   * Move element subscriptions to the current layout. A slot that still shows
+   * the same element keeps its subscription: dropping and re-adding it stops
+   * and restarts the Item's periodic timer, so a GUI that refreshes faster than
+   * the period would never tick.
+   */
   #subscribeToUpdates(): void {
-    this.#unsubscribeElements();
     const layout = this.#layout;
-    if (!layout) {
-      return;
-    }
-    for (let slot = 0; slot < layout.slots.length; slot += 1) {
-      const element = layout.slots[slot];
-      if (isItemElement(element) || isInventoryLinkElement(element)) {
+    const previous = this.#elementSubscriptions;
+    const next = new Map<number, { element: SlotElement; unsubscribe: () => void }>();
+    if (layout) {
+      for (let slot = 0; slot < layout.slots.length; slot += 1) {
+        const element = layout.slots[slot];
+        if (!isItemElement(element) && !isInventoryLinkElement(element)) {
+          continue;
+        }
+        const kept = previous.get(slot);
+        if (kept && kept.element === element) {
+          previous.delete(slot);
+          next.set(slot, kept);
+          continue;
+        }
         try {
-          this.#elementSubscriptions.push(
-            element.subscribe(() => {
+          next.set(slot, {
+            element,
+            unsubscribe: element.subscribe(() => {
               void this.#renderSlot(slot);
             }),
-          );
+          });
         } catch (error) {
           // A broken element subscription must not abort the state-update path.
           this.#report(error, "subscribe", slot);
         }
       }
     }
-  }
-
-  #unsubscribeElements(): void {
-    for (const unsubscribe of this.#elementSubscriptions) {
+    // Whatever remains refers to an element that is no longer in that slot.
+    for (const { unsubscribe } of previous.values()) {
       try {
         unsubscribe();
       } catch (error) {
         this.#report(error, "unsubscribe");
       }
     }
-    this.#elementSubscriptions = [];
+    this.#elementSubscriptions = next;
+  }
+
+  #unsubscribeElements(): void {
+    const subscriptions = [...this.#elementSubscriptions.values()];
+    this.#elementSubscriptions = new Map();
+    for (const { unsubscribe } of subscriptions) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        this.#report(error, "unsubscribe");
+      }
+    }
   }
 
   #teardown(): void {
