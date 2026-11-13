@@ -7,6 +7,8 @@
  * - scripts/main.js が Node の構文チェックを通ること
  * - 危険警告・対象 API・使い捨てアイテムの方針が残っていること
  * - `!invui open [size] [ticks]` の tick 予約が（モック上で）server close を呼ぶこと
+ * - 同一 size の共有コンテナで複数画面を開かないための open ガード（閲覧者・pending・getViewers 失敗）
+ * - fill は閲覧者がいなくても pending（open 後 close イベント前）なら拒否し、close 後のみ書き込む
  * - `!invui:` prefix の通知だけを cancel し、観測ログだけ出して click を実行しないこと
  * - Resource Pack / JSON UI を同梱していないこと
  *
@@ -39,8 +41,9 @@ function readJson(file) {
  * main.js を @minecraft/server 抜きで vm 上に読み込み、チャット・timer・イベントを模擬する。
  * 実機 API の再現ではなく、コマンド解釈・ガード・会計の配線だけを見る。
  *
- * options.viewers: getViewers() が返す閲覧者（既定は空）。
- * options.getViewersThrows: getViewers() を失敗させる（fill の fail-closed 確認用）。
+ * options.viewers: getViewers() が返す閲覧者（既定は空）。返り値の viewers 配列を直接変更できる。
+ * options.getViewersThrows: getViewers() を失敗させる（fill / open の fail-closed 確認用）。
+ * 返り値の setGetViewersThrows() で途中から切り替えられる。
  */
 function loadProbe(options = {}) {
   const source = fs.readFileSync(scriptPath, 'utf8').replace(/^import[^\n]*\n/m, '');
@@ -58,6 +61,7 @@ function loadProbe(options = {}) {
   let closeCalls = 0;
   let setItemCalls = 0;
   const viewers = options.viewers ?? [];
+  let getViewersThrows = options.getViewersThrows ?? false;
   const player = { name: 'Tester', isValid: true, sendMessage: (line) => messages.push(line) };
   const container = {
     open() {
@@ -68,7 +72,7 @@ function loadProbe(options = {}) {
       return 1;
     },
     getViewers() {
-      if (options.getViewersThrows) throw new Error('getViewers failed');
+      if (getViewersThrows) throw new Error('getViewers failed');
       return viewers.slice();
     },
     getItem(slot) {
@@ -135,6 +139,11 @@ function loadProbe(options = {}) {
     messages,
     logs,
     items,
+    viewers,
+    player,
+    setGetViewersThrows: (value) => {
+      getViewersThrows = value;
+    },
     openCalls: () => openCalls,
     closeCalls: () => closeCalls,
     setItemCalls: () => setItemCalls,
@@ -195,6 +204,10 @@ test('main.js は対象 API と使い捨てアイテム方針を保持する', (
   assert.match(source, /STOP/);
   assert.match(source, /CLOSE_CONTENTS/);
   assert.match(source, /!invui stop/);
+  assert.match(source, /pendingOpenPlayers/);
+  assert.match(source, /OPEN_REJECTED/);
+  assert.match(source, /cursor 退避/);
+  assert.match(source, /インベントリ側/);
   assert.match(source, /beforeEvents\.chatSend/);
   assert.match(source, /NOTIFY_PREFIX/);
   assert.match(source, /NOTIFY_OBSERVED/);
@@ -206,7 +219,7 @@ test('main.js は対象 API と使い捨てアイテム方針を保持する', (
   );
 });
 
-test('README は貴重品・実アイテムを預けない警告を明示する', () => {
+test('README は貴重品・複数画面・cursor 退避・STOP の限界を明示する', () => {
   const readme = fs.readFileSync(path.join(here, 'README.md'), 'utf8');
   assert.match(readme, /貴重品や実際に使うアイテムを預けない/);
   assert.match(readme, /再読み込み/);
@@ -214,6 +227,10 @@ test('README は貴重品・実アイテムを預けない警告を明示する'
   assert.match(readme, /画面を開いたまま/);
   assert.match(readme, /!invui stop/);
   assert.match(readme, /CLOSE_CONTENTS/);
+  assert.match(readme, /複数画面/);
+  assert.match(readme, /pending/);
+  assert.match(readme, /cursor 退避/);
+  assert.match(readme, /インベントリ側/);
 });
 
 test('open の ticks 指定は server close を予約し、指定 tick 後に close() する', () => {
@@ -249,6 +266,67 @@ test('ticks が範囲外なら open しない', () => {
     assert.equal(probe.timers.length, 0);
     assert.match(probe.messages.join('\n'), /1〜2400/);
   }
+});
+
+test('open は既存の閲覧者がいると拒否する（同一 size の共有コンテナ）', () => {
+  const viewer = { name: 'Viewer', isValid: true, sendMessage() {} };
+  const probe = loadProbe({ viewers: [viewer] });
+  probe.chat('!invui open 27');
+
+  assert.equal(probe.openCalls(), 0, '閲覧者がいる間は open しない');
+  assert.match(probe.logs.join('\n'), /DANGER OPEN_REJECTED size=27 viewers=Viewer/);
+  assert.match(probe.messages.join('\n'), /open を拒否しました: 既に閲覧中 \(Viewer\)/);
+});
+
+test('open は getViewers() が失敗したら拒否する（fail-closed）', () => {
+  const probe = loadProbe({ getViewersThrows: true });
+  probe.chat('!invui open 27');
+
+  assert.equal(probe.openCalls(), 0);
+  assert.match(probe.messages.join('\n'), /open を拒否しました: getViewers\(\) を確認できないため/);
+});
+
+test('表示未確認の open が残っている間は同じ size の open を拒否する', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27');
+
+  const other = { name: 'Other', isValid: true, lines: [] };
+  other.sendMessage = (line) => other.lines.push(line);
+  probe.chat('!invui open 27', other);
+
+  assert.equal(probe.openCalls(), 1, '表示未確認の間は 2 人目を open しない');
+  assert.match(probe.logs.join('\n'), /DANGER OPEN_REJECTED size=27 pending=Tester/);
+  assert.match(other.lines.join('\n'), /表示を確認できていない open/);
+
+  // 同じプレイヤーの再 open も close イベントまで拒否する。
+  probe.chat('!invui open 27');
+  assert.equal(probe.openCalls(), 1);
+  assert.match(probe.messages.join('\n'), /前回の open の close イベントがまだ来ていません/);
+});
+
+test('close イベントで pending が解消し、別プレイヤーが open できる', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
+  assert.match(probe.logs.join('\n'), /CLOSE size=27/);
+
+  const other = { name: 'Other', isValid: true, sendMessage() {} };
+  probe.chat('!invui open 27', other);
+  assert.equal(probe.openCalls(), 2, 'close 後は同じ size を別プレイヤーが open できる');
+});
+
+test('close イベントの player が別インスタンスでも id が同じなら pending を解除する', () => {
+  const probe = loadProbe();
+  probe.player.id = 'player-1';
+  probe.chat('!invui open 27');
+
+  // 実機では close イベントの player が別インスタンスで来ることがある。
+  const samePlayer = { id: 'player-1', name: 'Tester', isValid: true, sendMessage() {} };
+  probe.fireClose({ reason: 'PlayerClosed', who: samePlayer });
+
+  const other = { id: 'player-2', name: 'Other', isValid: true, sendMessage() {} };
+  probe.chat('!invui open 27', other);
+  assert.equal(probe.openCalls(), 2);
 });
 
 test('専用 prefix の通知だけ cancel し、観測ログだけ出して click を実行しない', () => {
@@ -293,8 +371,9 @@ test('通知の生文字列は制御文字をエスケープし、長さを制�
 
 test('閲覧者がいるコンテナへの fill は拒否し、setItem しない', () => {
   const viewer = { name: 'Viewer', isValid: true, sendMessage() {} };
-  const probe = loadProbe({ viewers: [viewer] });
+  const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.viewers.push(viewer);
   probe.chat('!invui fill');
 
   assert.equal(probe.setItemCalls(), 0, '閲覧中は書き込まない');
@@ -303,17 +382,34 @@ test('閲覧者がいるコンテナへの fill は拒否し、setItem しない
 });
 
 test('getViewers() が失敗したら fill を拒否する（safe side）', () => {
-  const probe = loadProbe({ getViewersThrows: true });
+  const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.setGetViewersThrows(true);
   probe.chat('!invui fill');
 
   assert.equal(probe.setItemCalls(), 0);
-  assert.match(probe.messages.join('\n'), /getViewers\(\) を確認できないため/);
+  assert.match(probe.messages.join('\n'), /fill を拒否しました: getViewers\(\) を確認できないため/);
+});
+
+test('open 直後（viewer 反映前）の fill を pending で拒否し、close 後のみ書き込む', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27');
+  probe.chat('!invui fill');
+
+  assert.equal(probe.setItemCalls(), 0, 'viewers に出る前でも pending なら setItem しない');
+  assert.match(probe.logs.join('\n'), /DANGER FILL_REJECTED size=27 pending=Tester/);
+  assert.match(probe.messages.join('\n'), /表示を確認できていない open が残っています/);
+
+  probe.fireClose({ reason: 'PlayerClosed' });
+  probe.chat('!invui fill');
+  assert.equal(probe.setItemCalls(), 4, 'close イベントで pending が解消した後だけ fill できる');
+  assert.equal(probe.items[0].typeId, 'minecraft:stick');
 });
 
 test('閲覧者がいなければ fill し、close で全内容を記録する', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
 
   assert.equal(probe.setItemCalls(), 4, 'size=27 では 4 スロットに書く');
@@ -330,6 +426,7 @@ test('閲覧者がいなければ fill し、close で全内容を記録する',
 test('itemChange は危険ログを出し、移動だけなら会計は一致する', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
 
   const moved = probe.items[0];
@@ -349,6 +446,7 @@ test('itemChange は危険ログを出し、移動だけなら会計は一致す
 test('itemChange で説明のつかない増加を close が検知したら STOP し open / fill を拒否する', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
 
   // slot 5 の増加は報告されるが、slot 6 の増加は報告されない = 会計より実物が多い。
@@ -374,6 +472,7 @@ test('itemChange で説明のつかない増加を close が検知したら STOP
 test('close の items が無い場合は会計チェックを省略し、誤って STOP しない', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
   probe.fireClose({ reason: 'UserBusy', omitItems: true });
 
@@ -386,6 +485,7 @@ test('close の items が無い場合は会計チェックを省略し、誤っ�
 test('投入物が消えた close は会計不一致として STOP する', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
 
   // itemChange が届かないまま 1 個消えた想定。
@@ -418,6 +518,7 @@ test('!invui stop は画面を閉じ、以降の open / fill を拒否する', (
 test('dump は ACCOUNTING を表示する', () => {
   const probe = loadProbe();
   probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
   probe.chat('!invui fill');
   probe.chat('!invui dump');
 

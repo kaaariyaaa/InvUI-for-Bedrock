@@ -16,7 +16,14 @@
  * - このパックは Resource Pack を含まないため通常チェストの UI は変更しないが、
  *   手動で JSON UI を併用する場合は通常チェストへの影響を必ず確認する。
  * - 画面を開いたままの setItem (fill) はクライアント表示とサーバー状態をずれさせ、複製を作り得る。
- *   そのため閲覧者 (getViewers) がいるコンテナへの fill は拒否する。開いた人は全員閉じること。
+ *   そのため閲覧者 (getViewers) がいるコンテナへの fill は拒否する。加えて、open を要求した直後の
+ *   未表示 (pending) でも拒否する。開いた人が close イベントで解除するまで fill はできない。
+ * - 同一 size の共有コンテナを複数画面で同時に開くと、表示同期のずれから複製を作り得る。
+ *   open は既存の閲覧者・表示未確認の open (pending)・getViewers 失敗を拒否する。全員が閉じること。
+ * - サーバー側 close (AUTOCLOSE / stop) の前に、カーソルに持っているアイテムをスロットへ戻すこと
+ *   (cursor 退避)。強制 close 時にカーソル上のアイテムは失われ得る（未検証・退避推奨）。
+ * - STOP の会計はコンテナ内の typeId/amount 合計だけを見る。プレイヤーインベントリ側で増えた
+ *   複製・増加は検知できない。インベントリと合計個数を目視で突き合わせること。
  * - itemChange は DANGER として記録する。画面から出した投入物は消える・複製する可能性が未検証。
  *   合計個数を突き合わせ、会計不一致を検知したら STOP して以降の open / fill を拒否する。
  * - button.send の通知文字列はプレイヤーが手入力できるため偽装可能。このプローブは受信の観測だけを
@@ -50,6 +57,16 @@ const lastSizeByPlayer = new WeakMap();
  * @type {Map<import("@minecraft/server").VirtualContainer, {size: number, expected: Map<string, number>, changeWarned: boolean}>}
  */
 const ledgers = new Map();
+
+/**
+ * open() を要求したが getViewers() で表示を確認できていないプレイヤー。
+ * 同一 size の共有コンテナを複数画面で開くと表示同期がずれ、複製を作り得るため、
+ * close イベントが来るまで解除しない。
+ * ponytail: UserBusy 等で close イベントが来ない場合は再読み込みまで同一 size の open を止める。
+ * 誤って複数画面を開くより安全側に倒す。
+ * @type {Map<import("@minecraft/server").VirtualContainer, Set<import("@minecraft/server").Player>>}
+ */
+const pendingOpenPlayers = new Map();
 
 /** 空文字なら継続中。危険検知または手動停止で理由が入り、以降の open / fill を拒否する。 */
 let stopReason = "";
@@ -141,6 +158,9 @@ function subscribeContainer(container, size) {
   world.afterEvents.virtualContainerClose.subscribe(
     (event) => {
       if (event.container !== container) return;
+      // close イベントで表示未確認の open を解除する。次に同じ size を開けるのはこの後。
+      const pending = pendingOpenPlayers.get(container);
+      if (pending) removePendingOpener(pending, event.player);
       const hasItems = Array.isArray(event.items);
       const items = hasItems ? event.items : [];
       const nonEmptySlots = items.filter((item) => item !== undefined).length;
@@ -261,6 +281,95 @@ function guardStop(player) {
   return true;
 }
 
+function pendingOpeners(container) {
+  let pending = pendingOpenPlayers.get(container);
+  if (!pending) {
+    pending = new Set();
+    pendingOpenPlayers.set(container, pending);
+  }
+  return pending;
+}
+
+/** Player オブジェクトの同一性は id で判定する（close イベントで別インスタンスが来る場合に備える）。 */
+function isSamePlayer(a, b) {
+  if (a === b) return true;
+  try {
+    return Boolean(a && b && a.id && b.id && a.id === b.id);
+  } catch {
+    return false;
+  }
+}
+
+function hasPendingOpener(pending, player) {
+  for (const other of pending) {
+    if (isSamePlayer(other, player)) return true;
+  }
+  return false;
+}
+
+function removePendingOpener(pending, player) {
+  for (const other of pending) {
+    if (isSamePlayer(other, player)) pending.delete(other);
+  }
+}
+
+/**
+ * 同一 size の共有コンテナを複数画面で開かないための open 前ガード。
+ * 表示中 (getViewers) だけでなく、open 要求済みで未確認 (pending) も安全側で拒否する。
+ * @returns {boolean} true なら open を拒否した
+ */
+function rejectUnsafeOpen(player, container, size) {
+  let viewers;
+  try {
+    viewers = container.getViewers();
+  } catch (error) {
+    log(`OPEN_REJECTED size=${size} reason=getViewers failed: ${describeError(error)}`);
+    reply(
+      player,
+      `open を拒否しました: getViewers() を確認できないため (${describeError(error)})。安全側に倒します。`,
+    );
+    return true;
+  }
+  if (viewers.length > 0) {
+    const names = viewers.map(playerLabel).join(", ");
+    log(
+      `!!! DANGER OPEN_REJECTED size=${size} viewers=${names}: ` +
+        "同一 size の共有コンテナを複数画面で開くと表示がずれ、複製を作り得る",
+    );
+    reply(
+      player,
+      `§c[危険] §fopen を拒否しました: 既に閲覧中 (${names})。同一 size のコンテナを複数画面で開くと` +
+        "表示がずれ、複製を作り得ます。全員が画面を閉じてから実行してください。",
+    );
+    return true;
+  }
+
+  const pending = pendingOpeners(container);
+  const pendingNames = [...pending].filter((other) => !isSamePlayer(other, player)).map(playerLabel);
+  if (pendingNames.length > 0) {
+    log(
+      `!!! DANGER OPEN_REJECTED size=${size} pending=${pendingNames.join(", ")}: ` +
+        "open 要求済みで表示を確認できていない画面が残っている",
+    );
+    reply(
+      player,
+      `§c[危険] §fopen を拒否しました: 表示を確認できていない open が残っています (${pendingNames.join(", ")})。` +
+        "そのプレイヤーが画面を閉じるか、表示を確認できるまで待ってください。",
+    );
+    return true;
+  }
+  if (hasPendingOpener(pending, player)) {
+    log(`OPEN_REJECTED size=${size} reason=pending player=${playerLabel(player)}`);
+    reply(
+      player,
+      "open を拒否しました: 前回の open の close イベントがまだ来ていません。" +
+        "画面を閉じるか、再読み込みで pending をリセットしてください。",
+    );
+    return true;
+  }
+  return false;
+}
+
 function warnIfAccountingBroken(ledger, actual, player) {
   const diffs = [];
   const typeIds = new Set([...ledger.expected.keys(), ...actual.keys()]);
@@ -311,17 +420,29 @@ function printHelp(player) {
     "コマンド: `!invui open [9|27|54] [ticks]` / `!invui fill` / `!invui close` / `!invui dump` / `!invui stop` / `!invui help`",
   );
   reply(player, "open は非同期です。close イベントが来る前に同じプレイヤーへ再 open すると PreviousScreenClosing になります。");
+  reply(
+    player,
+    "open は既存の閲覧者・表示未確認の open・getViewers() 失敗を拒否します（同一 size の共有コンテナを複数画面で開くと表示がずれて複製を作り得るため）。",
+  );
   reply(player, "ticks を指定すると open からその tick 数後にサーバー側で close() します（画面表示中でも ServerClosed を検証できる）。");
+  reply(
+    player,
+    "§c[危険] §fサーバー側 close (AUTOCLOSE / stop) の前に、カーソルに持っているアイテムをスロットへ戻してください（cursor 退避）。強制 close 時にカーソル上のアイテムは失われ得ます。",
+  );
   reply(player, "VirtualContainer の中身は保存されません。貴重品・実アイテムを預けないでください（再読み込み/終了で消失）。");
   reply(
     player,
-    "§c[危険] §f画面を開いたまま fill すると複製を作り得るため、閲覧者がいる間の fill は拒否します。全員が閉じてから実行してください。",
+    "§c[危険] §f画面を開いたまま fill すると複製を作り得るため、閲覧者または表示未確認の open (pending) が残っている間の fill は拒否します。全員が閉じて close イベントが来てから実行してください。",
   );
   reply(
     player,
     "§c[危険] §f画面からの操作 (itemChange) で投入物が消える・複製する可能性は未検証です。`!invui dump` の ACCOUNTING と合計個数を突き合わせてください。",
   );
   reply(player, "会計不一致を検知したら STOP し、以降の open / fill を拒否します。中止は `!invui stop`。");
+  reply(
+    player,
+    "§c[危険] §fSTOP の会計はコンテナ内の typeId/amount 合計だけです。プレイヤーインベントリ側で増えた複製・増加は検知できません。合計個数を目視で突き合わせてください。",
+  );
   reply(
     player,
     "`!invui:` で始まるチャットは button.send 通知の観測用です。通常チャットには出さず、`NOTIFY_OBSERVED` を記録するだけで click は実行しません（偽装可能なため）。",
@@ -339,14 +460,19 @@ function handleOpen(player, args) {
 
   const container = ensureContainer(player, size);
   if (!container) return;
+  if (rejectUnsafeOpen(player, container, size)) return;
 
+  const pending = pendingOpeners(container);
+  pending.add(player);
   try {
     container.open(player);
     reply(
       player,
-      `open() を要求しました (size=${size})。例外なし＝画面表示済みではありません。表示されない場合は UserBusy 等を確認してください。`,
+      `open() を要求しました (size=${size})。例外なし＝画面表示済みではありません。表示されない場合は UserBusy 等を確認してください。` +
+        "表示を確認できない場合は close イベントまで同一 size の open を拒否します（再読み込みで解除）。",
     );
   } catch (error) {
+    removePendingOpener(pending, player);
     reply(player, `open() 失敗: ${describeError(error)}。close イベント後に再試行してください。`);
     return;
   }
@@ -382,12 +508,22 @@ function handleOpen(player, args) {
   // getViewers は表示完了を保証しない。次 tick 時点の参考値として記録する。
   system.run(() => {
     let viewers = "?";
+    let confirmed = false;
     try {
-      viewers = container.getViewers().map(playerLabel).join(", ") || "(none)";
+      const list = container.getViewers();
+      viewers = list.map(playerLabel).join(", ") || "(none)";
+      confirmed = list.includes(player);
     } catch (error) {
       viewers = `(getViewers failed: ${describeError(error)})`;
     }
     reply(player, `getViewers() = ${viewers}`);
+    // close イベントが同じ tick に先着した場合は pending が既に消えているため、その場合は出さない。
+    if (!confirmed && hasPendingOpener(pending, player)) {
+      log(
+        `OPEN_PENDING size=${size} player=${playerLabel(player)}: 表示を確認できないため ` +
+          "close イベントまで同一 size の再 open を拒否する",
+      );
+    }
   });
 }
 
@@ -399,8 +535,6 @@ function handleFill(player) {
 
   // 確認済みの危険: 画面を開いたまま setItem すると、クライアントの表示内容とサーバー側の
   // スロット状態がずれ、その後の移動でアイテムが複製し得る。閲覧者がいる間は書き込まない。
-  // 注意: open() を要求した直後でまだ表示されていない場合は getViewers() に出ないため、
-  // このガードでは防げない。open 直後の fill は行わず、表示を確認して閉じてから実行すること。
   let viewers;
   try {
     viewers = container.getViewers();
@@ -419,6 +553,24 @@ function handleFill(player) {
       player,
       `§c[危険] §ffill を拒否しました: 閲覧中 (${names})。画面を開いたまま書き込むと表示とサーバー状態がずれ、` +
         "複製を作り得ます。全員が画面を閉じてから実行してください。",
+    );
+    return;
+  }
+
+  // 盲点の封鎖: open() 直後は getViewers() に反映されていないことがあり、viewers ガードだけでは
+  // 表示直前に setItem できてしまう。open を要求したが close イベントがまだ来ていない players が
+  // いる間は、自分自身であっても書き込まず fail-closed する。
+  const pending = pendingOpenPlayers.get(container);
+  const pendingNames = pending && pending.size > 0 ? [...pending].map(playerLabel) : [];
+  if (pendingNames.length > 0) {
+    log(
+      `!!! DANGER FILL_REJECTED size=${size} pending=${pendingNames.join(", ")}: ` +
+        "open 要求済みで表示を確認できていない画面が残っているため setItem しない",
+    );
+    reply(
+      player,
+      `§c[危険] §ffill を拒否しました: 表示を確認できていない open が残っています (${pendingNames.join(", ")})。` +
+        "close イベントが来るまで書き込めません。画面を閉じるか、再読み込みで pending を解除してください。",
     );
     return;
   }
