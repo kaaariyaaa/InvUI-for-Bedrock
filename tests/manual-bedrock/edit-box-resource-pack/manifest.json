@@ -1,0 +1,22 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "InvUI edit_box + button.send probe (DISPOSABLE WORLD ONLY)",
+    "description": "Unverified edit_box + button.send probe: adds one positive-control label, one manually typed text field (edit_box named #message_text_box) and one button.send button to the vanilla chest screen panels so you can observe whether typed text is actually sent. Fixed text auto-send and script wiring are NOT provided; No interaction control and no item protection; normal chests and chat may be affected; no guarantee that anything is sent. Use only in a disposable world.",
+    "uuid": "d567dbb4-aa3e-457a-9b69-355791f31eb0",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 26, 70]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "09a1021a-635e-472b-8975-b7177556814a",
+      "version": [0, 1, 0]
+    }
+  ],
+  "metadata": {
+    "authors": ["InvUI for Bedrock"],
+    "license": "UNLICENSED",
+    "product_type": "addon"
+  }
+}

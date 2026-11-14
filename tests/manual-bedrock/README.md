@@ -10,9 +10,10 @@
 > - `Window.open()` は既定で拒否され（`WindowOpenRejectedError`）、`InventoryLink.moveTo()` は常に拒否されます（`InventoryLinkMoveRejectedError`）。クリック入力を実機イベントへつなぐ仕組みも未提供です。
 > - **既定拒否は安全境界ではありません。** `WindowBuilder.setContainerAdapter()` は公開 API で、`canOpenScreens = true` を返し `openContainer()` を実装したテスト用アダプタを実機でも注入すれば画面は開きます。本番用アダプタの拒否は「うっかり開かない」ための既定値にすぎません。
 > - **表示専用アイテムの保護はありません。** 画面を開くと表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、入力抑制も JSON UI もないためプレイヤーが取り出せます。さらに `refresh()` や状態更新の再描画で同じアイテムが再設定されるため、**取り出しと再描画の組み合わせでアイテムが複製され得ます**。保護を実装するまで、この経路は安全ではありません。
-> - そのため、環境確認と通常チェストの基準確認以外は、`open()` を明示的に許可するテスト用アダプタと、`invui_probe` を参照する手動のテスト画面が揃うまで実施できません。チェックリストは「未実施」のまま残してください。
+> - そのため、InvUI コアの画面を使う試験（DISP 以降など）は、`open()` を明示的に許可するテスト用アダプタと、`invui_probe` を参照する手動のテスト画面が揃うまで実施できません。一方、[`probe/`](probe/README.md) の raw probe は InvUI コアもアダプタも使わず `world.virtualContainerManager` から `VirtualContainer` を直接開くため、`VirtualContainer` 単体の表示・close reason・itemChange は raw probe だけで確認できます（それも未実施です）。チェックリストは「未実施」のまま残してください。
 > - **実機での実験は使い捨てワールドだけで行ってください。** 本番ワールド・配布用ワールド・共有サーバーでは実行しないでください。
 > - [`button-send-resource-pack/`](button-send-resource-pack/README.md) は、クリック通知の候補である `button.send` を単独で観察する**実験用 Resource Pack（使い捨てワールド専用）**です。クリック通知は未検証であり、通知文字列を自動で設定する仕組みはなく、入力抑制・アイテム保護もありません。`chest-resource-pack/` や `data-driven-resource-pack/` など**他の Resource Pack との併用は禁止**です。このキットが存在することは、クリック通知の試験を実施済みという意味ではありません。
+> - [`edit-box-resource-pack/`](edit-box-resource-pack/README.md) は、入力欄（`edit_box`）と `button.send` の組み合わせを観察する**実験用 Resource Pack（使い捨てワールド専用）**です。**未検証**であり、`#message_text_box` と `always_listening` を使うため**チャット入力を奪い得ます**。バニラのチェストパネルを対象とするため**通常のチェストにも表示される可能性があり、移動が壊れたら即時中止**してください。**アイテム保護はありません。** `button-send-resource-pack/` など**他の Resource Pack との併用は禁止**です。導入だけで試験実施済みにはなりません。
 > - 現時点で自動で実施できるのは CLI と自動テストだけです。CLI は既定でどのファイルにも書き込まず、`--install-resource-pack` を明示した場合だけ `ui/invui.json` を追加します（`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` は変更しません）。実機のクリック・アイテム保護・`InventoryLink` の安全性を、自動テストで代替しないでください。
 
 ## 1. 目的
@@ -70,7 +71,7 @@
 
 1. テスト用ワールドを複製し、バックアップを取る。
 2. 対象の Preview/Beta で Experimental API を有効にする。必要な設定はゲーム版によって異なるため、実際の画面で確認して記録する。
-3. Behavior Pack を配置する。現行のコアは `Window.open()` を既定で拒否するため、実機試験には `canOpenScreens = true` を返すテスト専用アダプタを `setContainerAdapter()` で組み込んだテストビルドが必要。ただしこれは安全境界ではなく、使い捨てワールドでのみ実行する（本番用アダプタでは画面を開けないだけ）。
+3. Behavior Pack を配置する。InvUI コアの画面を実機で開くには、現行コアが `Window.open()` を既定で拒否するため、`canOpenScreens = true` を返すテスト専用アダプタを `setContainerAdapter()` で組み込んだテストビルドが必要。ただしこれは安全境界ではなく、使い捨てワールドでのみ実行する（本番用アダプタでは画面を開けないだけ）。**InvUI コアを使わない [`probe/`](probe/README.md) の raw probe は、`world.virtualContainerManager` を直接呼んで `VirtualContainer` を開くため、アダプタもコアのビルドも不要**（プローブ README の手順で `behavior_pack/` を配置する）。アダプタが必要なのは、InvUI コアのレイアウトを画面に出す DISP 以降の試験。
 4. **`ui/_ui_defs.json` へ登録する前に**、通常チェストの基準動作を確認する（手順 A、および CHECKLIST の BASE-04 で導入後に再確認）。
 5. Resource Pack を用意する。テンプレートは `resource_pack/` にあり、`manifest.json` と `ui/_ui_defs.json`（`ui/invui.json` の登録）を含む。既存 Resource Pack へ入れる場合は、`ui/invui.json` を CLI の `--install-resource-pack` で追加し、`ui/_ui_defs.json` への登録はバックアップと差分を確認して手動で行う。テンプレートはどの画面からも参照されていないため、導入直後は表示が変わらない。
 6. 検査だけなら、次の CLI を実行して静的状態を確認できる。既定ではどのファイルにも書き込まない。
@@ -128,6 +129,8 @@
 現行コアの画面は、表示アイテムを `setItem()` で置くだけで、入力抑制も JSON UI もない。プレイヤーは表示アイテムを取り出せ、その後に `refresh()`（状態更新・購読）が走ると同じアイテムが再設定されるため、**取り出しと再描画の組み合わせで複製が起こり得る**。この試験では、取り出し後に画面を操作して再描画させる手順も試す。
 
 JSON UI の上重ねだけでコンテナ側グリッドの操作を止められるかを切り分ける実験用 Resource Pack が [`protection-resource-pack/`](protection-resource-pack/README.md) です。**保護の実装ではなく、使い捨てワールド専用で、通常のチェストの操作にも影響し得ます。** 対象はグリッド全体で、スロット単位・InvUI 限定の抑制は検証できません。同梱の `check.mjs` は JSON 構造だけを検査します。
+
+`VirtualContainer` の画面で保護を試す場合、中身は raw probe の `!invui fill` で入れる。**`fill` は画面を開いていない状態でだけ実行でき（表示中・`open` 直後の pending 中は probe が拒否する）、その後に `!invui open` で開く**。逆順（開いてから fill）にしない。`fill` が拒否されずに書き込まれた場合は中止する。
 
 - 対象 ID: `PROT-01` 〜 `PROT-04`
 - **1 つでも持ち出せたら不合格。** クリック通知の試験へ進まない。
@@ -223,6 +226,14 @@ node tests/manual-bedrock/protection-resource-pack/check.mjs
 ```
 
 確認できるのは JSON の整合性（manifest の警告文、ブロッカーがスロット系の入力だけを no-op へ流すこと、禁止した入力系 control の不在、対象パネルへの `insert_back` と座標、`chest_screen.json` を同梱・登録していないこと）だけです。パックの読み込み、描画、入力の遮断、アイテム保護、通常チェストへの影響は確認しません。
+
+edit_box 実験キットの構造検査は、次のコマンドで実行できます（CI でも他の構造検査と一緒に実行されます）。
+
+```bash
+node tests/manual-bedrock/edit-box-resource-pack/check.mjs
+```
+
+確認できるのは JSON の整合性（manifest の警告文、`_ui_defs` の参照先、入力欄が `#message_text_box` を指定し固定文字・`bindings` を持たないこと、ボタンが `button.send` だけを発火すること、`chest` / `pocket_containers` への `insert_front`）だけです。表示・入力・送信、チャットや通常チェストへの影響、アイテム保護は確認しません。
 
 ## 9. 未確定のまま残す事項
 
