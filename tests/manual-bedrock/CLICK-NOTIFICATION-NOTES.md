@@ -136,7 +136,7 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 | `MessageReceiveAfterEvent` | client → server のメッセージ。`player` / `id` / `message` | **不可**。型定義のコメントに「This event is an internal implementation detail, and is otherwise not currently functional」と明記されている。JSON UI からこの id/message を送る書式も確認できない |
 | `Player.postClientMessage` / `World.broadcastClientMessage` | server → client のメッセージ送信 | **不可**。逆向きであり、クリックの受信には使えない |
 | `ContainerRules` | `allowedItems` / `bannedItems` / `weightLimit` などでコンテナ操作を制限 | **不可**。アイテム移動を拒否できても、クリックイベントを発生させない |
-| `ItemLockMode.slot` | アイテムをその slot から動かせない | **未検証の候補**。通常クリックで `VirtualContainerItemChangeAfterEvent` が同じ内容で届くなら、復元不要のクリック源になる。専用プローブを追加した（10 節） |
+| `ItemLockMode.slot` | アイテムをその slot から動かせない | **未検証の候補**。通常クリックで `VirtualContainerItemChangeAfterEvent` が同じ内容で届くなら、復元不要のクリック源になり得る。ただし設計7.2 により、ロックを表示スロットの読み取り専用化には使えない。陽性でもクリック源としてだけ検討する。専用プローブを追加した（10 節） |
 
 ### 9.2 JSON UI samples の再確認
 
@@ -167,10 +167,11 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 - JSON UI / Resource Pack / `button.send` を含みません。
 - アイテムは `minecraft:stick` / `minecraft:paper` だけです。
 - 陽性なら、復元不要で slot 付きのクリック源になる可能性があります。陰性なら、ロックはクリック源に使えないと確定できます。
+- **陽性でも設計7.2 は変わりません。** `ItemLockMode.slot` を VirtualContainer の読み取り専用化に使わず、表示スロットの操作抑制は JSON UI 側か `inventory` 分離で行います。このプローブはロックを安全機構として検証していません。
 
 ## 11. 実機テストの次の順序
 
-1. **CLICK-LOCK-01**: [`locked-click-probe/`](locked-click-probe/README.md) を単独の使い捨てワールドで実行する。`slot` / `inventory` / `plain`、9 / 27 / 54、PC / タッチ / コントローラーで、通常クリック 1 回あたりの `ITEM_CHANGE` と `kind` を記録する。**最初に試すべき候補**（標準チェスト表示を維持でき、復元もチャットも不要）。
+1. **CLICK-LOCK-01**: [`locked-click-probe/`](locked-click-probe/README.md) を単独の使い捨てワールドで実行する。`slot` / `inventory` / `plain`、9 / 27 / 54、PC / タッチ / コントローラーで、通常クリック 1 回あたりの `ITEM_CHANGE` と `kind` を記録する。**最初に試すべき候補**（標準チェスト表示を維持でき、復元もチャットも不要）。陽性でも設計7.2 により、ロックを表示スロットの読み取り専用化には使わない。
 2. **CLICK-HOTBAR-01**: 9 スロットの透明ボタン overlay で、各ボタンの `button.menu_select` を `button.slot_N`（N=0〜8）へ mapping し、`PlayerHotbarSelectedSlotChangeAfterEvent` がクリックで発火するかを見る。発火しても 9 値だけであり、通常の 1〜9 キー入力との区別が必要。実装候補にする前に、入力抑制と誤発火を確認する。
 3. **CLICK-SEND-01/02**: 既存の `button-send-resource-pack/` / `edit-box-resource-pack/` で、VirtualContainer 画面の `button.send` と `edit_box` の成立を確認する。成立しても、slot / session / sequence の自動生成経路はないため、手入力プローブ以上にはならない。
 4. **CLICK-CURSOR-01**: `CURSOR-INPUT-NOTES.md` のカーソル経路を再確認する。タッチ非対応と after 復元の危険が残るため、採用しない場合の比較用。

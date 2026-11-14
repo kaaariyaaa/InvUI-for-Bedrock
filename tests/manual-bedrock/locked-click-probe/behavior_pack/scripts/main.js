@@ -5,10 +5,15 @@
  * `ItemLockMode.slot` still raise `VirtualContainerItemChangeAfterEvent`?
  *
  * If yes (and the event reports the same item before/after), a locked item is
- * a candidate click source that is automatic, slot-distinguishable and does
- * not move or consume the displayed item. If the event never arrives, a locked
- * item cannot be used as a click source, and the after-restore / marker routes
- * remain the only alternatives (both rejected for design 10).
+ * a candidate click source that is automatic, slot-distinguishable and (per the
+ * docs) does not move the displayed item in slot-lock mode. If the event never
+ * arrives, a locked item cannot be used as a click source, and the after-restore
+ * / marker routes remain the only alternatives (both rejected for design 10).
+ *
+ * Design 7.2: `ItemLockMode.slot` must not be used to make VirtualContainer
+ * slots read-only. A positive result is only a click-source data point, never a
+ * protection mechanism; display slots still need JSON UI suppression or a
+ * separate `inventory`.
  *
  * This probe does not implement a click path. It only observes and logs:
  *
@@ -94,11 +99,7 @@ function keyFor(size, mode) {
   return `${size}:${mode}`;
 }
 
-function createContainer(size, mode) {
-  const container = world.virtualContainerManager.create({
-    size,
-    title: `Lock probe ${size} ${mode}`,
-  });
+function fillContainer(container, size, mode) {
   let filled = 0;
   for (let slot = 0; slot < size; slot += 1) {
     try {
@@ -115,6 +116,13 @@ function createContainer(size, mode) {
     }
   }
   log(`FILLED size=${size} mode=${mode} slots=${filled}/${size}`);
+}
+
+function createContainer(size, mode) {
+  const container = world.virtualContainerManager.create({
+    size,
+    title: `Lock probe ${size} ${mode}`,
+  });
   containers.set(keyFor(size, mode), container);
   return container;
 }
@@ -164,6 +172,11 @@ function openFor(player, size, mode, ticks) {
     reply(player, `OPEN_REJECTED size=${size} mode=${mode} reason=${guard.reason}`);
     return;
   }
+
+  // Refill on every open. A previous run may have moved or removed items
+  // (plain mode, or the slot lock not being honoured), which would confound
+  // the kind classification of this run. No viewers exist at this point.
+  fillContainer(container, size, mode);
 
   try {
     container.open(player);
@@ -242,10 +255,12 @@ function stackKey(stack) {
     return "none";
   }
   try {
+    // lockMode is deliberately excluded: the click-source identity is the item
+    // itself, and a lock dropped by the engine would otherwise hide the event.
+    // The log still prints `lock=` for before/after, so a lost lock is visible.
     return JSON.stringify({
       typeId: stack.typeId,
       amount: stack.amount,
-      lockMode: stack.lockMode ?? "none",
       nameTag: stack.nameTag ?? "",
     });
   } catch {

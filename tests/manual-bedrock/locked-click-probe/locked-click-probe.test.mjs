@@ -128,6 +128,11 @@ function loadProbe() {
         handler({ container, slot, beforeItemStack: before, itemStack: after, player: who });
       }
     },
+    fireClose({ who = player, reason = 'ServerClosed', contents = items } = {}) {
+      for (const handler of events.virtualContainerClose) {
+        handler({ container, player: who, reason, items: contents });
+      }
+    },
     timers,
     messages,
     logs,
@@ -209,6 +214,16 @@ test('README は陽性/陰性の解釈と限界を明示する', () => {
   assert.match(readme, /実機未検証/);
 });
 
+test('README は設計7.2の制約を明記する', () => {
+  const readme = fs.readFileSync(path.join(here, 'README.md'), 'utf8');
+  const source = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(readme, /設計7\.2/);
+  assert.match(readme, /読み取り専用化に使ってはいけません/);
+  assert.match(source, /Design 7\.2/);
+  assert.match(source, /must not be used to make VirtualContainer/);
+});
+
 test('open は size 分をロックして fill し、ticks 後に close する', () => {
   const probe = loadProbe();
   assert.equal(probe.chat('!lockprobe open 9 slot 40'), true);
@@ -251,4 +266,29 @@ test('removed / changed は候補にしない', () => {
   assert.match(output, /kind=REMOVED/);
   assert.match(output, /kind=CHANGED/);
   assert.doesNotMatch(output, /CANDIDATE_SAME_ITEM/);
+});
+
+test('lock が外れても同一内容なら候補にし、lock= はログに残す', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  const before = { typeId: 'minecraft:stick', amount: 1, lockMode: 'slot' };
+  const after = { typeId: 'minecraft:stick', amount: 1, lockMode: 'none' };
+  probe.fireItemChange({ slot: 0, before, after });
+
+  const output = probe.logs.join('\n');
+  assert.match(output, /kind=SAME_ITEM_CANDIDATE/);
+  assert.match(output, /before="minecraft:stick x1 lock=slot/);
+  assert.match(output, /after="minecraft:stick x1 lock=none/);
+});
+
+test('再 open は前回の内容を引き継がず、開く直前に fill し直す', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.items[0] = undefined;
+  probe.fireClose();
+  probe.chat('!lockprobe open 9 slot 40');
+
+  assert.equal(probe.openCalls(), 2);
+  assert.ok(probe.items[0], '再 open で slot 0 が戻る');
+  assert.equal(probe.items[0].lockMode, 'slot');
 });
