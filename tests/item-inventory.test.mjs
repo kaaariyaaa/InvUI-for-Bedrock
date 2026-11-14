@@ -624,6 +624,46 @@ test("deserialize validates the whole snapshot before decoding or writing", () =
   );
 });
 
+test("deserialize rejects a decoded stack whose clone is not a valid ItemStack", () => {
+  const snapshot = {
+    version: INVENTORY_SNAPSHOT_VERSION,
+    size: 2,
+    slots: [
+      { slot: 0, item: { typeId: "minecraft:stone", amount: 1 } },
+      { slot: 1, item: { typeId: "minecraft:diamond", amount: 1 } },
+    ],
+  };
+
+  // The decoded object passes the shallow "has typeId and clone()" check, but
+  // setItem() would store its clone() result. Before validating the clone,
+  // deserialize() returned an inventory with slot 1 silently emptied.
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(snapshot, {
+        encode: () => ({}),
+        decode: (value) =>
+          value.typeId === "minecraft:diamond"
+            ? { typeId: value.typeId, clone: () => undefined }
+            : new ItemBuilder(value.typeId, value.amount).build(),
+      }),
+    /cannot be cloned for slot 1/,
+  );
+
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(snapshot, {
+        encode: () => ({}),
+        decode: () => ({
+          typeId: "minecraft:stone",
+          clone() {
+            throw new Error("clone failed");
+          },
+        }),
+      }),
+    /clone failed/,
+  );
+});
+
 test("InventoryLink rejects moves before touching either inventory", () => {
   const source = new VirtualInventory(2);
   const target = new VirtualInventory(2);

@@ -215,12 +215,25 @@ export class VirtualInventory implements Inventory {
       if (!isCloneableItemStack(item)) {
         throw new TypeError(`InvUI: item codec returned an invalid ItemStack for slot ${slot}.`);
       }
-      restored.push({ slot, item });
+      // `setItem()` stores `item.clone()`, so validate the clone that will
+      // actually be stored. A decoded stack whose clone() returns something
+      // else would otherwise be stored as an empty slot, silently dropping the
+      // snapshot entry. Clone every entry before writing so a failure at any
+      // slot cannot leave a partially restored inventory.
+      const clone = item.clone();
+      if (!isCloneableItemStack(clone)) {
+        throw new TypeError(
+          `InvUI: item codec returned an ItemStack that cannot be cloned for slot ${slot}.`,
+        );
+      }
+      restored.push({ slot, item: clone });
     }
 
     const inventory = new VirtualInventory(size);
+    // The entries are already validated clones; assign them directly so a
+    // second clone cannot fail after earlier slots were written.
     for (const { slot, item } of restored) {
-      inventory.setItem(slot, item);
+      inventory.items[slot] = item;
     }
     return inventory;
   }
