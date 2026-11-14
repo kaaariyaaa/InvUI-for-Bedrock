@@ -10,6 +10,8 @@ const mockSource = `
 export const createdContainers = [];
 const closeCallbacks = new Set();
 const itemChangeCallbacks = new Set();
+const chatSendCallbacks = new Set();
+export const scheduledRuns = [];
 
 export function emitVirtualContainerClose(event) {
   for (const callback of [...closeCallbacks]) callback(event);
@@ -18,6 +20,19 @@ export function emitVirtualContainerClose(event) {
 export function emitVirtualContainerItemChange(event) {
   for (const callback of [...itemChangeCallbacks]) callback(event);
 }
+
+export function emitChatSend(message, sender) {
+  const event = { message, sender, cancel: false };
+  for (const callback of [...chatSendCallbacks]) callback(event);
+  return event;
+}
+
+export const system = {
+  run(callback) {
+    scheduledRuns.push(callback);
+    return scheduledRuns.length;
+  },
+};
 
 export class ItemStack {
   constructor(typeId, amount = 1) {
@@ -38,6 +53,17 @@ export class ItemStack {
 }
 
 export const world = {
+  beforeEvents: {
+    chatSend: {
+      subscribe(callback) {
+        chatSendCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        chatSendCallbacks.delete(callback);
+      },
+    },
+  },
   virtualContainerManager: {
     create(options) {
       const container = {
@@ -143,8 +169,10 @@ const {
 } = await load("../src/window");
 const {
   createdContainers,
+  emitChatSend,
   emitVirtualContainerClose,
   emitVirtualContainerItemChange,
+  scheduledRuns,
 } = await import(mockUrl);
 
 /**
@@ -1157,6 +1185,39 @@ function deferred() {
 
 function tick() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Runs the callbacks Window's automatic chat bridge queued through system.run.
+ * The bridge dispatch itself is async, so give the state queue a few turns.
+ */
+async function flushChatInput() {
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+  await tick();
+  await tick();
+}
+
+/** Window with one button at logical slot 1 (structure "ab"). */
+function chatButtonWindow(viewer, clicks, options = {}) {
+  const adapter = new InMemoryTestAdapter();
+  const button = Item.builder()
+    .setItemProvider(() => stack("minecraft:button"))
+    .addClickHandler(async (click) => {
+      clicks.push(click.slot);
+      if (options.onClick) {
+        await options.onClick(click);
+      }
+    })
+    .build();
+  return Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(Gui.normal({ structure: ["ab"], ingredients: { b: button } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
 }
 
 test("non-9-wide structures map logical slots to nine physical columns and size", async () => {
@@ -3821,4 +3882,150 @@ test("closing during a title regeneration closes the shown old screen", async ()
   pending[0](stack("minecraft:item"));
   await changing;
   assert.equal(window.status, "closed");
+});
+
+test("an open Window auto-connects chatSend to its own button slot", async () => {
+  const viewer = { id: "chat-auto", name: "Chatter" };
+  const clicks = [];
+  const window = chatButtonWindow(viewer, clicks);
+  await window.open();
+
+  const event = emitChatSend(`!invui:${window.id}:1:1`, { id: viewer.id });
+  assert.equal(event.cancel, true);
+  assert.deepEqual(clicks, [], "the before-event must never click");
+
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  // Slot 0 has no element at all: the layout probe must report it as
+  // non-button instead of letting handleClick() guess.
+  const notButton = emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  assert.equal(notButton.cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  window.close();
+  // A closed Window is out of the registry: the reserved line is still hidden
+  // from chat, but nothing runs.
+  const closed = emitChatSend(`!invui:${window.id}:1:3`, { id: viewer.id });
+  assert.equal(closed.cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+});
+
+test("chat input never routes one viewer's line into another viewer's Window", async () => {
+  const viewer = { id: "chat-owner", name: "Owner" };
+  const other = { id: "chat-other", name: "Other" };
+  const ownerClicks = [];
+  const otherClicks = [];
+  const ownerWindow = chatButtonWindow(viewer, ownerClicks);
+  const otherWindow = chatButtonWindow(other, otherClicks);
+  await ownerWindow.open();
+  await otherWindow.open();
+
+  // The line names the owner's Window but the sender is the other player:
+  // the bridge looks up the sender's Window, so the session id mismatches.
+  const spoofed = emitChatSend(`!invui:${ownerWindow.id}:1:1`, { id: other.id });
+  assert.equal(spoofed.cancel, true);
+  await flushChatInput();
+  assert.deepEqual(ownerClicks, []);
+  assert.deepEqual(otherClicks, []);
+
+  emitChatSend(`!invui:${otherWindow.id}:1:2`, { id: other.id });
+  await flushChatInput();
+  assert.deepEqual(ownerClicks, []);
+  assert.deepEqual(otherClicks, [1]);
+
+  emitChatSend(`!invui:${ownerWindow.id}:1:3`, { id: viewer.id });
+  await flushChatInput();
+  assert.deepEqual(ownerClicks, [1]);
+  assert.deepEqual(otherClicks, [1]);
+
+  ownerWindow.close();
+  otherWindow.close();
+});
+
+test("close and reopen start a new chat input session", async () => {
+  const viewer = { id: "chat-reopen", name: "Reopener" };
+  const clicks = [];
+  const window = chatButtonWindow(viewer, clicks);
+
+  await window.open();
+  emitChatSend(`!invui:${window.id}:1:5`, { id: viewer.id });
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  window.close();
+  await window.open();
+
+  // The same sequence is valid again only because close invalidated the bridge
+  // and the reopen reset the per-session sequence.
+  emitChatSend(`!invui:${window.id}:1:5`, { id: viewer.id });
+  await flushChatInput();
+  assert.deepEqual(clicks, [1, 1]);
+
+  window.close();
+});
+
+test("a page change invalidates a notification queued for the previous page", async () => {
+  const viewer = { id: "chat-paged", name: "Pager" };
+  const adapter = new InMemoryTestAdapter();
+  const gate = deferred();
+  const started = deferred();
+  const clicked = [];
+  const pageZero = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(async () => {
+      clicked.push("page0");
+      started.resolve();
+      await gate.promise;
+    })
+    .build();
+  const pageOne = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_1"))
+    .addClickHandler(() => clicked.push("page1"))
+    .build();
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [pageZero, pageOne],
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+
+  emitChatSend(`!invui:${window.id}:0:1`, { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await started.promise;
+  assert.deepEqual(clicked, ["page0"]);
+
+  // Queued behind the running click, still against page 0.
+  emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+
+  window.setState({ page: 1 });
+  await tick();
+
+  gate.resolve();
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(clicked, ["page0"], "the queued page-0 click is discarded");
+
+  emitChatSend(`!invui:${window.id}:0:3`, { id: viewer.id });
+  await flushChatInput();
+  assert.deepEqual(clicked, ["page0", "page1"]);
+
+  window.close();
 });

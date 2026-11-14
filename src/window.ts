@@ -16,8 +16,24 @@
  * `createContainer()` uses the official
  * `world.virtualContainerManager.create()` so layout sizes and titles can be
  * checked against the documented 1..54 / 256-byte limits.
+ *
+ * Chat input is wired automatically: the first successful `open()` installs a
+ * single `world.beforeEvents.chatSend` subscription and registers the open
+ * Window for its viewer. `Window.close()` and every layout page/line/tab change
+ * invalidate the bridge generation, so a queued notification can never click a
+ * closed, reopened, or replaced screen. Nothing is installed when the game API
+ * (or a test double) omits `beforeEvents.chatSend` or `system.run`; the Window
+ * still works and chat input fails closed.
+ *
+ * The notification is a player-typed chat line. Every field except the sender
+ * id is attacker controlled and can be typed by hand, so the bridge's checks
+ * are consistency checks, not authentication. No code here produces the JSON UI
+ * `button.send` payload either: design 10.4 does not guarantee a notification
+ * is generated at all, so an Item click must still work without one. Like the
+ * screen path, this is NOT verified on a real device.
  */
 import { world } from "@minecraft/server";
+import * as server from "@minecraft/server";
 import type {
   ItemStack,
   Player,
@@ -27,8 +43,11 @@ import type {
   VirtualContainerItemChangeAfterEvent,
   VirtualContainerOptions,
 } from "@minecraft/server";
+import { connectChatSendInput, createChatInputBridge } from "./chat-input-bridge.js";
+import type { ChatInputBridge } from "./chat-input-bridge.js";
 import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
+import type { InputSlotMode } from "./input.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
 import { SlotWriteCache } from "./render-cache.js";
@@ -309,6 +328,97 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
 }
 
 export const minecraftVirtualContainerAdapter = new MinecraftVirtualContainerAdapter();
+
+/**
+ * Open Windows tracked for chat input, one set shared by the whole module so
+ * the before-event is subscribed exactly once. The bridge filters by viewer id,
+ * so a message from another player never reaches a Window it does not own.
+ */
+const chatInputWindows = new Set<Window>();
+let chatInputBridge: ChatInputBridge | undefined;
+/** Latches the feature-detection failure: never retried, never thrown at open(). */
+let chatInputUnavailable = false;
+
+/**
+ * Installs the chat input bridge on first use, or returns undefined when the
+ * game API is absent (older `@minecraft/server`, test doubles, or a world with
+ * the event disabled). The failure is latched so opening Windows stays cheap
+ * and chat input fails closed instead of breaking screen handling.
+ */
+function ensureChatInputBridge(): ChatInputBridge | undefined {
+  if (chatInputBridge) {
+    return chatInputBridge;
+  }
+  if (chatInputUnavailable) {
+    return undefined;
+  }
+  const gameSystem: typeof server.system | undefined = server.system;
+  let chatSend: typeof world.beforeEvents.chatSend | undefined;
+  try {
+    chatSend = world.beforeEvents?.chatSend;
+  } catch {
+    chatSend = undefined;
+  }
+  if (
+    !gameSystem ||
+    typeof gameSystem.run !== "function" ||
+    !chatSend ||
+    typeof chatSend.subscribe !== "function"
+  ) {
+    chatInputUnavailable = true;
+    return undefined;
+  }
+  try {
+    const bridge = createChatInputBridge({
+      windows: () => chatInputWindows,
+      // The Window exposes the modes of its current layout; a missing or
+      // throwing probe becomes [] in the bridge and rejects every slot.
+      slotModes: (window) => window._inputSlotModes?.() ?? [],
+    });
+    connectChatSendInput({ world, system: gameSystem }, bridge, (error) => {
+      console.error("InvUI: chat input dispatch failed.", error);
+    });
+    chatInputBridge = bridge;
+    return bridge;
+  } catch (error) {
+    // A broken event signal must not make open() fail: disable chat input.
+    console.error(
+      "InvUI: chat input bridge could not be installed; chat input is disabled.",
+      error,
+    );
+    chatInputUnavailable = true;
+    return undefined;
+  }
+}
+
+function registerChatInputWindow(window: Window): void {
+  ensureChatInputBridge();
+  chatInputWindows.add(window);
+}
+
+/** Close path: stop routing chat to the Window before handlers can reopen it. */
+function forgetChatInputWindow(window: Window): void {
+  if (!chatInputWindows.delete(window)) {
+    return;
+  }
+  try {
+    chatInputBridge?.invalidate(window);
+  } catch {
+    // Invalidation is best effort; the Window is already out of the registry.
+  }
+}
+
+/** Page/line/tab change: old notifications must not click the new layout. */
+function invalidateChatInputWindow(window: Window): void {
+  if (!chatInputWindows.has(window)) {
+    return;
+  }
+  try {
+    chatInputBridge?.invalidate(window);
+  } catch {
+    // Best effort: handleClick() still re-validates the slot and layout.
+  }
+}
 
 let defaultStateManager: StateManager | undefined;
 
@@ -703,6 +813,27 @@ export class Window {
     return this.#status === "open";
   }
 
+  /**
+   * Internal: mode of every logical slot of the current layout, used by the
+   * automatic chat input bridge. Returns null when there is no layout, which
+   * the bridge treats as "no slot is a button" (fail closed).
+   */
+  _inputSlotModes(): readonly InputSlotMode[] | null {
+    const layout = this.#layout;
+    if (!layout) {
+      return null;
+    }
+    return layout.slots.map((element) => {
+      if (isButtonElement(element)) {
+        return "button";
+      }
+      if (isInventoryLinkElement(element)) {
+        return "inventory";
+      }
+      return "display";
+    });
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -820,6 +951,10 @@ export class Window {
         return;
       }
       this.#status = "open";
+      // Register before open handlers run: a handler may immediately render a
+      // button the player can click. Registration also installs the single
+      // chatSend subscription on the first successful open.
+      registerChatInputWindow(this);
       this.#runOpenHandlers();
     } catch (error) {
       this.#teardown();
@@ -1643,7 +1778,19 @@ export class Window {
   }
 
   #applyLayout(layout: ResolvedGuiLayout): void {
+    const previous = this.#layout;
     this.#layout = layout;
+    // A page/line/tab change is a new clickable layout: notifications accepted
+    // against the previous one must not run against this one. Content-only
+    // re-renders keep the same page/line/tab and stay valid.
+    if (
+      previous &&
+      (previous.page !== layout.page ||
+        previous.line !== layout.line ||
+        previous.tab !== layout.tab)
+    ) {
+      invalidateChatInputWindow(this);
+    }
     // Move element subscriptions as soon as the new layout exists. Waiting for
     // async renders would let a notification hit the previous slot mapping and
     // be lost for the slot's new position (design 11.4).
@@ -1897,6 +2044,9 @@ export class Window {
   }
 
   #teardown(): void {
+    // Drop the Window from chat routing first: a close handler may reopen it,
+    // and the reopened generation must not inherit the old notification queue.
+    forgetChatInputWindow(this);
     this.#unsubscribeFromContainerEvents();
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
