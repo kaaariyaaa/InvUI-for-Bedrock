@@ -334,6 +334,43 @@ test("resets the sequence when a closed window reopens", async () => {
   assert.deepEqual(window.clicks, [7, 7]);
 });
 
+test("a session change resets the sequence even if a layout invalidation re-armed the open state", async () => {
+  let open = true;
+  let sessionId = "session-a";
+  const clicks = [];
+  const window = {
+    id: "window-1",
+    get _inputSessionId() {
+      return sessionId;
+    },
+    viewer: { id: "player-1" },
+    get isOpen() {
+      return open;
+    },
+    async _inputClick(slot) {
+      clicks.push(slot);
+      return "clicked";
+    },
+  };
+  const { bridge } = makeBridge([window]);
+
+  assert.equal((await bridge.dispatch("!invui:session-a:7:5", "player-1")).clicked, true);
+
+  // Close, reopen with a new session, then a page change before the first
+  // notification of the new open cycle is observed. The invalidation sees the
+  // Window open, so the reset may not rely on the open-state transition alone.
+  open = false;
+  bridge.invalidate(window);
+  open = true;
+  sessionId = "session-b";
+  bridge.invalidate(window);
+
+  const fresh = await bridge.dispatch("!invui:session-b:7:1", "player-1");
+  assert.equal(fresh.ok, true, "a new session may reuse a sequence");
+  assert.equal(fresh.clicked, true);
+  assert.deepEqual(clicks, [7, 7]);
+});
+
 test("a click in flight across close/reopen does not consume the new cycle's sequence", async () => {
   let release;
   const gate = new Promise((resolve) => {

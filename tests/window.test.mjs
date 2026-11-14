@@ -6504,6 +6504,55 @@ test("close and reopen start a new chat input session", async () => {
   window.close();
 });
 
+test("a page change right after reopen keeps the new session's first sequence", async () => {
+  const viewer = { id: "chat-reopen-page", name: "ReopenPage" };
+  const clicks = [];
+  let reopen = false;
+  const first = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(() => clicks.push("page0"))
+    .build();
+  const second = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_1"))
+    .addClickHandler(() => clicks.push("page1"))
+    .build();
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [first, second],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .addOpenHandler(() => {
+      if (reopen) {
+        window.setState({ page: 1 });
+      }
+    })
+    .build();
+
+  await window.open();
+  await sendChat(window, 0, 5);
+  await flushChatInput();
+  assert.deepEqual(clicks, ["page0"]);
+
+  window.close();
+  reopen = true;
+  await window.open();
+  await tick();
+
+  // The open handler changed the page after the new session was minted. That
+  // layout change must not make the bridge forget the new session's reset.
+  await sendChat(window, 0, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, ["page0", "page1"]);
+
+  window.close();
+});
+
 test("a page change invalidates a notification queued for the previous page", async () => {
   const viewer = { id: "chat-paged", name: "Pager" };
   const adapter = new InMemoryTestAdapter();
