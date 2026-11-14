@@ -2439,9 +2439,91 @@ test("a same-size upper GUI swap that changes the width fails closed", async () 
   assert.deepEqual(closeReasons, ["ServerClosed"]);
 });
 
-test("an upper GUI swap that changes the size is refused and reported", async () => {
+test("an upper GUI swap with a different size regenerates the container", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
+  const opened = [];
+  const closeReasons = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: {
+      a: Item.simple(() => stack("minecraft:top")),
+      b: Item.simple(() => stack("minecraft:b")),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .addOpenHandler(() => opened.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ selection: "before" });
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  const replacement = adapter.containers[1];
+  assert.ok(replacement, "the new size needs a new VirtualContainer");
+  assert.notEqual(window.container, container);
+  assert.equal(window.container, replacement);
+  assert.equal(replacement.size, 18);
+  assert.equal(
+    replacement.items[0].typeId,
+    "minecraft:top",
+    "the replacement is rendered before it is shown",
+  );
+  assert.equal(replacement.items[9].typeId, "minecraft:b");
+  assert.equal(window.upperGui, bigger);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(adapter.closed.map((entry) => entry.container), [container]);
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [container, replacement]);
+  assert.deepEqual(opened, ["open"], "an internal regeneration is not a new open");
+  assert.deepEqual(closeReasons, [], "an internal regeneration is not a close");
+  // A size change always changes the state schema, so the state is
+  // re-registered for the new shape and starts from its initial value.
+  assert.equal(window.getState().selection, undefined);
+
+  // The replaced GUI's structure subscription is gone.
+  const writes = replacement.setItem.bind(replacement);
+  let written = 0;
+  replacement.setItem = (slot, item) => {
+    written += 1;
+    writes(slot, item);
+  };
+  oldGui.setIngredient("a", Item.simple(() => stack("minecraft:still_old")));
+  await tick();
+  assert.equal(written, 0);
+
+  window.close("PlayerClosed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("a failed size-changing swap keeps the old screen and restores its state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const createContainer = adapter.createContainer.bind(adapter);
+  let creates = 0;
+  adapter.createContainer = (options) => {
+    creates += 1;
+    if (creates === 2) {
+      throw new Error("create failed");
+    }
+    return createContainer(options);
+  };
   const oldGui = Gui.normal({
     structure: ["a"],
     ingredients: { a: Item.simple(() => stack("minecraft:old")) },
@@ -2455,28 +2537,192 @@ test("an upper GUI swap that changes the size is refused and reported", async ()
     .setUpperGui(oldGui)
     .setStateManager(new StateManager())
     .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
     .setErrorHandler((error, context) => errors.push({ error, context }))
     .build();
 
   await window.open();
+  window.setState({ selection: "kept" });
   const container = adapter.containers[0];
 
   window.setUpperGui(bigger);
-  await tick();
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
 
   assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui, "the old GUI stays on the screen");
   assert.equal(window.container, container);
-  assert.equal(window.upperGui, oldGui);
-  assert.equal(adapter.containers.length, 1);
-  assert.equal(errors.length, 1);
-  assert.match(errors[0].error.message, /layout size changed/);
-  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(adapter.containers.length, 1, "no replacement screen is shown");
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(errors.map((entry) => entry.context.operation), ["guiChange"]);
+  assert.match(errors[0].error.message, /create failed/);
+  assert.equal(
+    window.getState().selection,
+    "kept",
+    "the failed swap restores the previous registration's values",
+  );
   assert.equal(container.items[0].typeId, "minecraft:old");
 
-  // The refused swap must leave the previous GUI and its subscriptions intact.
-  oldGui.setIngredient("a", Item.simple(() => stack("minecraft:still_old")));
+  // The restored registration still receives state changes and the old GUI is
+  // still subscribed.
+  window.setState({ selection: "after" });
   await tick();
-  assert.equal(container.items[0].typeId, "minecraft:still_old");
+  assert.equal(window.getState().selection, "after");
+
+  window.close("PlayerClosed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("a size-changing swap with another live shared registration is refused", async () => {
+  const manager = new StateManager();
+  const key = "shared-size";
+  const errors = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const holder = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(oldGui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+  await holder.open();
+
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+  await window.open();
+  holder.setState({ selection: "holder" });
+  const container = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  // Design 9.2: the same key with an incompatible shape cannot be registered,
+  // so nothing is swapped and neither Window's state is mixed.
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(window.container, container);
+  assert.equal(adapter.containers.length, 1, "no replacement screen is shown");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.code, "SCHEMA_MISMATCH");
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(window.getState().selection, "holder");
+  assert.equal(holder.getState().selection, "holder");
+
+  window.close();
+  holder.close();
+});
+
+test("a size-changing swap with a persistent record of the old schema leaves the store untouched", async () => {
+  const store = memoryStore();
+  const manager = new StateManager(store);
+  const errors = [];
+  const key = "persistent-size";
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateKey(key)
+    .setStateLifetime("persistent")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "kept" });
+  const container = adapter.containers[0];
+  const recordsBefore = new Map(store.records);
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(window.container, container);
+  assert.equal(adapter.containers.length, 1, "no replacement screen is shown");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.code, "SCHEMA_MISMATCH");
+  assert.deepEqual(
+    new Map(store.records),
+    recordsBefore,
+    "the stored record is not rewritten under the new schema",
+  );
+  assert.equal(window.getState().selection, "kept", "the state registration is restored");
+  window.close();
+});
+
+test("a session-lifetime size-changing swap is refused by the idle registration", async () => {
+  const manager = new StateManager();
+  const errors = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "kept" });
+  const container = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  // Releasing the last handle keeps a session registration, so the identity
+  // still carries the old schema and the swap is refused (design 9.3).
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(window.container, container);
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.code, "SCHEMA_MISMATCH");
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(window.getState().selection, "kept");
   window.close();
 });
 
@@ -2517,11 +2763,13 @@ test("an upper GUI swap with a different state schema fails closed", async () =>
   assert.equal(errors[0].context.operation, "guiChange");
 });
 
-test("a refused upper GUI swap whose error handler reopens keeps the new generation", async () => {
+test("a refused shared-state GUI swap whose error handler reopens keeps the new generation", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
   let reopened;
   let reopening = false;
+  const manager = new StateManager();
+  const key = "refused-swap";
   const oldGui = Gui.normal({
     structure: ["a"],
     ingredients: { a: Item.simple(() => stack("minecraft:old")) },
@@ -2530,9 +2778,27 @@ test("a refused upper GUI swap whose error handler reopens keeps the new generat
     structure: ["a", "b"],
     ingredients: { b: Item.simple(() => stack("minecraft:b")) },
   });
+  // Another Window registers the same shared key with the old shape, so the
+  // new schema cannot take the identity (design 9.2).
+  const holder = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(oldGui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+  await holder.open();
+
   const window = Window.builder()
     .setViewer(player)
     .setUpperGui(oldGui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("session")
+    .setStateManager(manager)
     .setContainerAdapter(adapter)
     .setErrorHandler((error, context) => {
       errors.push({ error, context });
@@ -2549,19 +2815,24 @@ test("a refused upper GUI swap whose error handler reopens keeps the new generat
   const firstContainer = adapter.containers[0];
 
   window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && !reopening; i += 1) {
+    await tick();
+  }
   await reopened;
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0].error.message, /layout size changed/);
+  assert.equal(errors[0].error.code, "SCHEMA_MISMATCH");
+  assert.equal(errors[0].context.operation, "guiChange");
   assert.equal(window.status, "open");
   assert.equal(window.container, adapter.containers[1]);
   assert.notEqual(window.container, firstContainer);
-  assert.equal(window.upperGui, oldGui, "the rejected GUI must not win over the reopen");
+  assert.equal(window.upperGui, oldGui, "the refused GUI must not win over the reopen");
   assert.equal(adapter.containers.length, 2);
   assert.equal(adapter.opened.length, 2);
   assert.equal(adapter.closed.length, 1);
 
   window.close("PlayerClosed");
+  holder.close("PlayerClosed");
   assert.equal(window.status, "closed");
 });
 
@@ -4756,7 +5027,7 @@ test("a schema-different setUpperGui during a size regeneration fails closed", a
   assert.equal(window.status, "closed", "the in-flight regeneration never opens a screen");
 });
 
-test("a setUpperGui refused for the old size in the same tick still lets the regeneration settle", async () => {
+test("a setUpperGui queued in the same tick as a size change applies to the replacement", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
   const tab0 = Gui.normal({ structure: ["a"] });
@@ -4788,23 +5059,23 @@ test("a setUpperGui refused for the old size in the same tick still lets the reg
 
   await window.open();
   window.setState({ tab: 1 });
-  // The size regeneration has not started yet, so the Window still owns the
-  // 9-slot container and refuses the 27-slot candidate. That refusal must not
-  // disturb the regeneration queued by the state change.
+  // The candidate is queued in the same tick as the state change, before the
+  // refresh microtask starts the state-driven regeneration. It re-resolves
+  // when its turn arrives, after that regeneration created the 27-slot
+  // container, so it is applied to the replacement without another one.
   window.setUpperGui(next);
   for (let i = 0; i < 20; i += 1) {
     await tick();
   }
 
   assert.equal(window.status, "open");
-  assert.equal(errors.length, 1);
-  assert.match(errors[0].error.message, /layout size changed/);
-  assert.equal(errors[0].context.operation, "guiChange");
-  assert.equal(window.upperGui, original, "the refused candidate must not win");
+  assert.deepEqual(errors, []);
+  assert.equal(window.upperGui, next, "the newest request wins");
   const last = adapter.containers[adapter.containers.length - 1];
   assert.equal(window.container, last);
   assert.equal(last.size, 27);
-  assert.equal(last.items[0].typeId, "minecraft:b", "the current GUI is rendered");
+  assert.equal(last.items[0].typeId, "minecraft:m", "the newest GUI is rendered");
+  assert.equal(adapter.containers.length, 2);
   window.close();
 });
 
