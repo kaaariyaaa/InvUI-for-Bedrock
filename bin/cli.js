@@ -572,11 +572,13 @@ function preflightTemplate(resourcePack) {
 }
 
 // 既存 _ui_defs.json は変更しない。登録状況だけを読み取り、手動作業を案内する。
+// verified は「ui_defs 文字列配列として読めた」こと。false は未登録ではなく登録未確認を表す。
 function inspectUiDefs(resourcePack) {
   const result = {
     path: UI_DEFS_RELATIVE_PATH,
     action: 'not-modified',
     exists: false,
+    verified: false,
     registered: [],
     missing: [...TEMPLATE_PATHS],
     error: null,
@@ -600,9 +602,12 @@ function inspectUiDefs(resourcePack) {
     result.error = error.message;
     return result;
   }
-  const defs = Array.isArray(parsed && parsed.ui_defs)
-    ? parsed.ui_defs.filter((entry) => typeof entry === 'string')
-    : [];
+  const defs = Array.isArray(parsed && parsed.ui_defs) ? parsed.ui_defs : null;
+  if (defs === null || defs.some((entry) => typeof entry !== 'string')) {
+    // JSON ではあるが ui_defs 文字列配列がない。未登録ではなく登録未確認として扱う。
+    return result;
+  }
+  result.verified = true;
   result.registered = TEMPLATE_PATHS.filter((entry) => defs.includes(entry));
   result.missing = TEMPLATE_PATHS.filter((entry) => !defs.includes(entry));
   return result;
@@ -620,6 +625,7 @@ function preflightUiDefsRegistration(resourcePack) {
     destination,
     status: 'failed',
     exists: false,
+    verified: false,
     registered: [],
     missing: [...TEMPLATE_PATHS],
     added: [],
@@ -698,6 +704,7 @@ function preflightUiDefsRegistration(resourcePack) {
     return result;
   }
 
+  result.verified = true;
   result.registered = TEMPLATE_PATHS.filter((entry) => parsed.ui_defs.includes(entry));
   result.missing = TEMPLATE_PATHS.filter((entry) => !parsed.ui_defs.includes(entry));
   if (result.missing.length === 0) {
@@ -1035,6 +1042,7 @@ function applyTemplate(resourcePack, options = {}) {
       path: UI_DEFS_RELATIVE_PATH,
       action: uiDefsPreflight.status,
       exists: uiDefsPreflight.exists,
+      verified: uiDefsPreflight.verified,
       registered: [...uiDefsPreflight.registered],
       missing: [...uiDefsPreflight.missing],
       added: [...uiDefsPreflight.added],
@@ -1463,9 +1471,17 @@ function finalizeReport(report, installResult) {
   report.resourcePackInstall = installResult;
 
   const installedPaths = new Set((installResult.files || []).map((file) => file.path));
-  const uiDefsAction = installResult.uiDefs ? installResult.uiDefs.action : null;
-  const uiDefsRegistered = uiDefsAction === 'registered';
-  const uiDefsAlreadyRegistered = uiDefsAction === 'already-registered';
+  // 導入未指定・中断・未追記でも、実ファイルの登録状況を読んで案内を決める。
+  // 「読めない/配列がない（登録未確認）」と「読めたが未登録」は区別する。
+  const uiDefs = inspectUiDefs(report.inputs.resourcePack);
+  const uiDefsRegistered = Boolean(installResult.uiDefs && installResult.uiDefs.action === 'registered');
+  const uiDefsVerified = uiDefs.exists && uiDefs.verified === true;
+  const uiDefsAlreadyRegistered =
+    !uiDefsRegistered && uiDefsVerified && uiDefs.missing.length === 0;
+  const uiDefsUnverified =
+    !uiDefsRegistered && !uiDefsAlreadyRegistered && (Boolean(uiDefs.error) || (uiDefs.exists && !uiDefs.verified));
+  const uiDefsMissing = !uiDefsRegistered && !uiDefsAlreadyRegistered && !uiDefsUnverified && uiDefsVerified;
+  const uiDefsAbsent = !uiDefsRegistered && !uiDefsAlreadyRegistered && !uiDefsUnverified && !uiDefsVerified;
   const notCreated = [];
 
   for (const relativePath of TEMPLATE_PATHS) {
@@ -1491,7 +1507,23 @@ function finalizeReport(report, installResult) {
         `対象 ${TEMPLATE_PATHS.length} ファイルはすべて ui/_ui_defs.json に登録済みのため変更していません。` +
         '追記もバックアップ作成も行っていません。',
     });
-  } else if (!uiDefsRegistered) {
+  } else if (uiDefsUnverified) {
+    notCreated.push({
+      path: path.join(report.inputs.resourcePack, 'ui', '_ui_defs.json'),
+      action: 'not-modified',
+      reason:
+        'ui/_ui_defs.json の登録状況を確認できません（JSON として読めないか、ui_defs 配列がありません）。' +
+        '既定どおり変更もバックアップ作成もしていません。登録する場合は内容を確認して手動で行ってください。',
+    });
+  } else if (uiDefsAbsent) {
+    notCreated.push({
+      path: path.join(report.inputs.resourcePack, 'ui', '_ui_defs.json'),
+      action: 'not-modified',
+      reason:
+        'ui/_ui_defs.json がありません。この CLI は既存ファイルへの追記だけを行うため作成していません。' +
+        '接続ファイルを使う場合は、ui_defs 配列を持つファイルを用意するか generate-resource-pack の生成物を使ってください。',
+    });
+  } else if (uiDefsMissing) {
     notCreated.push({
       path: path.join(report.inputs.resourcePack, 'ui', '_ui_defs.json'),
       action: 'not-modified',
@@ -1517,7 +1549,12 @@ function finalizeReport(report, installResult) {
         '対象ゲーム版の JSON UI 仕様と食い違う場合は復元してください。'
       : uiDefsAlreadyRegistered
         ? `ui/_ui_defs.json には対象 ${TEMPLATE_PATHS.length} ファイルがすべて登録済みのため、追記もバックアップ作成も行っていません。バックアップは存在しません。`
-        : 'ui/invui.json と試験的接続 2 ファイルを置いただけでは有効にならない。既存 Resource Pack では ui/_ui_defs.json への登録が別途必要で、この CLI は既定では自動変更しない。対象ゲーム版の JSON UI 仕様を確認して手動で追記する（生成物は登録済み）。',
+        : uiDefsUnverified
+          ? 'ui/_ui_defs.json の登録状況を確認できません。既定どおり変更もバックアップ作成もしていないため、内容を確認し、必要なら手動で ui_defs 配列へ登録してください' +
+            `（${REGISTER_UI_DEFS_FLAG} は読めるファイルにだけ追記します）。`
+          : uiDefsAbsent
+            ? 'ui/_ui_defs.json がありません。接続ファイルを使う場合は登録が別途必要で、この CLI は新規作成せず既存ファイルへの追記だけを行うため、ui_defs 配列を持つファイルを用意するか generate-resource-pack の生成物を使ってください。'
+            : 'ui/invui.json と試験的接続 2 ファイルを置いただけでは有効にならない。既存 Resource Pack では ui/_ui_defs.json への登録が別途必要で、この CLI は既定では自動変更しない。対象ゲーム版の JSON UI 仕様を確認して手動で追記する（生成物は登録済み）。',
     '試験的接続は VirtualContainer を特定できず、data_driven_container の desktop/pocket パネルを使う全画面に作用し得る。有効化は使い捨てワールドだけで行い、通常画面への影響を確認する。',
     'tests/manual-bedrock/CHECKLIST.md の検証が終わるまで、クリック・アイテム保護・JSON UI 連携を有効な機能として扱わない。',
     'Resource Pack の既存 UI を手動でマージする場合は、バックアップを取り、差分を確認する。',
@@ -1561,6 +1598,8 @@ function printUiDefs(uiDefs) {
     out(`  - 読み取れませんでした: ${uiDefs.error}`);
   } else if (!uiDefs.exists) {
     out('  - ファイルがありません。登録する場合は手動で ui_defs 配列を用意してください。');
+  } else if (uiDefs.verified !== true) {
+    out('  - ui_defs 配列を確認できないため、登録状況を判定できません（変更していません）。');
   } else if (uiDefs.missing.length > 0) {
     out(`  - 未登録: ${uiDefs.missing.join(', ')}`);
     out(
