@@ -2632,6 +2632,74 @@ test("a size-changing swap preserves state when the new registration fails", asy
   window.close("PlayerClosed");
 });
 
+test("a failed state restore whose error handler reopens keeps the new generation", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const store = memoryStore();
+  const read = store.getItem;
+  let failures = 0;
+  store.getItem = (key) => {
+    if (failures > 0) {
+      failures -= 1;
+      throw new Error("store read failed");
+    }
+    return read(key);
+  };
+  const oldGui = Gui.normal({ structure: ["a"] });
+  const bigger = Gui.normal({ structure: ["a", "b"] });
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      // Recover from the failed swap with a fresh open. The restore that fails
+      // after this report belongs to the generation that is already gone.
+      if (context.operation !== "guiChange" || reopening) {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  window.setState({ selection: "kept" });
+  const firstContainer = adapter.containers[0];
+
+  // Both reads fail: the new schema cannot be acquired, and re-acquiring the
+  // previous schema after the release fails too. The reopened Window must
+  // survive that failure instead of being closed by the old generation.
+  failures = 2;
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && !reopening; i += 1) {
+    await tick();
+  }
+  await reopened;
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui, "the refused swap did not take effect");
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(window.container, adapter.containers[1]);
+  assert.equal(adapter.containers.length, 2, "the swap never created a container");
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.match(errors[0].error.message, /store read failed/);
+  // The reopen started a new `window`-lifetime state, as an explicit close does.
+  assert.deepEqual(window.getState(), {});
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+});
+
 test("a close before a queued size-changing swap never shows a replacement", async () => {
   const adapter = new InMemoryTestAdapter();
   const closeReasons = [];

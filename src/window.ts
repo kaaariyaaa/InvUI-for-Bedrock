@@ -2049,7 +2049,7 @@ export class Window {
       next = this.#acquireState(gui, previousState);
     } catch (error) {
       if (generation === this.#generation && this.#status === "open") {
-        this.#restoreStateRegistration(previousState);
+        this.#restoreStateRegistration(previousState, generation);
       }
       throw error;
     }
@@ -2082,15 +2082,24 @@ export class Window {
    * registration instead of resetting the values; an existing registration
    * ignores `initial`, so shared state is not overwritten with a stale
    * snapshot. If even that re-acquire fails, the Window has no state describing
-   * the screen and fails closed.
+   * the screen and fails closed — but only for the generation that owned the
+   * failed swap: a close handler or error handler that closed and reopened the
+   * Window during that report owns a new generation, which never saw the failed
+   * swap and must not be torn down here.
    */
-  #restoreStateRegistration(previousState?: StateSnapshot): void {
+  #restoreStateRegistration(
+    previousState?: StateSnapshot,
+    generation: number = this.#generation,
+  ): void {
     try {
       const handle = this.#acquireState(undefined, previousState);
       this.#installState(handle);
     } catch (error) {
       this.#report(error, "guiChange");
-      if (this.#status === "opening" || this.#status === "open") {
+      if (
+        generation === this.#generation &&
+        (this.#status === "opening" || this.#status === "open")
+      ) {
         this.#performClose("ServerClosed", true);
       }
     }
@@ -2102,6 +2111,7 @@ export class Window {
    * previous schema (the reported container failure left the old screen up).
    */
   #rollbackGuiSizeSwap(previousGui: Gui, previousState: StateSnapshot): void {
+    const generation = this.#generation;
     const handle = this.#stateHandle;
     if (handle) {
       const unsubscribe = this.#stateSubscription;
@@ -2110,13 +2120,21 @@ export class Window {
       handle.release();
       this.#stateHandle = undefined;
     }
-    this.#attachGuiSubscription(previousGui, this.#generation);
+    this.#attachGuiSubscription(previousGui, generation);
+    // A reported unsubscribe failure may have closed and reopened the Window;
+    // the rollback belongs to the generation that owned the failed swap.
+    if (generation !== this.#generation) {
+      return;
+    }
     this.#upperGui = previousGui;
     // The previous registration was dropped by the successful re-registration,
     // so its values seed the restored one; an existing shared registration
     // ignores them.
-    this.#restoreStateRegistration(previousState);
-    if (this.#status !== "opening" && this.#status !== "open") {
+    this.#restoreStateRegistration(previousState, generation);
+    if (
+      generation !== this.#generation ||
+      (this.#status !== "opening" && this.#status !== "open")
+    ) {
       return;
     }
     this.#revalidateStateRanges = true;
