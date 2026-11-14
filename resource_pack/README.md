@@ -6,7 +6,7 @@
 > - `ui/_ui_defs.json` は `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` の 3 つを登録済みです。後者 2 つが `data_driven_container` の `desktop_panel` / `pocket_panel` に警告ラベル、`invui_probe` のラベルと実験的 `button.send` 部品、および**透明ブロッカー**を差し込みます。**登録済みのため、パックを置けば接続が働く想定**です。ただし**実機未検証であり、接続・表示・入力のどれも保証しません**。
 > - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。VirtualContainer 画面がこのパネルを使っているかも未確定です。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
 > - **透明ブロッカーは保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆う透明な `button` で、スロット系の入力を `button.invui_connect_blocked` へ付け替えるだけです。この ID を処理するスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリやホットバーは覆わず、controller・タッチ入力の遮断を保証しません**。フォーカスが下のスロットへ移る、JSON UI を経由しない操作、タッチの長押し・ドラッグなどは止まらない可能性があります。**アイテム保護・入力抑制・画面終了処理は未完成**で、ブロッカーによる遮断を保証しません。表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
-> - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく実装できません。このファイルは、chat と同じ text box 名と `button.send` を使い、`!invui:<session-id>:<slot>:<sequence>`（session-id は開いた `Window` の公開 getter `_inputSessionId` から取得）を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
+> - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠が確認できていません。このファイルは、chat と同じ text box 名と `button.send` を使い、`!invui:<session-id>:<slot>:<sequence>`（session-id は開いた `Window` の公開 getter `_inputSessionId` から取得）を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
 > - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**です（設計 10.3 の代替候補 `button.drop_one` → コンテナ変化）。デスクトップのスロットグリッド上に透明ボタンを重ね、通常クリックを `button.drop_one` へ付け替えます。クリックでスロットが変われば `VirtualContainerItemChangeAfterEvent` が `player` / `container` / `slot` を伴って自動で届くため、チャット文字列の手入力は不要です。ただし**1 クリックごとにアイテムが 1 個ドロップされ得る破壊的プローブ**で、**サーバー側のクリック処理は未実装**です。現在のコアは itemChange を危険として close するため、そのままではクリックとして実行されません。既定未登録・CLI 対象外・pocket 非対応で、`data_driven_container.desktop_panel` を使う全画面に影響し得ます。詳細と制約は下記の専用節を参照してください。
 > - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対応ゲーム版・パックの適用方法・読み込み順は確定していません。
 > - 他の Resource Pack との競合を検出・解消する機能はありません。他パックが同じ `invui_probe` / `invui_connect_probe` / `data_driven_container` 名前空間や同じ UUID を使っている場合も衝突し得ます。
@@ -66,9 +66,9 @@ resource_pack/
 
 ## `ui/invui_controls.json`（手動・静的ペイロード送信プローブ／オプトイン）
 
-**JSON UI から `slot` / `session` / `sequence` を自動生成してチャット通知を送る方式は、公式構造からは実装できません。** このプローブは、その制約を前提にした**手入力の静的ペイロード実験**です。`common.text_edit_box` を chat 画面と同一の text box 名・content binding で置き、`button.send` を押して、入力した固定文字列が送信されるかだけを観察します。**自動 payload 生成、slot の自動挿入、session / sequence の自動採番は行いません。**
+**JSON UI から `slot` / `session` / `sequence` を自動生成してチャット通知を送る方式は、公式構造だけでは実装方法を確認できていません。** このプローブは、その制約を前提にした**手入力の静的ペイロード実験**です。`common.text_edit_box` を chat 画面と同一の text box 名・content binding で置き、`button.send` を押して、入力した固定文字列が送信されるかだけを観察します。**自動 payload 生成、slot の自動挿入、session / sequence の自動採番は行いません。**
 
-### 自動生成できない根拠（2026-11-14 時点）
+### 自動生成できない根拠（2026-11-15 時点）
 
 公式 `bedrock-samples` のタグ **`v1.26.70.23-preview`**（commit `430142679bb7daf3160671f06ab32ea433be1e1d`）と Bedrock Wiki を確認しました。
 
@@ -78,10 +78,12 @@ resource_pack/
 | [`ui/ui_common.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/ui_common.json) の `common.button` は `from_button_id` → `$pressed_button_name` の対応だけを持ち、引数や文字列を渡す書式がない | 押下 slot をボタン ID に埋め込んだり、session / sequence を `button_mappings` で渡したりできない |
 | chat の [`text_edit_box@common.text_edit_box`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/chat_screen.json) は `$text_box_name: "#message_text_box"` と `$text_edit_box_content_binding_name: "#message_text_box_content"` を使う | 本文の表示はこの 2 つに依存する。後者は Wiki で **Chat 画面固有の hardcoded binding** とされている |
 | `edit_box` に `text` 初期値プロパティはなく、samples にも固定文字を初期表示する例がない。content binding はコード側が供給する | JSON UI だけで本文を書き込む／事前入力する書式は確認できない |
-| `collection_index` は grid item の静的 index であり、`#collection_index` のような実行時 binding をボタン ID やチャット本文へ変換する仕組みはない | slot を自動で本文へ入れる経路がない |
-| `VirtualContainer` の API は open / close / itemChange のみで、JSON UI からの汎用クリックイベントや script binding を公開しない | UI → script へ session / slot / sequence を渡す経路がない |
+| `collection_index` は grid item の静的 index であり、`#collection_index` のような実行時 binding をボタン ID やチャット本文へ変換する仕組みは確認できない | slot を自動で本文へ入れる経路は確認できない |
+| `VirtualContainer` の API は open / close / itemChange のみで、JSON UI からの汎用クリックイベントや script binding を公開しない | UI → script へ session / slot / sequence を渡す汎用の経路は確認できない |
 
-したがって、**「押した slot・session・sequence を JSON UI が自動で送る」実装は、根拠のない binding を発明しない限り作れません。** このプローブは、その不可能な部分を実装したふりをせず、**手入力の固定ペイロードで送信経路だけを切り分ける**ためのものです。
+したがって、**「押した slot・session・sequence を JSON UI が自動で送る」実装は、根拠のない binding を発明しない限り作る方法を確認できていません。** このプローブは、その未確認の部分を実装したふりをせず、**手入力の固定ペイロードで送信経路だけを切り分ける**ためのものです。
+
+`button.drop_one` → コンテナ変化、カーソル、マーカーアイテムを含む候補の比較と、実機で必要な観測項目は [`../tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md`](../tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md) にまとめています。自動通知は実装済みではありません。
 
 ### 何をするか
 

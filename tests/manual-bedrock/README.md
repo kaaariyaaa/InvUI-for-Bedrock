@@ -255,6 +255,7 @@ node tests/manual-bedrock/edit-box-resource-pack/check.mjs
 以下は、この手順を実施して結果が出るまで確定しません。
 
 - 入力通知方式（`button.send` → チャット通知を採用できるか）
+- 自動スロットクリック通知の可否。公式 samples と script beta の範囲では、標準表示を保ったまま非破壊・タッチ対応で自動通知する経路は確認できていない。`button.send` / `button.drop_one` / カーソル / マーカーアイテムの各候補と実機で必要な観測項目は [`CLICK-NOTIFICATION-NOTES.md`](CLICK-NOTIFICATION-NOTES.md) を参照。自動通知は実装済みとして扱わない
 - カーソル取得（`cursor_inventory`）をクリック源にする案。`ef2e079` の試作は after イベントでの復元が同一指紋の Shift クリック・持ち出しで複製し得るため統合せず、タッチでもカーソルが使われない。調査と観察項目は [`CURSOR-INPUT-NOTES.md`](CURSOR-INPUT-NOTES.md) を参照し、実装・有効化手順として扱わない
 - 表示専用スロットの操作抑制方法（現状は無保護で、取り出し＋再描画による複製、再描画による消失が起こり得る）
 - 既定の `Window.open()` 経路で実機の画面が表示されるか、`close()` がいつ完了するか、直後の再 `open()` が成立するか
