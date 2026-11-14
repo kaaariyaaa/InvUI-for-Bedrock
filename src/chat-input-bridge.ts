@@ -3,7 +3,7 @@
  * the design 10.4 notification:
  *
  * ```text
- * !invui:<session-id>:<slot-index>:<sequence>
+ * !invui:<session-id>:<layout-generation>:<slot-index>:<sequence>
  * ```
  *
  * This is an internal module (not exported from `src/index.ts`) and is not a
@@ -43,13 +43,14 @@
  * notification from an earlier open could otherwise match a new screen. This
  * is still consistency checking, not authentication.
  *
- * Generation gap: `Window` does not expose its private layout generation, so
- * this bridge's counter knows only open cycles it observed or was told about.
- * `Window.handleClick()` re-validates slot, page/tab/line, element identity,
- * and its own generation when the queued click actually runs, which covers
- * page changes it can see. The automatic Window wiring also calls
- * `invalidate(window)` on close and on every page/line/tab change, so the
- * bridge's own queue is dropped there too.
+ * Layout generation: every notification must name the current clickable-layout
+ * generation of the sender's Window. A line sent before a page/line/tab change
+ * but delivered after it therefore fails `stale-layout-generation` instead of
+ * clicking whatever button now occupies that slot. The Window exposes the
+ * value as `_inputLayoutGeneration` and advances it wherever it invalidates
+ * this bridge; a caller-provided window must expose the same getter. The older
+ * three-field wire form is rejected: it has no generation, so it cannot be
+ * distinguished from a stale click. No UI payload is generated here.
  */
 
 import {
@@ -104,6 +105,14 @@ export interface ChatInputWindow {
    * to `id` for compatibility with caller-provided windows.
    */
   readonly _inputSessionId?: string;
+  /**
+   * Generation of the current clickable layout. `Window` advances it on every
+   * open and page/line/tab or slot-element change. A window that cannot report
+   * a non-negative safe integer is not routed to (fail closed), because a
+   * notification could then only be checked against the live layout, which is
+   * the ambiguity the generation field exists to remove.
+   */
+  readonly _inputLayoutGeneration?: number;
   readonly viewer: { readonly id: string };
   readonly isOpen: boolean;
   /**
@@ -179,7 +188,9 @@ export interface ChatInputBridge {
    * Marks the Window's clickable state as superseded: queued candidates are
    * rejected as `stale-generation`. Call on close (before a possible reopen)
    * and on a page/layout change when the integration can observe one. On a
-   * close this also makes the next open reset `lastSequence`.
+   * close this also makes the next open reset `lastSequence`. This is the
+   * queue epoch, not the wire `layoutGeneration`; the Window itself advances
+   * that getter on page/layout changes.
    */
   invalidate(window: ChatInputWindow): void;
 }
@@ -219,6 +230,18 @@ function readIsOpen(window: ChatInputWindow): boolean {
     return window.isOpen === true;
   } catch {
     return false;
+  }
+}
+
+function readLayoutGeneration(window: ChatInputWindow): number | null {
+  try {
+    const generation = window._inputLayoutGeneration;
+    if (typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0) {
+      return generation;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -315,13 +338,21 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
   function snapshot(window: ChatInputWindow, state: WindowBridgeState): InputAcceptorSnapshot | null {
     const ownerId = readViewerId(window);
     const sessionId = readSessionId(window);
-    if (ownerId === null || sessionId === null) {
+    const layoutGeneration = readLayoutGeneration(window);
+    if (ownerId === null || sessionId === null || layoutGeneration === null) {
       return null;
     }
 
     if (!readIsOpen(window)) {
       state.lastSeenOpen = false;
-      return { open: false, ownerId, sessionId, slotModes: [], generation: state.generation };
+      return {
+        open: false,
+        ownerId,
+        sessionId,
+        layoutGeneration,
+        slotModes: [],
+        generation: state.generation,
+      };
     }
 
     if (!state.lastSeenOpen || state.lastSessionId !== sessionId) {
@@ -338,6 +369,7 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
       open: true,
       ownerId,
       sessionId,
+      layoutGeneration,
       slotModes,
       generation: state.generation,
       ...(state.lastSequence === undefined ? {} : { lastSequence: state.lastSequence }),
@@ -467,11 +499,12 @@ export interface ChatInputEventSource {
  * this returns a no-op unsubscribe and never subscribes. That is the fail-closed
  * path: screen handling keeps working and no chat line is touched.
  *
- * Only a *well-formed* `!invui:<session>:<slot>:<sequence>` line is cancelled;
- * ordinary chat and malformed reserved-prefix lines pass through. The sender
- * id, message, and parseable status are read synchronously (restricted
- * execution), then the click is scheduled through `system.run()`. No Window is
- * touched and no click executes inside the before-event.
+ * Only a *well-formed* `!invui:<session>:<layout-generation>:<slot>:<sequence>`
+ * line is cancelled; ordinary chat and malformed reserved-prefix lines
+ * (including the old three-field form) pass through. The sender id, message,
+ * and parseable status are read synchronously (restricted execution), then the
+ * click is scheduled through `system.run()`. No Window is touched and no click
+ * executes inside the before-event.
  *
  * Returns an unsubscribe function. `onError` receives failures to schedule
  * (a failure inside `dispatch` is already reported as a rejection result).

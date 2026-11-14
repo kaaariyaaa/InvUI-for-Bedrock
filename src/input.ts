@@ -2,8 +2,14 @@
  * Parser for the tentative chat notification in design 10.4:
  *
  * ```text
- * !invui:<session-id>:<slot-index>:<sequence>
+ * !invui:<session-id>:<layout-generation>:<slot-index>:<sequence>
  * ```
+ *
+ * The layout generation binds the notification to the clickable layout that
+ * was on screen when the button sent it. Design 10.5 requires that a
+ * notification from a previous page/generation is not processed; without the
+ * field, a line sent before a page change but delivered after it could name a
+ * button that happens to exist at the same slot on the new page.
  *
  * This is a pure module. It does not import the Minecraft API, subscribe to
  * `world.beforeEvents.chatSend`, hold a WindowRegistry, or call
@@ -16,16 +22,21 @@
  * chest screen is verified in the real game. This module therefore has no
  * game-event integration.
  *
- * Design gaps: 10.4 defines the field order but not the session-id charset or
- * length, whether `slot-index` starts at 0, or the sequence type, range, and
- * ordering. The bounds below are defensive parser policy, not confirmed
- * protocol requirements; adjust them when the format is finalized. 10.5 has no
- * time-based freshness rule and 10.4 puts no timestamp in the message, so
- * "expired" can only mean "the Window is no longer open"; it also defines no
- * rate-limit parameters, no generation/page token in the message, and no
- * mapping from layout elements to the `button`/`display`/`inventory` modes.
- * See `validateInputNotification` for what that leaves unchecked, and
+ * Design gaps: 10.4 defines the conceptual field order but not the session-id
+ * charset or length, whether `slot-index` starts at 0, the generation or
+ * sequence types/range, or their ordering. The bounds below are defensive
+ * parser policy, not confirmed protocol requirements; adjust them when the
+ * format is finalized. 10.5 has no time-based freshness rule and 10.4 puts no
+ * timestamp in the message, so "expired" can only mean "the Window is no
+ * longer open"; it also defines no rate-limit parameters and no mapping from
+ * layout elements to the `button`/`display`/`inventory` modes. See
+ * `validateInputNotification` for what that leaves unchecked, and
  * `checkInputRateLimit` for the caller-injected half of the 10.5 repeat limit.
+ *
+ * The older three-field form `!invui:<session>:<slot>:<sequence>` is not
+ * accepted. It cannot name a layout generation, so accepting it would keep the
+ * page-change ambiguity this field exists to close. Lines in the old form are
+ * treated as malformed and are not executed.
  */
 
 export const INPUT_NOTIFICATION_PREFIX = "!invui:";
@@ -42,10 +53,16 @@ const SLOT_INDEX_PATTERN = /^(?:0|[1-9][0-9]?)$/;
 const MAX_SLOT_INDEX = 53;
 
 /** Canonical decimal, limited to values JavaScript can represent exactly. */
-const SEQUENCE_PATTERN = /^(?:0|[1-9][0-9]{0,15})$/;
+const NON_NEGATIVE_SAFE_INTEGER_PATTERN = /^(?:0|[1-9][0-9]{0,15})$/;
 
 export interface InputNotification {
   readonly sessionId: string;
+  /**
+   * Clickable-layout generation of the Window when the notification was
+   * minted. A notification from another page/layout is rejected rather than
+   * applied to whatever button now occupies the same slot.
+   */
+  readonly layoutGeneration: number;
   readonly slot: number;
   readonly sequence: number;
 }
@@ -60,12 +77,19 @@ export function parseInputNotification(message: unknown): InputNotification | nu
   }
 
   const parts = message.slice(INPUT_NOTIFICATION_PREFIX.length).split(":");
-  if (parts.length !== 3) {
+  if (parts.length !== 4) {
     return null;
   }
 
-  const [sessionId, slotText, sequenceText] = parts;
+  const [sessionId, generationText, slotText, sequenceText] = parts;
   if (!SESSION_ID_PATTERN.test(sessionId)) {
+    return null;
+  }
+  if (!NON_NEGATIVE_SAFE_INTEGER_PATTERN.test(generationText)) {
+    return null;
+  }
+  const layoutGeneration = Number(generationText);
+  if (!Number.isSafeInteger(layoutGeneration)) {
     return null;
   }
   if (!SLOT_INDEX_PATTERN.test(slotText)) {
@@ -75,7 +99,7 @@ export function parseInputNotification(message: unknown): InputNotification | nu
   if (slot > MAX_SLOT_INDEX) {
     return null;
   }
-  if (!SEQUENCE_PATTERN.test(sequenceText)) {
+  if (!NON_NEGATIVE_SAFE_INTEGER_PATTERN.test(sequenceText)) {
     return null;
   }
   const sequence = Number(sequenceText);
@@ -83,7 +107,7 @@ export function parseInputNotification(message: unknown): InputNotification | nu
     return null;
   }
 
-  return { sessionId, slot, sequence };
+  return { sessionId, layoutGeneration, slot, sequence };
 }
 
 /** Slot modes named by design 10.1 / 12.3. This module never derives them. */
@@ -101,6 +125,12 @@ export interface InputWindowSnapshot {
   /** Session id the Window currently displays (design 10.5). */
   readonly sessionId: string;
   /**
+   * Generation of the Window's current clickable layout. Must advance when the
+   * page/line/tab or slot-element mapping changes (design 10.5, 12.3). It is
+   * the server-side value a notification's `layoutGeneration` is compared to.
+   */
+  readonly layoutGeneration: number;
+  /**
    * Mode of each logical slot of the *current* layout (design 10.5, 12.3).
    * The layout-to-mode mapping is the caller's responsibility.
    */
@@ -117,6 +147,7 @@ export type InputRejectionReason =
   | "window-closed"
   | "sender-not-owner"
   | "session-mismatch"
+  | "stale-layout-generation"
   | "slot-not-button"
   | "stale-sequence";
 
@@ -139,11 +170,12 @@ export type InputValidationResult =
  * - Time-based expiry (10.4 has no timestamp; liveness is the only deadline).
  * - Rate limiting (10.5 requires limiting repeats but gives no count or window;
  *   call `checkInputRateLimit` with a caller-injected clock and interval).
- * - Page/generation identity (the message has no generation token, so a late
- *   click from a previous page cannot be told apart if that slot is a button
- *   again on the new page; the caller's own generation check must handle it).
  * - Ownership of the chat sender vs. the player object (the caller supplies
  *   `senderId`; this module never reads a Player).
+ *
+ * A notification minted before a page change but delivered after it is rejected
+ * when its `layoutGeneration` differs from the snapshot's, even if the same
+ * slot is a button again on the new page.
  */
 export function validateInputNotification(
   message: unknown,
@@ -162,6 +194,9 @@ export function validateInputNotification(
   }
   if (notification.sessionId !== snapshot.sessionId) {
     return { ok: false, reason: "session-mismatch" };
+  }
+  if (notification.layoutGeneration !== snapshot.layoutGeneration) {
+    return { ok: false, reason: "stale-layout-generation" };
   }
   if (snapshot.slotModes[notification.slot] !== "button") {
     return { ok: false, reason: "slot-not-button" };
@@ -269,7 +304,9 @@ export function checkInputRateLimit(
  * - The acceptor only knows the generation its caller's snapshot reports. The
  *   caller must bump it whenever the layout/page changes, and must advance
  *   `lastSequence` when the click is accepted (in `execute` or before it) so
- *   later candidates see the new sequence.
+ *   later candidates see the new sequence. The notification also carries its
+ *   own `layoutGeneration`, which `validateInputNotification` compares to the
+ *   fresh snapshot at execution time.
  * - No timestamp exists in the message, so the only expiry is the snapshot:
  *   `open: false` or a missing snapshot rejects.
  * - The rate-limit policy and the clock are caller-injected; see
@@ -279,8 +316,9 @@ export function checkInputRateLimit(
  */
 export interface InputAcceptorSnapshot extends InputWindowSnapshot {
   /**
-   * Caller-owned page/layout generation. Must be a non-negative safe integer
-   * and must increase when the Window's clickable layout is replaced.
+   * Caller-owned queue epoch. Must be a non-negative safe integer and must
+   * increase when the Window's clickable layout is replaced or the caller
+   * otherwise wants queued candidates dropped.
    */
   readonly generation: number;
 }
@@ -340,6 +378,7 @@ function readAcceptorSnapshot(source: () => InputAcceptorSnapshot | null): Input
       typeof value.ownerId !== "string" ||
       typeof value.sessionId !== "string" ||
       !Array.isArray(value.slotModes) ||
+      !isNonNegativeSafeInteger(value.layoutGeneration) ||
       !isNonNegativeSafeInteger(value.generation) ||
       (value.lastSequence !== undefined && !isNonNegativeSafeInteger(value.lastSequence))
     ) {

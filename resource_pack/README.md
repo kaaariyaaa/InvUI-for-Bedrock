@@ -6,7 +6,7 @@
 > - `ui/_ui_defs.json` は `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` の 3 つを登録済みです。後者 2 つが `data_driven_container` の `desktop_panel` / `pocket_panel` に警告ラベル、`invui_probe` のラベルと実験的 `button.send` 部品を差し込み、**透明ブロッカー**はデスクトップでは `panel_top_half`、pocket では `pocket_panel` に差し込みます。**登録済みのため、パックを置けば接続が働く想定**です。ただし**実機未検証であり、接続・表示・入力のどれも保証しません**。
 > - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。VirtualContainer 画面がこのパネルを使っているかも未確定です。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
 > - **透明ブロッカーは保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆う透明な `button` で、スロット系の入力を `button.invui_connect_blocked` へ付け替えるだけです。この ID を処理するスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリやホットバーは覆わず、controller・タッチ入力の遮断を保証しません**。フォーカスが下のスロットへ移る、JSON UI を経由しない操作、タッチの長押し・ドラッグなどは止まらない可能性があります。**アイテム保護・入力抑制・画面終了処理は未完成**で、ブロッカーによる遮断を保証しません。表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
-> - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠が確認できていません。このファイルは、chat と同じ text box 名と `button.send` を使い、`!invui:<session-id>:<slot>:<sequence>`（session-id は開いた `Window` の公開 getter `_inputSessionId` から取得）を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
+> - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠が確認できていません。このファイルは、chat と同じ text box 名と `button.send` を使い、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>`（session-id は開いた `Window` の公開 getter `_inputSessionId`、layout-generation は `_inputLayoutGeneration` から取得）を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
 > - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**です（設計 10.3 の代替候補 `button.drop_one` → コンテナ変化）。デスクトップのスロットグリッド上に透明ボタンを重ね、通常クリックを `button.drop_one` へ付け替えます。クリックでスロットが変われば `VirtualContainerItemChangeAfterEvent` が `player` / `container` / `slot` を伴って自動で届くため、チャット文字列の手入力は不要です。ただし**1 クリックごとにアイテムが 1 個ドロップされ得る破壊的プローブ**で、**サーバー側のクリック処理は未実装**です。現在のコアは itemChange を危険として close するため、そのままではクリックとして実行されません。既定未登録・CLI 対象外・pocket 非対応で、`data_driven_container.desktop_panel` を使う全画面に影響し得ます。詳細と制約は下記の専用節を参照してください。
 > - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対応ゲーム版・パックの適用方法・読み込み順は確定していません。
 > - 他の Resource Pack との競合を検出・解消する機能はありません。他パックが同じ `invui_probe` / `invui_connect_probe` / `data_driven_container` 名前空間や同じ UUID を使っている場合も衝突し得ます。
@@ -92,26 +92,35 @@ resource_pack/
 
 `ui/invui_controls_data_driven.json` を有効にすると、`data_driven_container.desktop_panel` / `pocket_panel` の `controls` 先頭へ `invui_controls_probe_root` を `insert_front` します。表示されるのは警告文、固定例、chat と同じ text box 名を持つ入力欄、`button.send` を発火するボタンです。
 
-送る形は **`!invui:<session-id>:<slot>:<sequence>`** です。`Window.id`（`window-N`）は使いません。session-id は `Window` が `open()` の成功ごとに作り直す `_inputSessionId` で、そのまま 1 フィールド目に入れます。slot は現在のレイアウトで button mode の論理スロット（0〜53）へ合わせ、sequence は同じ session 内で厳密に増やします（最初の受理は `1`）。入力欄には初期文字を入れていないため、**毎回手入力**が必要です。
+送る形は **`!invui:<session-id>:<layout-generation>:<slot>:<sequence>`** です。`Window.id`（`window-N`）は使いません。
 
-### session-id の取得手順（開発者が手で行う）
+- **session-id**: `Window` が `open()` の成功ごとに作り直す `_inputSessionId` を 1 フィールド目に入れます。
+- **layout-generation**: 通知を生成した時点のクリック可能レイアウトの世代 `_inputLayoutGeneration` を 2 フィールド目に入れます。open ごとに `0` から始まり、ページ・行・タブ・スロット要素の変更で進みます。**ページ変更前に控えた値のまま送ると、変更後に届いた通知は `stale-layout-generation` として拒否されます。**
+- **slot**: 現在のレイアウトで button mode の論理スロット（0〜53）へ合わせます。
+- **sequence**: 同じ session 内で厳密に増やします（最初の受理は `1`）。
 
-`_inputSessionId` は公開クラス `Window` の公開 getter です（`dist/window.d.ts` に `get _inputSessionId(): string | undefined` として現れます）。JSON UI からは取得できないため、Window を開いている Behavior Pack スクリプトから値を出して読み取ります。
+入力欄には初期文字を入れていないため、**毎回手入力**が必要です。旧3フィールド形式 `!invui:<session>:<slot>:<sequence>` は世代を持たないため受理されません（malformed として実行されず、通常チャットからもキャンセルされません）。
 
-1. Window を開く側のスクリプトで、`await window.open()` の**後**に値を表示します（開発時だけ。Resource Pack やゲーム内コマンドだけでは取得できません）。
+### session-id と layout-generation の取得手順（開発者が手で行う）
+
+`_inputSessionId` / `_inputLayoutGeneration` は公開クラス `Window` の公開 getter です（`dist/window.d.ts` に `get _inputSessionId(): string | undefined` と `get _inputLayoutGeneration(): number | undefined` として現れます）。JSON UI からは取得できないため、Window を開いている Behavior Pack スクリプトから値を出して読み取ります。
+
+1. Window を開く側のスクリプトで、`await window.open()` の**後**に 2 つの値を表示します（開発時だけ。Resource Pack やゲーム内コマンドだけでは取得できません）。
 
    ```ts
    await window.open();
-   player.sendMessage(`InvUI session: ${window._inputSessionId}`);
-   // ログで読む場合: console.warn("InvUI session:", window._inputSessionId);
+   player.sendMessage(
+     `InvUI session: ${window._inputSessionId} generation: ${window._inputLayoutGeneration}`,
+   );
+   // ログで読む場合: console.warn("InvUI session:", window._inputSessionId, window._inputLayoutGeneration);
    ```
 
-2. 表示された値（形は `session-<36進の時刻>-<36進の連番>-<36進6文字>`。値そのものは毎回変わります）を控えます。
-3. プローブへ `!invui:<控えた値>:<slot>:<sequence>` を手入力して送信します。控えた値をそのまま 1 フィールド目へ置きます（`!invui:session-ab12cd-1-f3k9xz:0:1` のような形。この例の値自体は無効です）。
-4. **`open()` のたびに session-id は変わります。** 開き直したら 1 から読み直してください。古い値は、開き直した後なら `session-mismatch`、画面を閉じたままなら `window-closed` として拒否されます。最初の `open()` 成功前の値は `undefined` です。
+2. 表示された session-id（形は `session-<36進の時刻>-<36進の連番>-<36進6文字>`。毎回変わります）と layout-generation（open 直後は `0`）を控えます。
+3. プローブへ `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を手入力して送信します（`!invui:session-ab12cd-1-f3k9xz:0:0:1` のような形。この例の値自体は無効です）。
+4. **`open()` のたびに session-id は変わり、layout-generation は `0` に戻ります。** 開き直したら両方読み直してください。**ページ・行・タブ、または同じページのスロット要素が変わったら layout-generation も変わる**ため、送信前に読み直してください。古い値は `stale-layout-generation`、前の open の session は `session-mismatch`、画面を閉じたままなら `window-closed` として拒否されます。最初の `open()` 成功前の値は `undefined` です。
 5. 通知は直前の受理から既定 100 ms 間隔（10 回/秒）に制限されます。100 ms 以内の連投は `rate-limited` として拒否され、クリックは実行されません（`open()` をまたいでも直前の受理時刻を引き継ぎます）。この間隔を変える公開 API はありません（`Window` の自動接続が内部既定値 `minIntervalMs: 100` を使うため、変えるには `src/window.ts` の配線を変更する必要があります）。
 
-`_inputSessionId` はアンダースコア付きの内部扱い・互換保証なしです。取得手段はこの公開 getter だけであり、**UI（JSON UI）から session-id を読む方法はありません**。値を取得できない場合はプローブでの送信は成立しないため、その時点で中止してください（取得できるふりの手順は記載しません）。
+両 getter はアンダースコア付きの内部扱い・互換保証なしです。取得手段はこの公開 getter だけで、**UI（JSON UI）から session-id / layout-generation を読む方法はありません**。値を取得できない場合はプローブでの送信は成立しないため、その時点で中止してください（取得できるふりの手順は記載しません）。自動送信も自動採番も実装していません。
 
 ### オプトイン手順（既定では無効）
 
@@ -129,8 +138,8 @@ resource_pack/
 - **使い捨てワールド専用。** バックアップを取り、終了後はワールドごと破棄してください。
 - **`data_driven_container` のパネルを使う全画面に影響し得ます。** VirtualContainer だけに限定できません。
 - **キーボード入力を奪い得ます。** chat と同じ `#message_text_box` と `always_listening` を使うため、画面を開いている間、チャットやキー操作を壊す可能性があります。入力途中のチャットを残さないでください。
-- **自動送信ではありません。** 固定文字の初期表示、`bindings`、collection、slot / session / sequence の自動生成はありません。
-- **偽装可能です。** 通知はプレイヤーが手入力でき、`sender` 以外は信用できません。bridge の session / sequence 検査も認証ではありません。
+- **自動送信ではありません。** 固定文字の初期表示、`bindings`、collection、slot / session / layout-generation / sequence の自動生成はありません。
+- **偽装可能です。** 通知はプレイヤーが手入力でき、`sender` 以外は信用できません。bridge の session / layout-generation / sequence 検査も認証ではありません。
 - **通常チェストの移動が壊れたら即時中止。** 他の手動プローブ（`tests/manual-bedrock/edit-box-resource-pack/` など）と同時に有効化しないでください。既定の接続（警告ラベルと `invui_probe`）と同じパネルへ差し込むため、ラベルやボタンが重なり得ます。単独試験を推奨します。
 
 構造チェック（実機の代替ではありません）:
@@ -274,7 +283,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 2. 対象画面でラベル・ボタン・警告ラベルが表示されるか確認する。**`data_driven_container` のパネルを使う全画面に影響し得る**ため、VirtualContainer 以外（通常チェスト等）での表示も記録する。**VirtualContainer 画面がこのパネルを使っているかは未確定**であり、表示の有無だけで適用先を断定しない。
 3. 透明ブロッカーの範囲（desktop: `offset [7, 10]` / `size [162, "100%-24px"]`、pocket: 右半分）で、ホバー・押下時に赤く色づくか、**通常クリックが止まるか**、**ボタンや inventory slot まで押せなくなっていないか**を入力方式ごとに記録する。プレイヤー側・ホットバーはブロッカーの範囲外であり、controller・タッチ入力は未検証である。赤く色づいてもアイテムが動く場合は、上重ねでは遮断できないという結果として扱う。
 4. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。アイテム保護・画面終了処理・スクリプト側の入力処理は未実装であり、ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、`button.send` 部品からチャット送信が成立するかも未確認です。**ブロッカーがあることを保護の合格根拠にしないでください。**
-5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で `!invui:<session-id>:<slot>:<sequence>` を送って観察する。session-id は開いた `Window._inputSessionId` をスクリプトから表示して取得し、open のたびに読み直す（「session-id の取得手順」）。slot / session / sequence の自動生成はできない。既定 100 ms 間隔（10 回/秒）を超える連投は `rate-limited` で拒否される。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
+5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を送って観察する。session-id は開いた `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration` をスクリプトから表示して取得し、open のたび・ページ変更のたびに読み直す（「session-id と layout-generation の取得手順」）。slot / session / layout-generation / sequence の自動生成はできない。既定 100 ms 間隔（10 回/秒）を超える連投は `rate-limited` で拒否される。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
 6. `ui/invui_grid_input.json` を使う場合は、既定の接続 2 ファイルを外した単独パックで、**使い捨てのマーカーアイテムだけ**をグリッドに置き、クリックごとにドロップ・スロット変化・`VirtualContainerItemChangeAfterEvent`・画面 close のどれが起きるかを記録する。`data_driven_container.desktop_panel` を使う全画面に影響し得る。pocket は対象外。通常画面への影響とアイテム消失が出た時点で中止する。**現行コアは itemChange をクリックとして扱わない**ため、このプローブ単体で `handleClick()` が走ることはない。
 
 画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
@@ -289,7 +298,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 - **アイテム保護・入力抑制・画面終了処理は未完成**です。表示アイテムの取り出し、再描画による複製・消失、チャット送信の成否は未検証です。
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。
-- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id は開発者スクリプトが `Window._inputSessionId` を表示して取得します（JSON UI からは取得できません）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
+- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id / layout-generation は開発者スクリプトが `Window._inputSessionId` / `Window._inputLayoutGeneration` を表示して取得します（JSON UI からは取得できません）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
 - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**で、既定では未登録・未接続・CLI 対象外です。通常クリックを `button.drop_one` へ付け替えるため、**1 クリックごとにアイテムが 1 個ドロップされ得ます**（保護ではありません）。`button.drop_one` を通常クリックから発火させる書式と、オーバーレイが下の slot を対象にできるかは未検証です。サーバー側で itemChange をクリックとして処理する実装はなく、現行コアは itemChange を危険として close します。対象は `data_driven_container.desktop_panel` のみで、**同パネルを使う全画面に影響し得ます**。pocket は対象外です。既定の接続とは併用しないでください。
 - 既存 Resource Pack との競合をゼロにはできません。追加するファイルは最小限ですが、無影響を保証するものではありません。
 - `manifest.json` の UUID は固定のプレースホルダです。同じ内容のパックを複数入れると UUID が衝突し得ます。

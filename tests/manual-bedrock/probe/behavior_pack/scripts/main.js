@@ -43,7 +43,7 @@ import { ItemStack, system, world } from "@minecraft/server";
 
 const COMMAND_PREFIX = "!invui";
 /**
- * button.send → チャット通知の観測用 prefix。設計書 10.4 の `!invui:<session-id>:<slot-index>:<sequence>`。
+ * button.send → チャット通知の観測用 prefix。設計書 10.4 の `!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>`。
  * コマンドは `!invui ` (空白区切り)、通知は `!invui:` (コロン) で区別する。
  */
 const NOTIFY_PREFIX = "!invui:";

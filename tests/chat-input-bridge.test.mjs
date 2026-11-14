@@ -30,6 +30,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 function makeWindow(options = {}) {
   let open = options.open ?? true;
+  let layoutGeneration = options.layoutGeneration ?? 1;
   const clicks = [];
   let active = 0;
   let maxActive = 0;
@@ -42,6 +43,12 @@ function makeWindow(options = {}) {
     },
     setOpen(value) {
       open = value;
+    },
+    get _inputLayoutGeneration() {
+      return layoutGeneration;
+    },
+    setLayoutGeneration(value) {
+      layoutGeneration = value;
     },
     clicks,
     get maxActive() {
@@ -134,7 +141,7 @@ test("cancels only well-formed notifications and defers the click to system.run"
   const source = makeEventSource();
   const disconnect = connectChatSendInput({ world: source.world, system: source.system }, bridge);
 
-  const notification = source.emit("!invui:window-1:7:1");
+  const notification = source.emit("!invui:window-1:1:7:1");
   assert.equal(notification.cancel, true);
   assert.deepEqual(window.clicks, [], "the before-event must not click");
   assert.equal(source.scheduled.length, 1, "the click is scheduled for the next tick");
@@ -150,7 +157,7 @@ test("cancels only well-formed notifications and defers the click to system.run"
 
   disconnect();
   assert.equal(source.handlerCount(), 0);
-  assert.equal(source.emit("!invui:window-1:7:2").cancel, false);
+  assert.equal(source.emit("!invui:window-1:1:7:2").cancel, false);
 });
 
 test("routes the click by the event sender id, not by another player's window", async () => {
@@ -160,13 +167,13 @@ test("routes the click by the event sender id, not by another player's window", 
   const source = makeEventSource();
   connectChatSendInput({ world: source.world, system: source.system }, bridge);
 
-  source.emit("!invui:window-2:7:1", { id: "player-2" });
+  source.emit("!invui:window-2:1:7:1", { id: "player-2" });
   await source.flush();
 
   assert.deepEqual(first.clicks, []);
   assert.deepEqual(second.clicks, [7]);
 
-  const spoofed = await bridge.dispatch("!invui:window-1:7:2", "player-2");
+  const spoofed = await bridge.dispatch("!invui:window-1:1:7:2", "player-2");
   // player-2's own Window is window-2, so the captured session id is rejected;
   // player-1's Window is never reached through another player's chat.
   assert.deepEqual(spoofed, { ok: false, reason: "session-mismatch" });
@@ -177,7 +184,7 @@ test("rejects a session mismatch", async () => {
   const window = makeWindow();
   const { bridge, rejections } = makeBridge([window]);
 
-  const result = await bridge.dispatch("!invui:window-2:7:1", "player-1");
+  const result = await bridge.dispatch("!invui:window-2:1:7:1", "player-1");
   assert.deepEqual(result, { ok: false, reason: "session-mismatch" });
   assert.equal(rejections.at(-1).reason, "session-mismatch");
   assert.deepEqual(window.clicks, []);
@@ -187,17 +194,17 @@ test("rejects a stale or replayed sequence", async () => {
   const window = makeWindow();
   const { bridge } = makeBridge([window]);
 
-  const first = await bridge.dispatch("!invui:window-1:7:1", "player-1");
+  const first = await bridge.dispatch("!invui:window-1:1:7:1", "player-1");
   assert.deepEqual(first, {
     ok: true,
-    notification: { sessionId: "window-1", slot: 7, sequence: 1 },
+    notification: { sessionId: "window-1", layoutGeneration: 1, slot: 7, sequence: 1 },
     clicked: true,
   });
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "stale-sequence",
   });
-  assert.equal((await bridge.dispatch("!invui:window-1:7:2", "player-1")).ok, true);
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:2", "player-1")).ok, true);
   assert.deepEqual(window.clicks, [7, 7]);
 });
 
@@ -206,7 +213,7 @@ test("re-checks the slot mode and fails closed when the probe is unusable", asyn
   const window = makeWindow();
   const { bridge } = makeBridge([window], { slotModes: () => displaySlots });
 
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "slot-not-button",
   });
@@ -217,7 +224,7 @@ test("re-checks the slot mode and fails closed when the probe is unusable", asyn
       throw new Error("layout unavailable");
     },
   }).bridge;
-  assert.deepEqual(await throwing.dispatch("!invui:window-1:7:2", "player-1"), {
+  assert.deepEqual(await throwing.dispatch("!invui:window-1:1:7:2", "player-1"), {
     ok: false,
     reason: "slot-not-button",
   });
@@ -241,9 +248,9 @@ test("discards a queued click after invalidate bumps the generation", async () =
   });
   const { bridge } = makeBridge([window]);
 
-  const first = bridge.dispatch("!invui:window-1:7:1", "player-1");
+  const first = bridge.dispatch("!invui:window-1:1:7:1", "player-1");
   await didStart;
-  const queued = bridge.dispatch("!invui:window-1:7:2", "player-1");
+  const queued = bridge.dispatch("!invui:window-1:1:7:2", "player-1");
 
   bridge.invalidate(window);
   release();
@@ -271,9 +278,9 @@ test("discards a queued click when the window closes before execution", async ()
   });
   const { bridge } = makeBridge([window]);
 
-  const first = bridge.dispatch("!invui:window-1:7:1", "player-1");
+  const first = bridge.dispatch("!invui:window-1:1:7:1", "player-1");
   await didStart;
-  const queued = bridge.dispatch("!invui:window-1:7:2", "player-1");
+  const queued = bridge.dispatch("!invui:window-1:1:7:2", "player-1");
   window.setOpen(false);
   release();
 
@@ -298,7 +305,7 @@ test("serializes execution across notifications, including a re-entrant enqueue"
       call += 1;
       if (call === 1) {
         // Must queue behind the running click instead of awaiting it.
-        reentrant = bridge.dispatch("!invui:window-1:7:2", "player-1");
+        reentrant = bridge.dispatch("!invui:window-1:1:7:2", "player-1");
         started();
         await gate;
       }
@@ -307,7 +314,7 @@ test("serializes execution across notifications, including a re-entrant enqueue"
   });
   const { bridge } = makeBridge([window]);
 
-  const first = bridge.dispatch("!invui:window-1:7:1", "player-1");
+  const first = bridge.dispatch("!invui:window-1:1:7:1", "player-1");
   await didStart;
   assert.equal(window.maxActive, 1);
   release();
@@ -322,13 +329,13 @@ test("resets the sequence when a closed window reopens", async () => {
   const window = makeWindow();
   const { bridge } = makeBridge([window]);
 
-  assert.equal((await bridge.dispatch("!invui:window-1:7:5", "player-1")).clicked, true);
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:5", "player-1")).clicked, true);
 
   window.setOpen(false);
   bridge.invalidate(window);
   window.setOpen(true);
 
-  const reopened = await bridge.dispatch("!invui:window-1:7:5", "player-1");
+  const reopened = await bridge.dispatch("!invui:window-1:1:7:5", "player-1");
   assert.equal(reopened.ok, true, "a new open cycle may reuse a sequence");
   assert.equal(reopened.clicked, true);
   assert.deepEqual(window.clicks, [7, 7]);
@@ -343,6 +350,7 @@ test("a session change resets the sequence even if a layout invalidation re-arme
     get _inputSessionId() {
       return sessionId;
     },
+    _inputLayoutGeneration: 1,
     viewer: { id: "player-1" },
     get isOpen() {
       return open;
@@ -354,7 +362,7 @@ test("a session change resets the sequence even if a layout invalidation re-arme
   };
   const { bridge } = makeBridge([window]);
 
-  assert.equal((await bridge.dispatch("!invui:session-a:7:5", "player-1")).clicked, true);
+  assert.equal((await bridge.dispatch("!invui:session-a:1:7:5", "player-1")).clicked, true);
 
   // Close, reopen with a new session, then a page change before the first
   // notification of the new open cycle is observed. The invalidation sees the
@@ -365,7 +373,7 @@ test("a session change resets the sequence even if a layout invalidation re-arme
   sessionId = "session-b";
   bridge.invalidate(window);
 
-  const fresh = await bridge.dispatch("!invui:session-b:7:1", "player-1");
+  const fresh = await bridge.dispatch("!invui:session-b:1:7:1", "player-1");
   assert.equal(fresh.ok, true, "a new session may reuse a sequence");
   assert.equal(fresh.clicked, true);
   assert.deepEqual(clicks, [7, 7]);
@@ -388,6 +396,7 @@ test("a click in flight across a session change does not consume the new session
     get _inputSessionId() {
       return sessionId;
     },
+    _inputLayoutGeneration: 1,
     viewer: { id: "player-1" },
     get isOpen() {
       return open;
@@ -403,9 +412,9 @@ test("a click in flight across a session change does not consume the new session
   };
   const { bridge } = makeBridge([window]);
 
-  assert.equal((await bridge.dispatch("!invui:session-a:7:3", "player-1")).clicked, true);
+  assert.equal((await bridge.dispatch("!invui:session-a:1:7:3", "player-1")).clicked, true);
 
-  const inFlight = bridge.dispatch("!invui:session-a:9:9", "player-1");
+  const inFlight = bridge.dispatch("!invui:session-a:1:9:9", "player-1");
   await didStart;
 
   // The session changes with no close transition for the bridge to see: a
@@ -418,7 +427,7 @@ test("a click in flight across a session change does not consume the new session
 
   // Queued behind the old click, but its sequence must not be compared with
   // the previous session's, nor overwritten by the old click's completion.
-  const fresh = bridge.dispatch("!invui:session-b:7:1", "player-1");
+  const fresh = bridge.dispatch("!invui:session-b:1:7:1", "player-1");
   release();
 
   assert.equal((await inFlight).clicked, true);
@@ -444,7 +453,7 @@ test("a click in flight across close/reopen does not consume the new cycle's seq
   });
   const { bridge } = makeBridge([window]);
 
-  const inFlight = bridge.dispatch("!invui:window-1:7:5", "player-1");
+  const inFlight = bridge.dispatch("!invui:window-1:1:7:5", "player-1");
   await didStart;
 
   // Close and reopen while the old click still runs.
@@ -453,7 +462,7 @@ test("a click in flight across close/reopen does not consume the new cycle's seq
   window.setOpen(true);
 
   // Accepted by the new cycle, but queued behind the old in-flight click.
-  const fresh = bridge.dispatch("!invui:window-1:7:3", "player-1");
+  const fresh = bridge.dispatch("!invui:window-1:1:7:3", "player-1");
   release();
 
   assert.equal((await inFlight).clicked, true);
@@ -482,14 +491,14 @@ test("a page invalidation during a click stays in the same open cycle", async ()
   });
   const { bridge } = makeBridge([window]);
 
-  const inFlight = bridge.dispatch("!invui:window-1:7:5", "player-1");
+  const inFlight = bridge.dispatch("!invui:window-1:1:7:5", "player-1");
   await didStart;
   // A page change invalidates the generation but not the open cycle.
   bridge.invalidate(window);
   release();
 
   assert.equal((await inFlight).clicked, true);
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:5", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:5", "player-1"), {
     ok: false,
     reason: "stale-sequence",
   });
@@ -500,14 +509,14 @@ test("applies the caller-injected repeat limit", async () => {
   const window = makeWindow();
   const { bridge } = makeBridge([window], { now: () => now, minIntervalMs: 100 });
 
-  assert.equal((await bridge.dispatch("!invui:window-1:7:1", "player-1")).ok, true);
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:1", "player-1")).ok, true);
   now = 1050;
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:2", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:2", "player-1"), {
     ok: false,
     reason: "rate-limited",
   });
   now = 1200;
-  assert.equal((await bridge.dispatch("!invui:window-1:7:3", "player-1")).ok, true);
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:3", "player-1")).ok, true);
   assert.deepEqual(window.clicks, [7, 7]);
 });
 
@@ -516,8 +525,8 @@ test("enables the repeat limit by default", async () => {
   // Fix the clock only; the interval must come from the bridge default.
   const bridge = createChatInputBridge({ windows: () => [window], now: () => 1000 });
 
-  assert.equal((await bridge.dispatch("!invui:window-1:7:1", "player-1")).ok, true);
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:2", "player-1"), {
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:1", "player-1")).ok, true);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:2", "player-1"), {
     ok: false,
     reason: "rate-limited",
   });
@@ -533,23 +542,66 @@ test("uses the per-open input session id and rejects the previous open's line", 
   const { bridge } = makeBridge([window]);
 
   // `window-1` is the public identity, not the input session.
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "session-mismatch",
   });
-  const first = await bridge.dispatch("!invui:session-a:7:1", "player-1");
+  const first = await bridge.dispatch("!invui:session-a:1:7:1", "player-1");
   assert.equal(first.ok, true);
   assert.equal(first.notification.sessionId, "session-a");
   assert.equal(first.clicked, true);
 
   // A reopen changes only the session id; the old line must not click.
   sessionId = "session-b";
-  assert.deepEqual(await bridge.dispatch("!invui:session-a:7:2", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:session-a:1:7:2", "player-1"), {
     ok: false,
     reason: "session-mismatch",
   });
-  assert.equal((await bridge.dispatch("!invui:session-b:7:2", "player-1")).clicked, true);
+  assert.equal((await bridge.dispatch("!invui:session-b:1:7:2", "player-1")).clicked, true);
   assert.deepEqual(window.clicks, [7, 7]);
+});
+
+test("rejects a line minted for a previous clickable-layout generation", async () => {
+  const window = makeWindow({ layoutGeneration: 1 });
+  const { bridge, rejections } = makeBridge([window]);
+
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:1", "player-1")).clicked, true);
+
+  // The page changed after the line was minted but before it arrived. Slot 7
+  // is a button again on the new page; only the generation distinguishes it.
+  window.setLayoutGeneration(2);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:2", "player-1"), {
+    ok: false,
+    reason: "stale-layout-generation",
+  });
+  assert.equal(rejections.at(-1).reason, "stale-layout-generation");
+  assert.deepEqual(window.clicks, [7], "the stale line must not click the new page");
+
+  assert.equal((await bridge.dispatch("!invui:window-1:2:7:2", "player-1")).clicked, true);
+  assert.deepEqual(window.clicks, [7, 7]);
+});
+
+test("rejects the old three-field wire form instead of assuming it safe", async () => {
+  const window = makeWindow();
+  const { bridge } = makeBridge([window]);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+    ok: false,
+    reason: "malformed",
+  });
+  assert.deepEqual(window.clicks, []);
+});
+
+test("fails closed when a window cannot report its layout generation", async () => {
+  const window = makeWindow();
+  Object.defineProperty(window, "_inputLayoutGeneration", {
+    get: () => undefined,
+  });
+  const { bridge } = makeBridge([window]);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
+    ok: false,
+    reason: "snapshot-unavailable",
+  });
+  assert.deepEqual(window.clicks, []);
 });
 
 test("rejects an invalid repeat-limit interval at construction", () => {
@@ -572,12 +624,12 @@ test("consumes the sequence when a routed click fails, preventing a duplicate ha
   const window = makeWindow({ onClick: async () => "failed" });
   const { bridge } = makeBridge([window], { slotModes: () => modes });
 
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: true,
-    notification: { sessionId: "window-1", slot: 7, sequence: 1 },
+    notification: { sessionId: "window-1", layoutGeneration: 1, slot: 7, sequence: 1 },
     clicked: false,
   });
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "stale-sequence",
   });
@@ -592,9 +644,9 @@ test("keeps a truly discarded click retryable", async () => {
   const window = makeWindow({ onClick: async () => "discarded" });
   const { bridge } = makeBridge([window], { slotModes: () => modes });
 
-  assert.equal((await bridge.dispatch("!invui:window-1:7:1", "player-1")).clicked, false);
+  assert.equal((await bridge.dispatch("!invui:window-1:1:7:1", "player-1")).clicked, false);
 
-  const retried = await bridge.dispatch("!invui:window-1:7:1", "player-1");
+  const retried = await bridge.dispatch("!invui:window-1:1:7:1", "player-1");
   assert.equal(retried.ok, true, "a discarded click must not consume the sequence");
   assert.equal(retried.clicked, false);
   assert.deepEqual(window.clicks, [7, 7]);
@@ -607,7 +659,7 @@ test("reports a thrown executor without crashing", async () => {
     },
   });
   const { bridge, rejections } = makeBridge([throwingWindow]);
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "executor-failed",
   });
@@ -619,7 +671,7 @@ test("invalidate on an unknown window and a missing sender fail closed", async (
   const { bridge } = makeBridge([window]);
   assert.doesNotThrow(() => bridge.invalidate(window));
 
-  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", ""), {
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:1:7:1", ""), {
     ok: false,
     reason: "snapshot-unavailable",
   });

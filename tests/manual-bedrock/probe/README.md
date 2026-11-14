@@ -144,7 +144,7 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 
 ### 3.4 チャット通知（`!invui:`）の観測
 
-`button.send` が送る想定の `!invui:<session-id>:<slot-index>:<sequence>` 形式のチャットを、`world.beforeEvents.chatSend` で**受信の観測だけ**行います。
+`button.send` が送る想定の `!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>` 形式のチャットを、`world.beforeEvents.chatSend` で**受信の観測だけ**行います。この probe は prefix しか見ないため、旧3フィールド形式の陽性対照も観測できますが、コアの bridge は旧形式を受理しません。
 
 - 対象は `!invui:` で始まるメッセージのみ。`event.cancel = true` で通常チャットへ流さない。`!invui `（空白区切り）のコマンドや、先頭以外に prefix を含む `say !invui:...` はキャンセルしない。
 - `beforeEvents` 内では世界を変更できないため、記録は `system.run` で次 tick に回し、コンソールへ `NOTIFY_OBSERVED sender=... message="..." action=NONE（観測のみ。通知は偽装可能なため click action は実行しない）` の 1 行を出す。チャットへの返信はしない。

@@ -14,7 +14,7 @@
 
 §12 で、残っていた抜け道（コンテナ規則・入力権限・DDUI のアイテム描画・ホットバー選択）について、公式型で否定できるものと、記述がなくて可否不明のものを整理しています。
 
-現時点で「実装済み」なのは、`World.beforeEvents.chatSend` を受けて `!invui:<session-id>:<slot>:<sequence>` を `Window.handleClick()` へ流す**受信経路のみ**です（Node.js テスト済み、実機未検証）。これはクリックの証明でも認証でもありません。
+現時点で「実装済み」なのは、`World.beforeEvents.chatSend` を受けて `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を `Window.handleClick()` へ流す**受信経路のみ**です（Node.js テスト済み、実機未検証）。`layout-generation` は `Window._inputLayoutGeneration` と照合され、ページ・行・タブ・スロット要素の変更前に生成された通知は、変更後に届いても `stale-layout-generation` として拒否されます。世代を持たない旧3フィールド形式は受理しません。これはクリックの証明でも認証でもなく、値を自動生成する UI もありません。
 
 ## 2. 対象版
 
@@ -83,7 +83,7 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 
 ## 6. 実装済みの範囲（受信側）
 
-- `src/input.ts`: `!invui:<session-id>:<slot>:<sequence>` の解析、Window snapshot との照合、rate limit、直列 queue。公開エントリからは export しない。
+- `src/input.ts`: `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` の解析、Window snapshot（session / layout-generation / slot mode / sequence）との照合、rate limit、直列 queue。公開エントリからは export しない。
 - `src/chat-input-bridge.ts`: `world.beforeEvents.chatSend` の購読、`system.run()` 経由の `Window.handleClick()` 呼び出し。session は open ごとの `Window._inputSessionId`。
 - `src/window.ts`: 最初の `open()` で chatSend を 1 本購読し、close とページ/行/タブ変更で待機中の通知を捨てる。
 - `resource_pack/ui/invui_controls.json`: **手入力**の静的ペイロードプローブ（オプトイン・既定未登録）。自動生成はしない。

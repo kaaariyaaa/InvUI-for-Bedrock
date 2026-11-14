@@ -24,9 +24,14 @@
  * closed, reopened, or replaced screen. Every successful `open()` also mints a
  * new `_inputSessionId`: the chat notification must name the current open, so a
  * delayed line from an earlier open (or from before a script reload, when
- * `Window.id` restarts at `window-1`) cannot match a new screen. Nothing is
- * installed when the game API (or a test double) omits `beforeEvents.chatSend`
- * or `system.run`; the Window still works and chat input fails closed.
+ * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
+ * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
+ * or slot-element change; a line that names an older generation is rejected,
+ * so one sent before a page change cannot click a button on the new page. The
+ * old three-field notification form has no generation and is not accepted.
+ * Nothing is installed when the game API (or a test double) omits
+ * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
+ * input fails closed.
  *
  * The notification is a player-typed chat line. Every field except the sender
  * id is attacker controlled and can be typed by hand, so the bridge's checks
@@ -1159,6 +1164,13 @@ export class Window {
   /** Per-open chat input session id; see `_inputSessionId`. */
   #inputSessionId: string | undefined;
   /**
+   * Generation of the current clickable layout; see `_inputLayoutGeneration`.
+   * Starts at 0 for each open and advances on a page/line/tab or slot-element
+   * change. A chat notification names this value, so one sent for the previous
+   * layout cannot click a button that now occupies the same slot.
+   */
+  #inputLayoutGeneration = 0;
+  /**
    * Viewer id captured at registration: playerLeave and entityDie are matched
    * against it rather than against a possibly invalid player object.
    */
@@ -1363,6 +1375,18 @@ export class Window {
    */
   get _inputSessionId(): string | undefined {
     return this.#inputSessionId;
+  }
+
+  /**
+   * Internal: generation of the current clickable layout for the chat input
+   * bridge. It changes when the page/line/tab or the slot-element mapping
+   * changes, and starts again at 0 for each open (the session id already
+   * distinguishes opens). A notification that names an older generation is
+   * rejected even if the same slot is a button again, so a line minted before a
+   * page change cannot be applied after it. Not part of the exported API.
+   */
+  get _inputLayoutGeneration(): number | undefined {
+    return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
   }
 
   /**
@@ -1643,7 +1667,10 @@ export class Window {
       }
       // A new open cycle is a new input session: a notification naming the
       // previous session (or a previous script reload's `window-N`) must fail.
+      // The layout generation is per open too, and is reset before open
+      // handlers can change the page.
       this.#inputSessionId = createInputSessionId();
+      this.#inputLayoutGeneration = 0;
       // Register before open handlers run: a handler may immediately render a
       // button the player can click. Registration also installs the single
       // chatSend subscription on the first successful open.
@@ -3501,6 +3528,10 @@ export class Window {
         previous.tab !== layout.tab ||
         !sameSlotElements(previous.slots, layout.slots))
     ) {
+      // Advance the wire generation before invalidating the queue: a line
+      // minted for the previous layout must fail even if it is delivered only
+      // after this change (the queue epoch alone cannot catch that).
+      this.#inputLayoutGeneration += 1;
       invalidateChatInputWindow(this);
     }
     // Move element subscriptions as soon as the new layout exists. Waiting for

@@ -402,7 +402,7 @@ test('event.container が別参照でも false を記録し、close / itemChange
 
 test('専用 prefix の通知だけ cancel し、観測ログだけ出して click を実行しない', () => {
   const probe = loadProbe();
-  const notify = '!invui:sess-1:12:3';
+  const notify = '!invui:sess-1:0:12:3';
 
   assert.equal(probe.chat(notify), true, '通知は通常チャットから cancel される');
   const logs = probe.logs.join('\n');
@@ -423,7 +423,7 @@ test('通知 prefix 以外のチャットは cancel せず、コマンドは従�
   const probe = loadProbe();
 
   assert.equal(probe.chat('hello'), false);
-  assert.equal(probe.chat('say !invui:fake:1:1'), false, '先頭以外の prefix は cancel しない');
+  assert.equal(probe.chat('say !invui:fake:0:1:1'), false, '先頭以外の prefix は cancel しない');
   assert.equal(probe.chat('!invui open 27'), false, '!invui コマンドは cancel しない');
   assert.equal(probe.openCalls(), 1);
   assert.doesNotMatch(probe.logs.join('\n'), /NOTIFY_OBSERVED/);
@@ -431,7 +431,7 @@ test('通知 prefix 以外のチャットは cancel せず、コマンドは従�
 
 test('通知の生文字列は制御文字をエスケープし、長さを制限してログする', () => {
   const probe = loadProbe();
-  const evil = `!invui:a:1:1\n${'x'.repeat(300)}`;
+  const evil = `!invui:a:0:1:1\n${'x'.repeat(300)}`;
 
   assert.equal(probe.chat(evil), true);
   const line = probe.logs.find((entry) => entry.includes('NOTIFY_OBSERVED'));

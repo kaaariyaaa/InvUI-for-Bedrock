@@ -35,8 +35,10 @@ const MODS_PATH = path.join(uiDir, "invui_controls_data_driven.json");
 const GRID_DEFS_PATH = path.join(uiDir, "invui_grid_input.json");
 const GRID_MODS_PATH = path.join(uiDir, "invui_grid_input_data_driven.json");
 const UI_DEFS_PATH = path.join(uiDir, "_ui_defs.json");
-const STATIC_EXAMPLE = "!invui:<session-id>:<slot>:<sequence>";
+const STATIC_EXAMPLE = "!invui:<session-id>:<layout-generation>:<slot>:<sequence>";
 const SESSION_GETTER = "Window._inputSessionId";
+const GENERATION_GETTER = "Window._inputLayoutGeneration";
+const OLD_EXAMPLE = "!invui:<session>:<slot>:<sequence>";
 
 test("the manual payload probe stays opt-in and out of the default connection", () => {
   const uiDefs = readJson(UI_DEFS_PATH).ui_defs;
@@ -177,6 +179,7 @@ test("README documents the static fallback, its limits, and the sample evidence"
     "静的ペイロード",
     "手入力",
     STATIC_EXAMPLE,
+    OLD_EXAMPLE,
     "button.send",
     "#message_text_box",
     "#message_text_box_content",
@@ -187,6 +190,8 @@ test("README documents the static fallback, its limits, and the sample evidence"
     "使い捨てワールド",
     "偽装",
     SESSION_GETTER,
+    GENERATION_GETTER,
+    "stale-layout-generation",
     "100 ms",
     "rate-limited",
   ]) {
@@ -204,6 +209,10 @@ test("README documents the static fallback, its limits, and the sample evidence"
   assert.ok(rootReadme.includes(STATIC_EXAMPLE), "README.md must show the static payload example");
   assert.ok(rootReadme.includes("オプトイン"), "README.md must state that the manual probe is opt-in");
   assert.ok(rootReadme.includes(SESSION_GETTER), "README.md must say the session id comes from the public getter");
+  assert.ok(
+    rootReadme.includes(GENERATION_GETTER),
+    "README.md must say the layout generation comes from the public getter",
+  );
   assert.ok(rootReadme.includes("100 ms"), "README.md must document the default 100 ms rate limit");
   assert.ok(
     rootReadme.includes("自動生成は実装していません") || rootReadme.includes("自動生成は未実装"),
