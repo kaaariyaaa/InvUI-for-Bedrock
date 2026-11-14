@@ -7093,3 +7093,101 @@ test("Windows keep working when the dimension and game-mode signals are absent",
   assert.deepEqual(closeReasons, ["ServerClosed"]);
   assert.equal(adapter.closed.length, 1);
 });
+
+test("an unsubscribe failure during an open-failure teardown does not destroy the generation its handler reopens", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failOpen = true;
+  adapter.failUnsubscribe = true;
+  const errors = [];
+  const closeReasons = [];
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "unsubscribe" || reopening) {
+        return;
+      }
+      reopening = true;
+      adapter.failOpen = false;
+      adapter.failUnsubscribe = false;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await assert.rejects(() => window.open(), /open failed/);
+  await reopened;
+
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.equal(adapter.opened.length, 1);
+
+  // The reopened generation's state handle and subscriptions are still live.
+  window.setState({ page: 1 });
+  assert.equal(window.getState().page, 1);
+
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
+});
+
+test("a reopen during a failed open's subscription teardown survives the old open failure", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failSubscribeItemChange = true;
+  adapter.failUnsubscribe = true;
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      if (context.operation !== "unsubscribe" || reopening) {
+        return;
+      }
+      reopening = true;
+      adapter.failSubscribeItemChange = false;
+      adapter.failUnsubscribe = false;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await assert.rejects(() => window.open(), /itemChange subscribe failed/);
+  await reopened;
+
+  assert.equal(window.status, "open");
+  // The failed subscription happens before a container exists, so the reopened
+  // generation owns the first one.
+  assert.equal(window.container, adapter.containers[0]);
+  assert.equal(adapter.opened.length, 1);
+
+  // The reopened generation's state handle and subscriptions are still live.
+  window.setState({ page: 1 });
+  assert.equal(window.getState().page, 1);
+  assert.equal(
+    adapter.closeSubscriptions.filter((record) => record.active).length,
+    1,
+  );
+  assert.equal(
+    adapter.itemChangeSubscriptions.filter((record) => record.active).length,
+    1,
+  );
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+});

@@ -1570,7 +1570,22 @@ export class Window {
       registerChatInputWindow(this);
       this.#runOpenHandlers();
     } catch (error) {
+      // The failing operation may have reported an error (for example a
+      // subscription cleanup) whose handler closed and reopened the Window, and
+      // that close already tore the old resources down. The failed open then
+      // belongs to the generation that is gone: tearing down again would
+      // release the reopened generation's own state handle and subscriptions.
+      if (generation !== this.#generation) {
+        throw error;
+      }
+      // The teardown may itself report an unsubscribe failure, and that handler
+      // can close and reopen the Window. The failed open then belongs to the
+      // generation that is gone: it must not mark the reopened Window closed or
+      // deliver its error to the new generation's handler.
       this.#teardown();
+      if (generation !== this.#generation) {
+        throw error;
+      }
       this.#status = "closed";
       this.#report(error, "open");
       throw error;
@@ -2751,6 +2766,12 @@ export class Window {
     }
 
     this.#teardown(restricted);
+    // The teardown may report an unsubscribe failure, and that handler can
+    // close and reopen the Window: the rest of this close belongs to the
+    // generation that is gone and must not mark the reopened one closed.
+    if (generation !== this.#generation) {
+      return;
+    }
     this.#status = "closed";
 
     // Exactly once: a duplicate or delayed close event sees status `closed`.
@@ -3568,18 +3589,6 @@ export class Window {
     this.#elementSubscriptions = next;
   }
 
-  #unsubscribeElements(): void {
-    const subscriptions = [...this.#elementSubscriptions.values()];
-    this.#elementSubscriptions = new Map();
-    for (const { unsubscribe } of subscriptions) {
-      try {
-        unsubscribe();
-      } catch (error) {
-        this.#report(error, "unsubscribe");
-      }
-    }
-  }
-
   /**
    * `restricted` is the shutdown path: adapter unsubscribers are dropped, not
    * called, because they run `unsubscribe()` on game signals, which restricted
@@ -3591,17 +3600,21 @@ export class Window {
     // afresh (with its own viewer id) instead of inheriting this teardown.
     forgetChatInputWindow(this);
     lifecycleWindows.delete(this);
-    if (restricted) {
-      this.#eventUnsubscribers = [];
-    } else {
-      this.#unsubscribeFromContainerEvents();
-    }
-    this.#stateSubscription?.();
+
+    // Detach every handle before calling it. An adapter or element unsubscribe
+    // may throw, and its error handler can close and reopen the Window: the
+    // reopened generation then installs its own state/GUI/element subscriptions
+    // while this teardown is still releasing the old ones. Clearing the fields
+    // first keeps the reentrant generation out of this teardown entirely.
+    const eventUnsubscribers = restricted ? [] : this.#eventUnsubscribers;
+    this.#eventUnsubscribers = [];
+    const stateSubscription = this.#stateSubscription;
     this.#stateSubscription = undefined;
-    this.#guiSubscription?.();
+    const guiSubscription = this.#guiSubscription;
     this.#guiSubscription = undefined;
-    this.#unsubscribeElements();
-    this.#stateHandle?.release();
+    const elementSubscriptions = [...this.#elementSubscriptions.values()];
+    this.#elementSubscriptions = new Map();
+    const stateHandle = this.#stateHandle;
     this.#stateHandle = undefined;
     this.#stateSchema = undefined;
     this.#viewerId = undefined;
@@ -3617,6 +3630,20 @@ export class Window {
     this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
+
+    this.#disposeEventSubscriptions(eventUnsubscribers);
+    stateSubscription?.();
+    guiSubscription?.();
+    for (const { unsubscribe } of elementSubscriptions) {
+      try {
+        unsubscribe();
+      } catch (error) {
+        // A broken unsubscribe must not keep the Window open; see the report
+        // hazard above: the fields are already detached, so a reopen survives.
+        this.#report(error, "unsubscribe");
+      }
+    }
+    stateHandle?.release();
   }
 
   #runOpenHandlers(): void {
