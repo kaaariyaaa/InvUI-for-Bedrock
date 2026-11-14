@@ -1709,13 +1709,18 @@ async function flushChatInput() {
   await tick();
 }
 
+/** Builds a notification for the Window's current session and layout. */
+function chatPayload(window, slot, sequence, layoutGeneration = window._inputLayoutGeneration) {
+  return `!invui:${window._inputSessionId}:${layoutGeneration}:${slot}:${sequence}`;
+}
+
 /**
  * Sends a chat notification naming the Window's current open session after the
  * default repeat-limit gap, so tests about routing are not rate-limited.
  */
 async function sendChat(window, slot, sequence, sender = { id: window.viewer.id }) {
   await new Promise((resolve) => setTimeout(resolve, 120));
-  return emitChatSend(`!invui:${window._inputSessionId}:${slot}:${sequence}`, sender);
+  return emitChatSend(chatPayload(window, slot, sequence), sender);
 }
 
 /** Window with one button at logical slot 1 (structure "ab"). */
@@ -6612,6 +6617,49 @@ test("a page change invalidates a notification queued for the previous page", as
   await sendChat(window, 0, 3);
   await flushChatInput();
   assert.deepEqual(clicked, ["page0", "page1"]);
+
+  window.close();
+});
+
+test("a notification minted before a page change cannot click the new page's button", async () => {
+  const viewer = { id: "chat-stale-page", name: "StalePage" };
+  const clicks = [];
+  const pageZero = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(() => clicks.push("page0"))
+    .build();
+  const pageOne = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_1"))
+    .addClickHandler(() => clicks.push("page1"))
+    .build();
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [pageZero, pageOne],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+
+  // Minted for page 0, then the player changes page before the line arrives.
+  const stale = chatPayload(window, 0, 1);
+  window.setState({ page: 1 });
+  await tick();
+  assert.equal(window._inputLayoutGeneration, 1, "the page change advances the layout generation");
+
+  assert.equal(emitChatSend(stale, { id: viewer.id }).cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, [], "the stale page-0 line must not click the page-1 button");
+
+  await sendChat(window, 0, 2);
+  await flushChatInput();
+  assert.deepEqual(clicks, ["page1"]);
 
   window.close();
 });

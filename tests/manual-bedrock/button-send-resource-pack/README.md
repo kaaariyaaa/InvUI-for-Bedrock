@@ -66,7 +66,7 @@ check.mjs                              JSON 構造チェック（実機の代替
 
 1. 使い捨てワールドを複製し、ワールドとパックのバックアップを取る。
 2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する。合わせて [`../probe/`](../probe/README.md) の Behavior Pack を導入し、Beta APIs / Experimental を有効化する。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要（ゲーム側の版表記は [API-NOTES.md](../API-NOTES.md) 第 8 節で確認）。samples の `v1.26.70.23-preview` は UI 構造の参照元にすぎない。
-3. **通知経路の陽性対照（先に必須）。** 通常のチャットで `!invui:manual:0:0` と手入力して送信する。probe が `NOTIFY_OBSERVED ... message="!invui:manual:0:0" action=NONE` をコンソールに出し、そのメッセージが通常チャットに表示されないことを確認する。ここでログが出ない場合、probe が動いていないため、以降のボタン試験は判定に使えない。
+3. **通知経路の陽性対照（先に必須）。** 通常のチャットで `!invui:manual:0:0:0` と手入力して送信する。probe が `NOTIFY_OBSERVED ... message="!invui:manual:0:0:0" action=NONE` をコンソールに出し、そのメッセージが通常チャットに表示されないことを確認する。ここでログが出ない場合、probe が動いていないため、以降のボタン試験は判定に使えない。
 4. **通常のチェストを開く。** 緑色の陽性対照ラベルと「Press: button.send (unverified)」ボタンが出るか、末尾が `desktop` か `pocket` かを記録する。ラベルが出なければ、パック未適用・`modifications` 非対応・継承元への差し込み失敗・見切れの可能性があるため、以降の結果は使わない。
 5. ボタンにカーソルを合わせ、**押下時の見た目（hover / pressed の変化）とクリック音**を確認しながら押す。あわせて probe のコンソールに `NOTIFY_OBSERVED` が出ないことを確認する（出た場合は内容と時刻を記録）。
 6. `VirtualContainer` の画面は、同梱の raw probe の `!invui open 27` で開き、4〜5 を繰り返す。`Window.open()` 用の custom adapter やテスト用コードは使わない（現行コアの実アダプタは `Window.open()` から `VirtualContainer.open()` を既定で呼ぶが、実機未検証でアイテム保護もない。probe の raw 経路を使う）。

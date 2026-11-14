@@ -10,6 +10,7 @@ function snapshot(generation = 1, overrides = {}) {
     open: true,
     ownerId: "player-1",
     sessionId: "window-1",
+    layoutGeneration: 1,
     slotModes,
     generation,
     ...overrides,
@@ -19,7 +20,7 @@ function snapshot(generation = 1, overrides = {}) {
 function accepted(sequence, slot = 7) {
   return {
     ok: true,
-    notification: { sessionId: "window-1", slot, sequence },
+    notification: { sessionId: "window-1", layoutGeneration: 1, slot, sequence },
   };
 }
 
@@ -50,7 +51,7 @@ test("serializes async execution and accepts a re-entrant enqueue", async () => 
       try {
         if (notification.sequence === 1) {
           // Re-entrant accept: queued behind the running execution, not awaited.
-          secondResult = acceptor.accept("!invui:window-1:7:2", "player-1");
+          secondResult = acceptor.accept("!invui:window-1:1:7:2", "player-1");
           started();
           await firstGate;
         }
@@ -60,7 +61,7 @@ test("serializes async execution and accepts a re-entrant enqueue", async () => 
     },
   });
 
-  const firstResult = acceptor.accept("!invui:window-1:7:1", "player-1");
+  const firstResult = acceptor.accept("!invui:window-1:1:7:1", "player-1");
   await didStart;
 
   assert.deepEqual(executed, [1]);
@@ -98,9 +99,9 @@ test("re-checks the latest snapshot immediately before execution", async () => {
     },
   });
 
-  const first = acceptor.accept("!invui:window-1:7:1", "player-1");
+  const first = acceptor.accept("!invui:window-1:1:7:1", "player-1");
   await didStart;
-  const queued = acceptor.accept("!invui:window-1:7:2", "player-1");
+  const queued = acceptor.accept("!invui:window-1:1:7:2", "player-1");
 
   // The page changed while the first click was executing: slot 7 is no longer
   // a button, so the queued candidate must not run.
@@ -139,9 +140,9 @@ test("discards queued candidates from a superseded generation", async () => {
     },
   });
 
-  const first = acceptor.accept("!invui:window-1:7:1", "player-1");
+  const first = acceptor.accept("!invui:window-1:1:7:1", "player-1");
   await didStart;
-  const stale = acceptor.accept("!invui:window-1:7:2", "player-1");
+  const stale = acceptor.accept("!invui:window-1:1:7:2", "player-1");
   current = snapshot(2);
 
   release();
@@ -157,18 +158,18 @@ test("fails closed instead of throwing on unusable snapshots, clocks, and execut
   const withSnapshot = (source, execute = () => {}) =>
     createInputAcceptor({ snapshot: source, now: () => now, policy: { minIntervalMs: 0 }, execute });
 
-  assert.deepEqual(await withSnapshot(() => null).accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await withSnapshot(() => null).accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "snapshot-unavailable",
   });
-  assert.deepEqual(await withSnapshot(notAWindow).accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await withSnapshot(notAWindow).accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "snapshot-unavailable",
   });
 
   const disappearing = withSnapshot(() => current);
   current = null;
-  assert.deepEqual(await disappearing.accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await disappearing.accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "snapshot-unavailable",
   });
@@ -180,7 +181,7 @@ test("fails closed instead of throwing on unusable snapshots, clocks, and execut
     policy: { minIntervalMs: 0 },
     execute: () => {},
   });
-  assert.deepEqual(await badClock.accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await badClock.accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "invalid-input",
   });
@@ -191,7 +192,7 @@ test("fails closed instead of throwing on unusable snapshots, clocks, and execut
       throw new Error("click handler failed");
     },
   );
-  assert.deepEqual(await throwing.accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await throwing.accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "executor-failed",
   });
@@ -245,11 +246,11 @@ test("resolves the candidate and keeps draining when the snapshot getter throws 
     },
   });
 
-  assert.deepEqual(await acceptor.accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await acceptor.accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "snapshot-unavailable",
   });
-  assert.deepEqual(await acceptor.accept("!invui:window-1:7:2", "player-1"), accepted(2));
+  assert.deepEqual(await acceptor.accept("!invui:window-1:1:7:2", "player-1"), accepted(2));
   assert.deepEqual(executed, [2]);
 });
 
@@ -273,8 +274,8 @@ test("resolves the candidate and keeps draining when the rate policy throws mid-
     },
   });
 
-  const first = acceptor.accept("!invui:window-1:7:1", "player-1");
-  const second = acceptor.accept("!invui:window-1:7:2", "player-1");
+  const first = acceptor.accept("!invui:window-1:1:7:1", "player-1");
+  const second = acceptor.accept("!invui:window-1:1:7:2", "player-1");
   assert.deepEqual(await first, { ok: false, reason: "invalid-input" });
   assert.deepEqual(await second, { ok: false, reason: "invalid-input" });
   assert.deepEqual(executed, []);
@@ -300,12 +301,12 @@ test("never leaves a candidate unresolved when settle throws unexpectedly", asyn
     execute: () => {},
   });
 
-  assert.deepEqual(await acceptor.accept("!invui:window-1:7:1", "player-1"), {
+  assert.deepEqual(await acceptor.accept("!invui:window-1:1:7:1", "player-1"), {
     ok: false,
     reason: "invalid-input",
   });
   // The queue keeps draining after the unexpected throw.
-  assert.deepEqual(await acceptor.accept("!invui:window-1:7:2", "player-1"), {
+  assert.deepEqual(await acceptor.accept("!invui:window-1:1:7:2", "player-1"), {
     ok: false,
     reason: "snapshot-unavailable",
   });

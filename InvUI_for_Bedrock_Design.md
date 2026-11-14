@@ -551,12 +551,14 @@ EventQueueへ投入
 概念上は次のような専用メッセージを生成する。
 
 ```text
-!invui:<session-id>:<slot-index>:<sequence>
+!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>
 ```
 
 Script API側では`world.beforeEvents.chatSend`を用いる。専用プレフィックスのメッセージを検知した場合、通常のチャットへの表示はキャンセルする。
 
-ただし、**チャット送信そのものがチェスト画面で成立するかを実証するまでは、この形式を実装確定としない。** 入力元のJSON UIに適切なチャット欄の内部状態が存在しなければ`button.send`だけでは機能しない可能性がある。
+`layout-generation`は、通知を生成した時点のWindowのクリック可能レイアウトの世代である。サーバー側は`Window._inputLayoutGeneration`（openごとに0から始まり、ページ・行・タブ・スロット要素の変更で進む）と照合する。ページ変更前に送られ、変更後に届いた通知は、新しいページの同じスロットが`button`でも拒否される。世代を持たない旧3フィールド形式`!invui:<session>:<slot>:<sequence>`は受理しない。
+
+ただし、**チャット送信そのものがチェスト画面で成立するかを実証するまでは、この形式を実装確定としない。** 入力元のJSON UIに適切なチャット欄の内部状態が存在しなければ`button.send`だけでは機能しない可能性がある。現時点で通知を自動生成するUIはなく、`layout-generation`も手入力または将来のUIが指定する。
 
 ### 10.5 入力の安全性
 
@@ -564,6 +566,7 @@ Script API側では`world.beforeEvents.chatSend`を用いる。専用プレフ�
 
 - 入力者が開いているWindowを持つこと。
 - Session IDが現在のWindowに一致すること。
+- 通知の`layout-generation`が現在の画面の世代と一致すること。ページ・行・タブ・スロット要素の変更前に生成され、変更後に届いた通知を捨てる。
 - 対象スロットがそのプレイヤーの現在の画面で`button`モードであること。
 - ページ変更後など、古い世代の通知を処理しないこと。
 - 通知の連続処理を制限すること。
