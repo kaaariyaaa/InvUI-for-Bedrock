@@ -777,10 +777,8 @@ function registerUiDefs(preflight) {
     if (!fs.readFileSync(destination).equals(originalContent)) {
       throw new Error('確認中に ui/_ui_defs.json が別プロセスに変更されたため書き込みませんでした。');
     }
-    fs.writeFileSync(tempPath, nextContent, { flag: 'wx', mode: 0o644 });
+    tempIdentity = writeExclusiveTempFile(tempPath, nextContent);
     tempCreated = true;
-    const tempStat = fs.lstatSync(tempPath);
-    tempIdentity = { dev: tempStat.dev, ino: tempStat.ino };
     if (!fs.readFileSync(destination).equals(originalContent)) {
       throw new Error('確認中に ui/_ui_defs.json が別プロセスに変更されたため書き込みませんでした。');
     }
@@ -795,12 +793,9 @@ function registerUiDefs(preflight) {
     return backupPath;
   } catch (error) {
     if (tempCreated) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch (cleanupError) {
-        if (cleanupError.code !== 'ENOENT') {
-          error.message += ` / 一時ファイルを削除できません: ${tempPath} (${cleanupError.message})`;
-        }
+      const cleanup = removeDestinationIfOwned(tempPath, tempIdentity);
+      if (!cleanup.removed) {
+        error.message += ` / 一時ファイルを削除できません: ${tempPath} (${cleanup.reason})`;
       }
     }
     if (backupCreated) {
@@ -869,6 +864,42 @@ function conflictError(destination) {
   const conflict = new Error(`導入先が同時に作成されました: ${destination}`);
   conflict.code = 'EEXIST';
   return conflict;
+}
+
+// 'wx' で fd を確保してから書き込む。open できなかった時点で自分はまだ何も
+// 作っていない（EEXIST の既存ファイル、EACCES・EMFILE・ENOSPC など）ので、
+// そのパスは消さない。書き込みに失敗した場合（ENOSPC など）だけ、確保した fd と
+// dev/ino が一致する一時ファイルを消してから例外を投げる。呼び出し側の後片付けは
+// 書き込み成功後の一時ファイルを前提にしているため、ここで消さないと残骸になる。
+function writeExclusiveTempFile(tempPath, content) {
+  let fd = fs.openSync(tempPath, 'wx', 0o644);
+  let identity = null;
+  try {
+    const stat = fs.fstatSync(fd);
+    identity = { dev: stat.dev, ino: stat.ino };
+    fs.writeFileSync(fd, content);
+    return identity;
+  } catch (error) {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // 下の finally でも閉じられないので、ここでは失敗を無視する。
+    }
+    fd = null;
+    const cleanup = removeDestinationIfOwned(tempPath, identity);
+    if (!cleanup.removed) {
+      error.message += ` / 一時ファイルを削除できません: ${tempPath} (${cleanup.reason})`;
+    }
+    throw error;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // close 失敗は一時ファイルの作成結果を変えない。
+      }
+    }
+  }
 }
 
 function placeFileWithoutOverwrite(tempPath, destination) {
@@ -1081,8 +1112,8 @@ function applyTemplate(resourcePack, options = {}) {
         parent,
         `.invui-${path.basename(entry.destination)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
       );
-      fs.writeFileSync(tempPath, entry.templateContent, { flag: 'wx', mode: 0o644 });
-      staged.push({ ...entry, tempPath });
+      const tempIdentity = writeExclusiveTempFile(tempPath, entry.templateContent);
+      staged.push({ ...entry, tempPath, tempIdentity });
     }
 
     for (const entry of staged) {
@@ -1104,10 +1135,9 @@ function applyTemplate(resourcePack, options = {}) {
     }
     for (const entry of staged) {
       if (entry.tempPath) {
-        try {
-          fs.unlinkSync(entry.tempPath);
-        } catch (cleanupError) {
-          cleanupErrors.push(`一時ファイルを削除できません: ${entry.tempPath} (${cleanupError.message})`);
+        const cleanup = removeDestinationIfOwned(entry.tempPath, entry.tempIdentity);
+        if (!cleanup.removed) {
+          cleanupErrors.push(`一時ファイルを削除できません: ${entry.tempPath} (${cleanup.reason})`);
         }
       }
     }
@@ -1333,8 +1363,8 @@ function generateResourcePack(outputRoot) {
       const destination = path.join(outputRoot, file.relativePath);
       createMissingDirectories(path.dirname(destination), createdDirectories);
       const tempPath = `${destination}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-      fs.writeFileSync(tempPath, file.content, { flag: 'wx', mode: 0o644 });
-      stagedTemps.push(tempPath);
+      const tempIdentity = writeExclusiveTempFile(tempPath, file.content);
+      stagedTemps.push({ path: tempPath, identity: tempIdentity });
       const identity = placeFileWithoutOverwrite(tempPath, destination);
       // 配置に成功した時点で記録する。直後の temp 削除が失敗しても、
       // ロールバックがこのファイルを「作成していない」と誤認して残さないため。
@@ -1350,13 +1380,10 @@ function generateResourcePack(outputRoot) {
         cleanupErrors.push(`作成済みファイルを削除できません: ${file.destination} (${cleanup.reason})`);
       }
     }
-    for (const tempPath of stagedTemps) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch (cleanupError) {
-        if (cleanupError.code !== 'ENOENT') {
-          cleanupErrors.push(`一時ファイルを削除できません: ${tempPath} (${cleanupError.message})`);
-        }
+    for (const staged of stagedTemps) {
+      const cleanup = removeDestinationIfOwned(staged.path, staged.identity);
+      if (!cleanup.removed) {
+        cleanupErrors.push(`一時ファイルを削除できません: ${staged.path} (${cleanup.reason})`);
       }
     }
     for (const dir of [...createdDirectories].reverse()) {
