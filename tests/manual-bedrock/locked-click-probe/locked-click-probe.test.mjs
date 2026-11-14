@@ -6,7 +6,9 @@
  * - manifest の UUID・beta 依存・警告
  * - 導入用 `.mcpack` が behavior_pack と同一内容であること
  * - main.js の構文
- * - ロック済みアイテムを fill し、観測のみで復元・クリック実行をしないこと
+ * - ロック済みアイテムを fill し、ロックの適用を読み戻して記録すること
+ * - close 時点の内容（空でないスロット数・合計）を記録すること
+ * - 観測のみで復元・クリック実行をしないこと
  * - `SAME_ITEM_CANDIDATE` / `REMOVED` の分類
  * - 自動 close の tick 予約
  */
@@ -73,7 +75,7 @@ function readZipEntries(buffer) {
   return entries;
 }
 
-function loadProbe() {
+function loadProbe(options = {}) {
   const source = fs.readFileSync(scriptPath, 'utf8').replace(/^import[^\n]*\n/m, '');
   const timers = [];
   const messages = [];
@@ -129,6 +131,10 @@ function loadProbe() {
         return items[slot];
       },
       setItem(slot, item) {
+        // options.dropLock は、実機でロックが保存されなかった場合の模擬。
+        if (options.dropLock && item) {
+          item.lockMode = 'none';
+        }
         items[slot] = item;
       },
     };
@@ -185,14 +191,21 @@ function loadProbe() {
       }
       return cancelled;
     },
-    fireItemChange({ slot, before, after, who = player }) {
+    fireItemChange({ slot, before, after, who = player, container = created[0] }) {
       for (const handler of events.virtualContainerItemChange) {
-        handler({ container: created[0], slot, beforeItemStack: before, itemStack: after, player: who });
+        handler({ container, slot, beforeItemStack: before, itemStack: after, player: who });
       }
     },
-    fireClose({ who = player, reason = 'ServerClosed', contents = items, container: closedContainer = created[0] } = {}) {
+    fireClose({ who = player, reason = 'ServerClosed', contents, container: closedContainer = created[0] } = {}) {
+      // 実機の event.items は container.size と同じ長さ。items は 54 固定の
+      // モック配列なので、size を超える分を close 内容に混ぜない。
+      const closeContents =
+        contents ??
+        (closedContainer && typeof closedContainer.size === 'number'
+          ? items.slice(0, closedContainer.size)
+          : items);
       for (const handler of events.virtualContainerClose) {
-        handler({ container: closedContainer, player: who, reason, items: contents });
+        handler({ container: closedContainer, player: who, reason, items: closeContents });
       }
     },
     timers,
@@ -277,6 +290,8 @@ test('main.js は観測のみで、復元・クリック実行・JSON UI を含�
   assert.match(source, /minecraft:paper/);
   assert.match(source, /system\.runTimeout/);
   assert.match(source, /AUTOCLOSE/);
+  assert.match(source, /CLOSE_CONTENTS/);
+  assert.match(source, /FILL_LOCK_MISMATCH/);
   assert.match(source, /stay stuck in the player's inventory/);
   assert.doesNotMatch(source, /\bhandleClick\s*\(/);
   assert.doesNotMatch(source, /button\.send|button\.drop_one/);
@@ -336,6 +351,7 @@ test('open は size 分をロックして fill し、ticks 後に close する',
   assert.equal(probe.timers.length, 1);
   assert.equal(probe.timers[0].ticks, 40);
   assert.match(probe.messages.join('\n'), /OPEN_REQUESTED size=9 mode=slot/);
+  assert.match(probe.logs.join('\n'), /FILLED size=9 mode=slot slots=9\/9 locked=9\/9/);
 
   probe.timers[0].run();
   assert.equal(probe.closeCalls(), 1);
@@ -349,8 +365,54 @@ test('same-item の itemChange を候補として分類し、復元しない', (
   probe.fireItemChange({ slot: 0, before: stack, after: stack });
 
   const output = probe.logs.join('\n');
-  assert.match(output, /ITEM_CHANGE size=9 slot=0 kind=SAME_ITEM_CANDIDATE sameItem=true/);
-  assert.match(output, /CANDIDATE_SAME_ITEM size=9 slot=0/);
+  assert.match(
+    output,
+    /ITEM_CHANGE size=9 slot=0 title="Lock probe 9 slot" kind=SAME_ITEM_CANDIDATE sameItem=true/,
+  );
+  assert.match(output, /CANDIDATE_SAME_ITEM size=9 slot=0 title="Lock probe 9 slot"/);
+});
+
+test('ロックが読み戻せない場合は FILL_LOCK_MISMATCH を記録する', () => {
+  const probe = loadProbe({ dropLock: true });
+  probe.chat('!lockprobe open 9 slot 40');
+
+  const output = probe.logs.join('\n');
+  assert.match(output, /FILL_LOCK_MISMATCH slot=0 mode=slot expected=slot actual=none/);
+  assert.match(output, /FILLED size=9 mode=slot slots=9\/9 locked=0\/9/);
+});
+
+test('plain はロックを要求せず、locked= を出さない', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 plain 40');
+
+  const output = probe.logs.join('\n');
+  assert.match(output, /FILLED size=9 mode=plain slots=9\/9/);
+  assert.doesNotMatch(output, /locked=/);
+});
+
+test('close は内容の合計と空でないスロット数を記録する', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.fireClose();
+
+  const output = probe.logs.join('\n');
+  assert.match(output, /CLOSE size=9 title="Lock probe 9 slot" reason=ServerClosed/);
+  assert.match(
+    output,
+    /CLOSE_CONTENTS size=9 title="Lock probe 9 slot" nonEmptySlots=9\/9 totals=minecraft:stickx5, minecraft:paperx4/,
+  );
+});
+
+test('itemChange は title で size と mode を記録する', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 plain 40');
+  const stack = probe.items[0];
+  probe.fireItemChange({ slot: 0, before: stack, after: stack });
+
+  assert.match(
+    probe.logs.join('\n'),
+    /ITEM_CHANGE size=9 slot=0 title="Lock probe 9 plain" kind=SAME_ITEM_CANDIDATE/,
+  );
 });
 
 test('removed / changed は候補にしない', () => {
