@@ -532,6 +532,33 @@ test("Window.builder validates viewer, upper GUI, and shared state key", () => {
   assert.throws(() => Window.builder().setStateKey(""), TypeError);
 });
 
+test("Window.mergedBuilder sets one GUI as the merged container content", async () => {
+  const gui = Gui.normal({ structure: ["ab"] });
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.mergedBuilder()
+    .setViewer(player)
+    .setGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  // Merged means one GUI: it is the upper GUI the Window renders, and there is
+  // no lower GUI (design 4.4, limited to the container on Bedrock).
+  assert.equal(window.upperGui, gui);
+  assert.equal(window.lowerGui, undefined);
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(window.container.size, 9); // one nine-column row
+  assert.equal(adapter.opened.length, 1);
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+});
+
+test("Window.mergedBuilder still requires viewer and GUI", () => {
+  assert.throws(() => Window.mergedBuilder().build(), /setViewer/);
+  assert.throws(() => Window.mergedBuilder().setViewer(player).build(), /setUpperGui/);
+});
+
 test("real adapter opens and closes screens through VirtualContainer.open/close", async () => {
   const adapter = new MinecraftVirtualContainerAdapter();
   assert.equal(adapter.canOpenScreens, true);

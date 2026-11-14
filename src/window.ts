@@ -1008,6 +1008,24 @@ export class WindowBuilder {
   }
 }
 
+/**
+ * Builder for a merged Window (design 4.4, Java `Window.mergedBuilder()`).
+ *
+ * Java's merged window paints one GUI over both the upper inventory and the
+ * player's own inventory. Bedrock does not expose the player inventory as a
+ * `VirtualContainer` we may paint, so the single GUI fills the container only
+ * and the player area keeps the standard screen (design 7.4). `setGui()` is the
+ * merged spelling of `setUpperGui()`.
+ *
+ * ponytail: API parity with an explicit limit, not a merged renderer. Add the
+ * real merge only if Bedrock exposes writable player-inventory slots.
+ */
+export class MergedWindowBuilder extends WindowBuilder {
+  setGui(gui: Gui): this {
+    return this.setUpperGui(gui);
+  }
+}
+
 let nextWindowId = 1;
 let nextInputSessionId = 1;
 
@@ -1156,6 +1174,14 @@ export class Window {
 
   static builder(): WindowBuilder {
     return new WindowBuilder();
+  }
+
+  /**
+   * Builder for a merged Window (design 4.4). Bedrock limits the merged form to
+   * one GUI in the container; see {@link MergedWindowBuilder}.
+   */
+  static mergedBuilder(): MergedWindowBuilder {
+    return new MergedWindowBuilder();
   }
 
   get status(): WindowStatus {
