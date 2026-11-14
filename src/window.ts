@@ -54,6 +54,18 @@
  * the adapter is not asked to close a screen that went away with the player.
  * An environment without the event is detected separately and latches off.
  * This is NOT verified on a real device.
+ *
+ * `system.beforeEvents.shutdown` closes every `opening`/`open` Window with
+ * `ServerClosed` before the world goes away. No close event is raised on that
+ * path, so the subscription is installed with the leave/death ones on the
+ * first `open()`. The callback runs with restricted-execution privilege: it
+ * does not call `VirtualContainer.close()`, adapter unsubscribers, or any event
+ * `unsubscribe()`. Only local resources are released (chat routing, registry
+ * entries, state handle, GUI/element subscriptions, container references); the
+ * engine drops the screens and subscriptions with the session. Close handlers
+ * still run exactly once, and an `open()` they attempt is suppressed for the
+ * rest of the module lifetime, so a shutdown cannot be followed by a new
+ * screen. A repeated shutdown event is a no-op.
  */
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
@@ -107,7 +119,8 @@ export type WindowOpenHandler = () => void;
  * A handler may close and reopen the Window, which starts a new generation:
  * the remaining handlers then belong to the generation that is already gone and
  * are not called, and an exception thrown by such a handler is not reported
- * either (the error handler could close the reopened Window).
+ * either (the error handler could close the reopened Window). During a world
+ * shutdown a reopen is suppressed: `open()` resolves without opening.
  */
 export type WindowCloseHandler = (reason: WindowCloseReason) => void;
 
@@ -445,16 +458,73 @@ function invalidateChatInputWindow(window: Window): void {
 
 /**
  * Windows that are `opening` or `open` and must be closed when their viewer
- * leaves or dies, one set shared by the module so a single `playerLeave` and a
- * single `entityDie` subscription serve every Window. A Window is added when
- * `open()` starts and removed by `#teardown()`.
+ * leaves or dies or the world shuts down, one set shared by the module so a
+ * single `playerLeave`, `entityDie`, and `shutdown` subscription serve every
+ * Window. A Window is added when `open()` starts and removed by `#teardown()`.
  */
 const leaveWindows = new Set<Window>();
 let playerLeaveSubscribed = false;
 let entityDieSubscribed = false;
+let shutdownSubscribed = false;
 /** Latches the feature-detection failure, like the chat input bridge. */
 let playerLeaveUnavailable = false;
 let entityDieUnavailable = false;
+let shutdownUnavailable = false;
+/**
+ * Set by the first shutdown event and never cleared: the session is ending, so
+ * every later `open()` is suppressed and every later close skips adapter/signal
+ * calls that restricted execution forbids.
+ */
+let shutdownInProgress = false;
+
+/**
+ * Installs the `system.beforeEvents.shutdown` subscription on first use, or
+ * latches it off when the API is absent. The callback runs with
+ * restricted-execution privilege, so it must not close containers or call
+ * event unsubscribers; it only tears down local state through the normal close
+ * path (flagged by `shutdownInProgress`) and notifies close handlers once.
+ */
+function ensureShutdownSubscription(): void {
+  if (shutdownSubscribed || shutdownUnavailable) {
+    return;
+  }
+  let shutdown: typeof server.system.beforeEvents.shutdown | undefined;
+  try {
+    shutdown = server.system?.beforeEvents?.shutdown;
+  } catch {
+    shutdown = undefined;
+  }
+  if (!shutdown || typeof shutdown.subscribe !== "function") {
+    shutdownUnavailable = true;
+    return;
+  }
+  try {
+    shutdown.subscribe(() => {
+      // A repeated delivery must not notify close handlers again.
+      if (shutdownInProgress) {
+        return;
+      }
+      shutdownInProgress = true;
+      // Snapshot: a close handler may close other Windows or try to reopen.
+      // Each Window re-checks its status and the shutdown flag.
+      for (const window of [...leaveWindows]) {
+        try {
+          window._onWorldShutdown();
+        } catch (error) {
+          // One Window's close handler must not keep the other Windows open.
+          console.error("InvUI: closing a Window during world shutdown failed.", error);
+        }
+      }
+    });
+    shutdownSubscribed = true;
+  } catch (error) {
+    console.error(
+      "InvUI: system.beforeEvents.shutdown subscription could not be installed; Windows will not be torn down at world shutdown.",
+      error,
+    );
+    shutdownUnavailable = true;
+  }
+}
 
 /**
  * Installs the `playerLeave` subscription on first use, or latches it off when
@@ -1063,6 +1133,23 @@ export class Window {
     this.#performClose("PlayerDied", false);
   }
 
+  /**
+   * Internal: close this Window because the world is shutting down.
+   *
+   * The shutdown callback runs with restricted-execution privilege, so the
+   * adapter must not be asked to close a screen and neither adapter nor event
+   * unsubscribers may be called. `#performClose` reads the module-level latch
+   * and releases only local resources; screens and subscriptions are dropped
+   * by the engine with the session. Close handlers still run exactly once so
+   * the end is observable (they run under the same privilege).
+   */
+  _onWorldShutdown(): void {
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("ServerClosed", false);
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -1088,6 +1175,17 @@ export class Window {
    * the Window, its state, or its container.
    */
   async open(): Promise<void> {
+    if (shutdownInProgress) {
+      // The session is ending. A close handler may still call open(); close
+      // the Window through the restricted path instead of creating a screen,
+      // and resolve so an un-awaited reopen cannot become an unhandled
+      // rejection. A created Window is left closed and cannot be opened later.
+      this._onWorldShutdown();
+      if (this.#status === "created") {
+        this.#status = "closed";
+      }
+      return;
+    }
     if (this.#status !== "created" && this.#status !== "closed") {
       throw new Error(`InvUI: Window ${this.id} is already ${this.#status}.`);
     }
@@ -1671,21 +1769,33 @@ export class Window {
     // reach the close handlers exactly once: `open()` then resolves as closed,
     // and dropping the reason here would make the close look like a no-op.
     const notifyCloseHandlers = wasVisible || this.#status === "opening";
+    // The shutdown callback runs with restricted-execution privilege, where
+    // VirtualContainer.close() and every event unsubscribe() throw. Skipping
+    // both keeps the teardown to local resources; the engine drops the screen
+    // and subscriptions with the session. The latch is permanent, so a later
+    // close() during the same shutdown takes the same path.
+    const restricted = shutdownInProgress;
     this.#status = "closing";
     const generation = ++this.#generation;
     this.#stopRendering();
 
     // Detach before touching the adapter: closeContainer may dispatch the
     // close event synchronously and must not run this path twice.
-    this.#unsubscribeFromContainerEvents();
-    // An unsubscribe failure is reported, and the error handler may have closed
-    // and reopened the Window: the rest of this close belongs to a generation
-    // that is gone, and its teardown must not destroy the reopened screen.
-    if (generation !== this.#generation) {
-      return;
+    if (restricted) {
+      // Drop the local handles without calling them; see above.
+      this.#eventUnsubscribers = [];
+    } else {
+      this.#unsubscribeFromContainerEvents();
+      // An unsubscribe failure is reported, and the error handler may have
+      // closed and reopened the Window: the rest of this close belongs to a
+      // generation that is gone, and its teardown must not destroy the
+      // reopened screen.
+      if (generation !== this.#generation) {
+        return;
+      }
     }
 
-    if (requestAdapterClose && wasVisible) {
+    if (requestAdapterClose && wasVisible && !restricted) {
       // During a title regeneration the old screen is the visible one; the
       // replacement exists but was never shown. Closing it keeps an interrupted
       // regeneration from leaving the old screen on the player's display.
@@ -1704,7 +1814,7 @@ export class Window {
       }
     }
 
-    this.#teardown();
+    this.#teardown(restricted);
     this.#status = "closed";
 
     // Exactly once: a duplicate or delayed close event sees status `closed`.
@@ -1800,23 +1910,22 @@ export class Window {
   }
 
   /**
-   * Track this Window for automatic close when its viewer leaves or dies. The
-   * viewer id is read here, before the player can go invalid; if it cannot be
-   * read the Window is simply not auto-closed, so opening still works (fail
-   * closed for this feature only).
+   * Track this Window for automatic close when its viewer leaves or dies, and
+   * for the shutdown teardown. The viewer id is read here, before the player
+   * can go invalid; if it cannot be read, leave/death matching simply ignores
+   * the Window, but it is still tracked so shutdown can release it.
    */
   #registerForPlayerLeave(): void {
+    leaveWindows.add(this);
+    ensurePlayerLeaveSubscription();
+    ensureEntityDieSubscription();
+    ensureShutdownSubscription();
+
     try {
       this.#viewerId = this.viewer.id;
     } catch {
       this.#viewerId = undefined;
     }
-    if (this.#viewerId === undefined) {
-      return;
-    }
-    leaveWindows.add(this);
-    ensurePlayerLeaveSubscription();
-    ensureEntityDieSubscription();
   }
 
   /**
@@ -2304,13 +2413,22 @@ export class Window {
     }
   }
 
-  #teardown(): void {
+  /**
+   * `restricted` is the shutdown path: adapter unsubscribers are dropped, not
+   * called, because they run `unsubscribe()` on game signals, which restricted
+   * execution forbids. Everything else is local and released either way.
+   */
+  #teardown(restricted = false): void {
     // Drop the Window from chat routing and leave handling first: a close
     // handler may reopen it, and the reopened generation must be registered
     // afresh (with its own viewer id) instead of inheriting this teardown.
     forgetChatInputWindow(this);
     leaveWindows.delete(this);
-    this.#unsubscribeFromContainerEvents();
+    if (restricted) {
+      this.#eventUnsubscribers = [];
+    } else {
+      this.#unsubscribeFromContainerEvents();
+    }
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
     this.#guiSubscription?.();

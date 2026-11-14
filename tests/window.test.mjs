@@ -13,7 +13,12 @@ const itemChangeCallbacks = new Set();
 const chatSendCallbacks = new Set();
 const playerLeaveCallbacks = new Set();
 const entityDieCallbacks = new Set();
+const shutdownCallbacks = new Set();
 export const scheduledRuns = [];
+
+export function emitShutdown() {
+  for (const callback of [...shutdownCallbacks]) callback({});
+}
 
 export function emitPlayerLeave(playerId) {
   for (const callback of [...playerLeaveCallbacks]) {
@@ -42,6 +47,17 @@ export function emitChatSend(message, sender) {
 }
 
 export const system = {
+  beforeEvents: {
+    shutdown: {
+      subscribe(callback) {
+        shutdownCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        shutdownCallbacks.delete(callback);
+      },
+    },
+  },
   run(callback) {
     scheduledRuns.push(callback);
     return scheduledRuns.length;
@@ -157,14 +173,39 @@ const noPlayerLeaveSource = mockSource.replace(
   "",
 );
 const noPlayerLeaveUrl = `data:text/javascript;base64,${Buffer.from(noPlayerLeaveSource).toString("base64")}`;
+// Same double without system.beforeEvents.shutdown, for the fail-closed test.
+const noShutdownSource = mockSource.replace(
+  /  beforeEvents: \{\n    shutdown: \{[\s\S]*?\n    \},\n  \},\n/,
+  "",
+);
+const noShutdownUrl = `data:text/javascript;base64,${Buffer.from(noShutdownSource).toString("base64")}`;
+// The shutdown latch is permanent per Window module instance, so a shutdown
+// test must emit into its own double: the shared double would latch every
+// already-loaded module (including the default one) and break any test that
+// ran after it. Each `?shutdown-<name>` module instance gets its own copy.
+const shutdownMockUrls = new Map();
+function shutdownMockUrl(tag) {
+  let url = shutdownMockUrls.get(tag);
+  if (!url) {
+    url = `data:text/javascript;base64,${Buffer.from(`${mockSource}\n// ${tag}`).toString("base64")}`;
+    shutdownMockUrls.set(tag, url);
+  }
+  return url;
+}
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@minecraft/server") {
+      const parentUrl = context.parentURL ?? "";
+      const shutdownTag = /[?&](shutdown-[a-z-]+)/.exec(parentUrl)?.[1];
       return {
-        url: context.parentURL?.includes("no-player-leave")
+        url: parentUrl.includes("no-player-leave")
           ? noPlayerLeaveUrl
-          : mockUrl,
+          : parentUrl.includes("no-shutdown")
+            ? noShutdownUrl
+            : shutdownTag
+              ? shutdownMockUrl(shutdownTag)
+              : mockUrl,
         shortCircuit: true,
       };
     }
@@ -4473,4 +4514,232 @@ test("entityDie while a Window is opening closes it before a screen is shown", a
   assert.deepEqual(closeReasons, ["PlayerDied"]);
   assert.equal(container.items[0], undefined, "a late provider must not write");
   assert.throws(() => window.getState(), /not open/);
+});
+
+test("shutdown closes every open Window without restricted-execution cleanup calls", async () => {
+  // A fresh module instance with its own double: the shutdown latch is
+  // permanent for a module, so it must not leak into the shared double.
+  const { Window: ShutdownWindow } = await import(
+    new URL("../src/window.ts?shutdown-close", import.meta.url).href
+  );
+  const { emitShutdown } = await import(shutdownMockUrl("shutdown-close"));
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const otherCloseReasons = [];
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+  });
+  const window = ShutdownWindow.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+  const otherWindow = ShutdownWindow.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(gui)
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => otherCloseReasons.push(reason))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+  assert.equal(adapter.opened.length, 1);
+
+  emitShutdown();
+
+  assert.equal(window.status, "closed");
+  assert.equal(otherWindow.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.deepEqual(otherCloseReasons, ["ServerClosed"]);
+  // The callback runs with restricted-execution privilege: neither
+  // VirtualContainer.close() nor an event unsubscribe() may be called.
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(otherAdapter.closed, []);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [true],
+  );
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [true],
+  );
+  // Local resources are released: state and chat routing.
+  assert.throws(() => window.getState(), /not open/);
+  const delayed = await sendChat(window, 0, 1);
+  assert.equal(delayed.cancel, true);
+
+  // A repeated shutdown must not notify again, and a later open is a no-op.
+  emitShutdown();
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  await window.open();
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(adapter.containers.length, 1);
+});
+
+test("shutdown close handlers cannot reopen and reentrant opens are closed", async () => {
+  const { Window: ShutdownWindow } = await import(
+    new URL("../src/window.ts?shutdown-reentry", import.meta.url).href
+  );
+  const { emitShutdown } = await import(shutdownMockUrl("shutdown-reentry"));
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const order = [];
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+  });
+  let reopened;
+  let otherWindow;
+  const window = ShutdownWindow.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => {
+      order.push(`window:${reason}`);
+      // Both calls run while the shutdown callback is still on the stack.
+      reopened = window.open();
+      order.push(`window-after-open:${window.status}`);
+      void otherWindow.open();
+      order.push(`other-after-open:${otherWindow.status}`);
+    })
+    .addCloseHandler((reason) => order.push(`window:${reason}:second`))
+    .build();
+  otherWindow = ShutdownWindow.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(gui)
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => order.push(`other:${reason}`))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+
+  emitShutdown();
+  await reopened;
+
+  assert.deepEqual(order, [
+    "window:ServerClosed",
+    "window-after-open:closed",
+    "other:ServerClosed",
+    "other-after-open:closed",
+    "window:ServerClosed:second",
+  ]);
+  assert.equal(window.status, "closed");
+  assert.equal(otherWindow.status, "closed");
+  // No re-open created a container or screen, and the first Window's close
+  // handlers all ran once (the no-op open did not bump the generation).
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(otherAdapter.containers.length, 1);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(otherAdapter.opened.length, 1);
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(otherAdapter.closed, []);
+});
+
+test("shutdown while a Window is opening releases it without restricted cleanup", async () => {
+  const { Window: ShutdownWindow } = await import(
+    new URL("../src/window.ts?shutdown-opening", import.meta.url).href
+  );
+  const { emitShutdown } = await import(shutdownMockUrl("shutdown-opening"));
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const openHandlers = [];
+  let resolveProvider;
+  const item = Item.simple(
+    () =>
+      new Promise((resolve) => {
+        resolveProvider = resolve;
+      }),
+  );
+  const window = ShutdownWindow.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addOpenHandler(() => openHandlers.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  const opening = window.open();
+  await Promise.resolve();
+  assert.equal(window.status, "opening");
+  const container = adapter.containers[0];
+  assert.ok(container, "container exists while providers are unresolved");
+
+  emitShutdown();
+  assert.equal(window.status, "closed");
+
+  resolveProvider(stack("minecraft:late"));
+  await opening;
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(adapter.opened.length, 0, "the screen must never be requested");
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(openHandlers, []);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(container.items[0], undefined, "a late provider must not write");
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [true],
+  );
+  assert.throws(() => window.getState(), /not open/);
+});
+
+test("Windows keep working when system.beforeEvents.shutdown is absent", async () => {
+  const { Window: WindowWithoutShutdown } = await import(
+    new URL("../src/window.ts?no-shutdown", import.meta.url).href
+  );
+  const adapter = new InMemoryTestAdapter();
+  const window = WindowWithoutShutdown.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(adapter.opened.length, 1);
+  window.close();
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 1);
+});
+
+test("a Window opened after the shutdown tests still opens", async () => {
+  // The latch is permanent per Window module instance. The shutdown tests emit
+  // into their own doubles, so the shared double used by this default module
+  // was never told the world shut down; opening must still work.
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(adapter.opened.length, 1);
+  window.close();
+  assert.equal(adapter.closed.length, 1);
 });
