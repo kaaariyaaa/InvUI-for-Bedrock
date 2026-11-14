@@ -761,7 +761,15 @@ function isProvablyStateIndependent(element: SlotElement): boolean {
   if (isInventoryLinkElement(element)) {
     return true;
   }
-  return isItemElement(element) && element.isStateIndependent();
+  // Slot elements are duck-typed at runtime (Gui accepts any object and
+  // Window calls resolve on it), so an element can look like an Item
+  // without being one. Only an Item that proves state independence is skipped;
+  // anything else stays opaque and is re-evaluated, as before design 11.4.
+  return (
+    isItemElement(element) &&
+    typeof element.isStateIndependent === "function" &&
+    element.isStateIndependent()
+  );
 }
 
 /**
@@ -2844,6 +2852,13 @@ export class Window {
             pending = resolution.pending;
           }
         }
+      } else if (isInventoryLinkElement(element)) {
+        // Resolve synchronously: a state diff may skip this slot because the
+        // link cannot observe Window state, so its write must land before the
+        // diff yields. An async read could be invalidated by a following state
+        // change, and the next diff would then see the slot as already
+        // rendered and never write the link (design 11.4).
+        stack = element.getItem();
       } else {
         awaited = true;
         stack = await this.#resolveElement(element);
@@ -2854,7 +2869,11 @@ export class Window {
       // slot/layout change is stale: reporting it would hand the previous
       // screen's error to the handler of the new generation, which may close the
       // new screen.
-      if (!awaited || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+      // A synchronous InventoryLink read never suspends, but a reentrant
+      // notification it caused can still have replaced this slot, so it is
+      // reported only while the slot is current (the old async read path).
+      const canBeStale = awaited || isInventoryLinkElement(element);
+      if (!canBeStale || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
         this.#report(error, "itemProvider", slot);
       }
       return;

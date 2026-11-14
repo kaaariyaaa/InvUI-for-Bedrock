@@ -87,6 +87,7 @@ async function load(base) {
 
 const { Gui, Markers } = await load("../src/gui");
 const { Item, ItemBuilder } = await load("../src/item");
+const { InventoryLink, VirtualInventory } = await load("../src/inventory");
 const { StateManager } = await load("../src/state");
 const { Window } = await load("../src/window");
 
@@ -480,5 +481,351 @@ test("a tab switch skips a fixed decoration shared by both tabs", async () => {
   assert.deepEqual(writes, [1]);
   assert.equal(container.items[0].typeId, "minecraft:frame");
   assert.equal(container.items[1].typeId, "minecraft:filler");
+  window.close();
+});
+
+test("a state diff retries a fixed slot whose last write failed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const frame = Item.simple(new ItemBuilder("minecraft:frame"));
+  const gui = Gui.paged({
+    structure: ["f."],
+    ingredients: { f: frame, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  let fail = true;
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    if (slot === 0 && fail) {
+      fail = false;
+      throw new Error("setItem failed");
+    }
+    setItem(slot, item);
+  };
+
+  // The provider source changes, but writing the new stack throws, so the slot
+  // must not be skipped as "already correct" by the next diff.
+  frame.setItemProvider(new ItemBuilder("minecraft:frame2"));
+  await tick();
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:frame");
+
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:frame2");
+  window.close();
+});
+
+test("a fixed ItemStack notified in the same timing as a state change is rendered", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const source = new ItemBuilder("minecraft:icon").build();
+  const icon = Item.simple(source);
+  const gui = Gui.paged({
+    structure: ["i."],
+    ingredients: { i: icon, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  // A mutated fixed stack is not state-dependent, so it needs notifyWindows().
+  source.nameTag = "renamed";
+  icon.notifyWindows();
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].nameTag, "renamed");
+  window.close();
+});
+
+test("a state diff supersedes an in-flight async provider from an earlier diff", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = [];
+  let label = "v1";
+  const icon = Item.simple(() =>
+    label === "v2"
+      ? new Promise((resolve) =>
+          pending.push(() => resolve(stack(`minecraft:${label}`))),
+        )
+      : stack(`minecraft:${label}`),
+  );
+  const gui = Gui.paged({
+    structure: ["i."],
+    ingredients: { i: icon, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+      Item.simple(() => stack("minecraft:p3")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  // The first state diff suspends on the v2 provider.
+  label = "v2";
+  window.setState({ page: 1 });
+  await tick();
+  assert.equal(pending.length, 1);
+
+  // A second state diff invalidates that result and renders v3 synchronously.
+  label = "v3";
+  window.setState({ page: 2 });
+  await tick();
+  await tick();
+  pending[0]();
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:v3");
+  window.close();
+});
+
+test("a link that becomes visible in a diff superseded by a second state change is written", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const inventory = new VirtualInventory(2);
+  inventory.setItem(0, new ItemBuilder("minecraft:linkitem").build());
+  const link = new InventoryLink(inventory, 0);
+  const filler = Item.simple(() => stack("minecraft:filler"));
+  const tab0 = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: Item.simple(() => stack("minecraft:tab0")), b: filler },
+  });
+  const tab1 = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: link, b: filler },
+  });
+  const window = buildWindow(Gui.tab({ tabs: [tab0, tab1] }), adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:tab0");
+
+  // The link is new at slot 0. The second state change runs before the first
+  // diff's link render resumes, which used to drop the only write and leave
+  // the next diff skipping the slot as already rendered.
+  window.setState({ tab: 1 });
+  void Promise.resolve().then(() => window.setState({ selection: "x" }));
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:linkitem");
+  window.close();
+});
+
+test("a state change does not re-read an InventoryLink; its inventory notification does", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const inventory = new VirtualInventory(2);
+  inventory.setItem(0, new ItemBuilder("minecraft:a").build());
+  let reads = 0;
+  const counted = {
+    get size() {
+      return inventory.size;
+    },
+    getItem(slot) {
+      reads += 1;
+      return inventory.getItem(slot);
+    },
+    setItem(slot, item) {
+      inventory.setItem(slot, item);
+    },
+    clear() {
+      inventory.clear();
+    },
+    subscribe(listener) {
+      return inventory.subscribe(listener);
+    },
+  };
+  const link = new InventoryLink(counted, 0);
+  const gui = Gui.paged({
+    structure: ["l."],
+    ingredients: { l: link, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  reads = 0;
+
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+  assert.equal(reads, 0, "a state update must not snapshot the linked inventory");
+
+  inventory.setItem(0, new ItemBuilder("minecraft:b").build());
+  await tick();
+  await tick();
+  assert.equal(reads, 1, "the inventory notification re-reads the linked slot");
+  assert.equal(container.items[0].typeId, "minecraft:b");
+  window.close();
+});
+
+test("a state diff stays opaque for a duck-typed slot element", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let window;
+  const element = {
+    resolve: () => stack(`minecraft:page_${window.getState().page ?? 0}`),
+    subscribe: () => () => {},
+  };
+  const gui = Gui.paged({
+    structure: ["e."],
+    ingredients: { e: element, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:page_0");
+
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+
+  // Without Item.isStateIndependent() it cannot be proven fixed, so it must be
+  // re-evaluated instead of aborting the diff.
+  assert.equal(container.items[0].typeId, "minecraft:page_1");
+  window.close();
+});
+
+test("a state diff, a notification, and a content change in one timing settle on the full refresh", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const icon = Item.simple(() => stack("minecraft:icon"));
+  const gui = Gui.paged({
+    structure: ["i."],
+    ingredients: { i: icon, ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  window.setState({ page: 1 });
+  icon.notifyWindows();
+  gui.setContent([Item.simple(() => stack("minecraft:p1"))]);
+  await tick();
+  await tick();
+
+  // The content change wins with a full refresh; the clamped page is written
+  // back, so no stale page-2 content or updated icon is left behind.
+  assert.equal(container.items[0].typeId, "minecraft:icon");
+  assert.equal(container.items[1].typeId, "minecraft:p1");
+  assert.equal(window.getState().page, 0);
+  window.close();
+});
+
+test("a scroll state change moves content slots and skips the fixed frame", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const content = [];
+  for (let index = 0; index < 12; index += 1) {
+    content.push(Item.simple(() => stack(`minecraft:c${index}`)));
+  }
+  const gui = Gui.scroll({
+    structure: ["#.", "#."],
+    ingredients: {
+      "#": Item.simple(new ItemBuilder("minecraft:frame")),
+      ".": Markers.CONTENT_LIST_SLOT_VERTICAL,
+    },
+    content,
+    direction: "vertical",
+    contentHeight: 1,
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.deepEqual(
+    [
+      container.items[0]?.typeId,
+      container.items[1]?.typeId,
+      container.items[9]?.typeId,
+      container.items[10]?.typeId,
+    ],
+    ["minecraft:frame", "minecraft:c0", "minecraft:frame", "minecraft:c1"],
+  );
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+
+  window.setState({ line: 1 });
+  await tick();
+  await tick();
+
+  // Only the two content physical slots move; both frame slots stay as drawn.
+  assert.deepEqual([...writes].sort((a, b) => a - b), [1, 10]);
+  assert.deepEqual(
+    [container.items[1]?.typeId, container.items[10]?.typeId],
+    ["minecraft:c1", "minecraft:c2"],
+  );
+  window.close();
+});
+
+test("a tab switch to a narrower layout re-renders and clears the old columns", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const wide = Gui.normal({
+    structure: ["abcdef"],
+    ingredients: {
+      a: Item.simple(new ItemBuilder("minecraft:a")),
+      b: Item.simple(new ItemBuilder("minecraft:b")),
+      c: Item.simple(new ItemBuilder("minecraft:c")),
+      d: Item.simple(new ItemBuilder("minecraft:d")),
+      e: Item.simple(new ItemBuilder("minecraft:e")),
+      f: Item.simple(new ItemBuilder("minecraft:f")),
+    },
+  });
+  const narrow = Gui.normal({
+    structure: ["ghi"],
+    ingredients: {
+      g: Item.simple(new ItemBuilder("minecraft:g")),
+      h: Item.simple(new ItemBuilder("minecraft:h")),
+      i: Item.simple(new ItemBuilder("minecraft:i")),
+    },
+  });
+  const window = buildWindow(Gui.tab({ tabs: [wide, narrow] }), adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  window.setState({ tab: 1 });
+  await tick();
+  await tick();
+
+  // A width change keeps the container but remaps logical slots, so the state
+  // diff falls back to a full render that also clears the columns beyond the
+  // new width.
+  assert.deepEqual(
+    container.items.slice(0, 6).map((item) => item?.typeId),
+    ["minecraft:g", "minecraft:h", "minecraft:i", undefined, undefined, undefined],
+  );
   window.close();
 });
