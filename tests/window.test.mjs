@@ -771,6 +771,33 @@ test("Window consumes the real adapter's event hooks", async () => {
   assert.equal(closed.length, 1);
 });
 
+test("a throwing Window error handler still logs the original error", async () => {
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args);
+  try {
+    const window = Window.builder()
+      .setViewer(player)
+      .setUpperGui(Gui.normal({ structure: ["a"] }))
+      .setContainerAdapter(new InMemoryTestAdapter())
+      .addOpenHandler(() => {
+        throw new Error("open handler boom");
+      })
+      .setErrorHandler(() => {
+        throw new Error("reporter boom");
+      })
+      .build();
+
+    await window.open();
+    assert.equal(logs.length, 1);
+    assert.match(String(logs[0][1]), /reporter boom/);
+    assert.match(String(logs[0][2]), /open handler boom/);
+    window.close("PlayerClosed");
+  } finally {
+    console.error = original;
+  }
+});
+
 test("test adapter opens, renders GUI slots, and closes once", async () => {
   const adapter = new InMemoryTestAdapter();
   const diamond = Item.simple(() => stack("minecraft:diamond", 2));

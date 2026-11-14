@@ -3492,7 +3492,8 @@ export class Window {
       try {
         this.#errorHandler(error, context);
       } catch (handlerError) {
-        console.error("InvUI: Window error handler failed.", handlerError);
+        // Keep the original error too: the handler failed before handling it.
+        console.error("InvUI: Window error handler failed.", handlerError, error);
       }
       return;
     }
