@@ -94,33 +94,49 @@ function loadProbe() {
   const cursor = { item: undefined };
   let openCalls = 0;
   let closeCalls = 0;
+  const created = [];
 
-  const player = {
-    id: 'tester-id',
-    name: 'Tester',
+  const makePlayer = (id) => ({
+    id,
+    name: id,
     isValid: true,
     sendMessage: (line) => messages.push(line),
-    getComponent: (id) => (id === 'cursor_inventory' ? cursor : undefined),
+    getComponent: (componentId) => (componentId === 'cursor_inventory' ? cursor : undefined),
+  });
+  const player = makePlayer('tester-id');
+
+  // 実機の VirtualContainer は id を持たず、イベントの container 参照も
+  // create() の戻り値と同一とは限らない。title だけが作成時の安定した識別子。
+  const makeContainer = ({ size, title }) => {
+    const calls = { opened: 0, closed: 0 };
+    const container = {
+      size,
+      title,
+      calls,
+      open() {
+        openCalls += 1;
+        calls.opened += 1;
+      },
+      close() {
+        closeCalls += 1;
+        calls.closed += 1;
+        return 1;
+      },
+      getViewers() {
+        return [];
+      },
+      getItem(slot) {
+        return items[slot];
+      },
+      setItem(slot, item) {
+        items[slot] = item;
+      },
+    };
+    created.push(container);
+    return container;
   };
-  const container = {
-    size: 9,
-    open() {
-      openCalls += 1;
-    },
-    close() {
-      closeCalls += 1;
-      return 1;
-    },
-    getViewers() {
-      return [];
-    },
-    getItem(slot) {
-      return items[slot];
-    },
-    setItem(slot, item) {
-      items[slot] = item;
-    },
-  };
+  // fireItemChange / fireClose の既定値は「最初に作られた container」。
+  // 実際の create() は main.js が open 時に呼ぶので、ここでは作らない。
   const makeSignal = (bucket) => ({
     subscribe: (handler) => bucket.push(handler),
   });
@@ -136,7 +152,7 @@ function loadProbe() {
       }
     },
     world: {
-      virtualContainerManager: { create: () => container },
+      virtualContainerManager: { create: (options) => makeContainer(options) },
       beforeEvents: {
         chatSend: makeSignal(events.beforeChatSend),
       },
@@ -171,10 +187,10 @@ function loadProbe() {
     },
     fireItemChange({ slot, before, after, who = player }) {
       for (const handler of events.virtualContainerItemChange) {
-        handler({ container, slot, beforeItemStack: before, itemStack: after, player: who });
+        handler({ container: created[0], slot, beforeItemStack: before, itemStack: after, player: who });
       }
     },
-    fireClose({ who = player, reason = 'ServerClosed', contents = items, container: closedContainer = container } = {}) {
+    fireClose({ who = player, reason = 'ServerClosed', contents = items, container: closedContainer = created[0] } = {}) {
       for (const handler of events.virtualContainerClose) {
         handler({ container: closedContainer, player: who, reason, items: contents });
       }
@@ -185,15 +201,14 @@ function loadProbe() {
     items,
     cursor,
     player,
+    created,
     /** 別イベントで渡され得る、同じプレイヤーの別オブジェクト。 */
     samePlayer() {
-      return {
-        id: player.id,
-        name: player.name,
-        isValid: true,
-        sendMessage: (line) => messages.push(line),
-        getComponent: (id) => (id === 'cursor_inventory' ? cursor : undefined),
-      };
+      return makePlayer(player.id);
+    },
+    /** 同時に画面を持つ別プレイヤー。 */
+    playerWith(id) {
+      return makePlayer(id);
     },
     openCalls: () => openCalls,
     closeCalls: () => closeCalls,
@@ -369,12 +384,62 @@ test('close イベントの参照が別でも pending を解除して再 open �
   probe.chat('!lockprobe open 9 slot 40');
   // Player はイベントごとに別オブジェクトで渡され得る。id で同一人物と判定する。
   // イベントの container 参照も create() の戻り値と同一とは限らないため、
-  // 参照ではなく「そのプレイヤーの画面が閉じた」ことで pending を解除する。
-  probe.fireClose({ who: probe.samePlayer(), container: { size: 9 } });
+  // VirtualContainer が持つ安定した識別子 title で自分の container を引く。
+  probe.fireClose({ who: probe.samePlayer(), container: { size: 9, title: 'Lock probe 9 slot' } });
   probe.chat('!lockprobe open 9 slot 40');
 
   assert.equal(probe.openCalls(), 2);
   assert.doesNotMatch(probe.messages.join('\n'), /previous open still pending/);
+});
+
+test('pending が残っている間は同じ container を再 open できない', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe open 9 slot 40');
+
+  assert.equal(probe.created[0].calls.opened, 1);
+  assert.match(probe.messages.join('\n'), /previous open still pending \(1\)/);
+});
+
+test('別コンテナの close は他コンテナの pending を消さない', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe open 9 plain 40');
+  // 同じプレイヤーが slot と plain の両方で open 中。plain の close で
+  // slot の pending まで消すと、未確認の open があるまま再 open できてしまう。
+  probe.fireClose({ container: { size: 9, title: 'Lock probe 9 plain' } });
+
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe open 9 plain 40');
+
+  assert.equal(probe.created[0].calls.opened, 1, 'slot は pending のまま');
+  assert.equal(probe.created[1].calls.opened, 2, 'plain は解除済みで再 open できる');
+  assert.match(probe.messages.join('\n'), /OPEN_REJECTED size=9 mode=slot reason=previous open still pending/);
+});
+
+test('自作していない container の close は pending を消さない', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.fireClose({ container: { size: 9, title: 'Someone else pack' } });
+  probe.chat('!lockprobe open 9 slot 40');
+
+  assert.equal(probe.created[0].calls.opened, 1);
+  assert.match(probe.logs.join('\n'), /unmatchedTitle="Someone else pack"/);
+});
+
+test('複数プレイヤーの pending は互いに独立している', () => {
+  const probe = loadProbe();
+  const other = probe.playerWith('other-id');
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe open 9 plain 40', other);
+
+  probe.fireClose({ container: { size: 9, title: 'Lock probe 9 slot' } });
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe open 9 plain 40', other);
+
+  assert.equal(probe.created[0].calls.opened, 2, 'slot 側の close で slot は再 open できる');
+  assert.equal(probe.created[1].calls.opened, 1, 'plain 側の pending は残る');
+  assert.match(probe.messages.join('\n'), /OPEN_REJECTED size=9 mode=plain reason=previous open still pending/);
 });
 
 test('close コマンドは Player オブジェクトが変わっても最後に開いた key を閉じる', () => {

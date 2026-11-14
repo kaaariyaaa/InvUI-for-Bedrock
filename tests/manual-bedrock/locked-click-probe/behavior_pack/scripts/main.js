@@ -205,13 +205,16 @@ function openFor(player, size, mode, ticks) {
   const key = keyFor(size, mode);
   const generation = (openGenerations.get(key) ?? 0) + 1;
   openGenerations.set(key, generation);
-  lastKeyByPlayer.set(playerId(player), key);
-  let pending = pendingOpen.get(container);
-  if (!pending) {
-    pending = new Set();
-    pendingOpen.set(container, pending);
+  const id = playerId(player);
+  if (id !== undefined) {
+    lastKeyByPlayer.set(id, key);
+    let pending = pendingOpen.get(container);
+    if (!pending) {
+      pending = new Set();
+      pendingOpen.set(container, pending);
+    }
+    pending.add(id);
   }
-  pending.add(playerId(player));
   reply(
     player,
     `OPEN_REQUESTED size=${size} mode=${mode} ticks=${ticks} generation=${generation} (display is not guaranteed)`,
@@ -315,6 +318,36 @@ function containerSize(container) {
   }
 }
 
+function containerTitle(container) {
+  try {
+    return container.title;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolves an event container to the container this script created.
+ *
+ * A VirtualContainer exposes no id, and event payloads are not promised to
+ * hand back the same object we hold, so reference lookups (`===`, WeakMap
+ * keys) miss. `title` is set once at creation, is readonly, and is unique per
+ * key here ("Lock probe <size> <mode>"). An unmatched container must not clear
+ * anything: another pack's screen closing says nothing about our pending opens.
+ */
+function knownContainer(eventContainer) {
+  const title = containerTitle(eventContainer);
+  if (title === undefined) {
+    return undefined;
+  }
+  for (const container of containers.values()) {
+    if (containerTitle(container) === title) {
+      return container;
+    }
+  }
+  return undefined;
+}
+
 function classifyItemChange(event) {
   const before = event.beforeItemStack;
   const after = event.itemStack;
@@ -362,20 +395,28 @@ subscribe("virtualContainerItemChange", () => world.afterEvents.virtualContainer
 });
 
 subscribe("virtualContainerClose", () => world.afterEvents.virtualContainerClose, (event) => {
-  // The Player object and the container reference seen in an event are not
-  // promised to be the same objects this script holds. A player can view only
-  // one container screen at a time, so clear the closed player from every
-  // pending set instead of looking the container up by reference.
+  // Clear the pending open of the container the event names, and only that
+  // one: a pending entry is per container, and (with two players, or with one
+  // player opening a second screen while the first is unconfirmed) another
+  // container's close says nothing about it. A later open of this same
+  // container cannot be in flight yet — `canOpen` rejects it until this entry
+  // is cleared — so a close that arrives after a newer open of this container
+  // is a duplicate event, not a stale one that should clear the guard.
+  const closedContainer = knownContainer(event.container);
   const closedPlayerId = playerId(event.player);
-  for (const container of containers.values()) {
-    const pending = pendingOpen.get(container);
-    if (pending) {
-      pending.delete(closedPlayerId);
-    }
+  const pending = closedContainer ? pendingOpen.get(closedContainer) : undefined;
+  if (pending && closedPlayerId !== undefined) {
+    pending.delete(closedPlayerId);
   }
+  // Logged so a manual run can tell "our screen closed" from "another
+  // container's screen closed, pending untouched".
+  const matchNote = closedContainer
+    ? ""
+    : ` unmatchedTitle="${safeText(containerTitle(event.container) ?? "?")}"`;
   log(
     `CLOSE size=${containerSize(event.container)} reason=${event.reason} ` +
-      `player=${playerLabel(event.player)} items=${Array.isArray(event.items) ? event.items.length : "unknown"}`,
+      `player=${playerLabel(event.player)} items=${Array.isArray(event.items) ? event.items.length : "unknown"}` +
+      matchNote,
   );
 });
 
