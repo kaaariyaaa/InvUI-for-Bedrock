@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 // that the real adapter never creates a container for a rejected open.
 const mockSource = `
 export const createdContainers = [];
-const closeCallbacks = new Set();
-const itemChangeCallbacks = new Set();
+const closeCallbacks = new Map();
+const itemChangeCallbacks = new Map();
 const chatSendCallbacks = new Set();
 const playerLeaveCallbacks = new Set();
 const entityDieCallbacks = new Set();
@@ -44,12 +44,25 @@ export function emitPlayerGameModeChange(player, toGameMode) {
   }
 }
 
+// The mock models the engine's beta containers subscription filter with
+// event.filterContainer (the underlying container identity, which can differ
+// from the event.container object handed to the callback). A subscription
+// without the option sees every event.
+function matchesFilter(options, event) {
+  if (!options || !options.containers) return true;
+  return options.containers.includes(event.filterContainer ?? event.container);
+}
+
 export function emitVirtualContainerClose(event) {
-  for (const callback of [...closeCallbacks]) callback(event);
+  for (const [callback, options] of [...closeCallbacks]) {
+    if (matchesFilter(options, event)) callback(event);
+  }
 }
 
 export function emitVirtualContainerItemChange(event) {
-  for (const callback of [...itemChangeCallbacks]) callback(event);
+  for (const [callback, options] of [...itemChangeCallbacks]) {
+    if (matchesFilter(options, event)) callback(event);
+  }
 }
 
 export function emitChatSend(message, sender) {
@@ -174,8 +187,8 @@ export const world = {
       },
     },
     virtualContainerClose: {
-      subscribe(callback) {
-        closeCallbacks.add(callback);
+      subscribe(callback, options) {
+        closeCallbacks.set(callback, options);
         return callback;
       },
       unsubscribe(callback) {
@@ -183,8 +196,8 @@ export const world = {
       },
     },
     virtualContainerItemChange: {
-      subscribe(callback) {
-        itemChangeCallbacks.add(callback);
+      subscribe(callback, options) {
+        itemChangeCallbacks.set(callback, options);
         return callback;
       },
       unsubscribe(callback) {
@@ -769,6 +782,251 @@ test("Window consumes the real adapter's event hooks", async () => {
   assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
   assert.equal(errors[0].context.slot, 0);
   assert.equal(closed.length, 1);
+});
+
+test("a filtered subscription receives only the container it names", () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const first = adapter.createContainer({ size: 9 });
+  const second = adapter.createContainer({ size: 27 });
+  const events = [];
+
+  const unsubscribe = adapter.subscribeClose(
+    (event) => events.push(event.reason),
+    first,
+  );
+  emitVirtualContainerClose({ container: second, player, reason: "PlayerDied" });
+  emitVirtualContainerClose({ container: first, player, reason: "PlayerClosed" });
+  // The engine filters on its own identity; the callback may still receive a
+  // different wrapper object.
+  emitVirtualContainerClose({
+    container: { size: 9 },
+    filterContainer: first,
+    player,
+    reason: "ServerClosed",
+  });
+  assert.deepEqual(events, ["PlayerClosed", "ServerClosed"]);
+
+  unsubscribe();
+  emitVirtualContainerClose({ container: first, player, reason: "UserBusy" });
+  assert.deepEqual(events, ["PlayerClosed", "ServerClosed"]);
+});
+
+test("a filtered adapter's Window resolves a close event by subscription, not by reference", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = window.container;
+  emitVirtualContainerClose({
+    container: { size: container.size },
+    filterContainer: container,
+    player,
+    reason: "PlayerClosed",
+  });
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("a filtered adapter's Window still fails closed on a wrapper itemChange", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const closed = [];
+  adapter.openContainer = () => {};
+  adapter.closeContainer = (container, viewer) => closed.push({ container, viewer });
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = window.container;
+  emitVirtualContainerItemChange({
+    container: { size: container.size },
+    filterContainer: container,
+    player,
+    slot: 3,
+  });
+
+  assert.equal(window.status, "closed");
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.equal(errors[0].context.slot, 3);
+  assert.deepEqual(closed, [{ container, viewer: player }]);
+});
+
+test("a filtered adapter keeps the retiring container attributable during a regeneration", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const opened = [];
+  const closed = [];
+  adapter.openContainer = (container, viewer) => opened.push({ container, viewer });
+  adapter.closeContainer = (container, viewer) => closed.push({ container, viewer });
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const item = Item.simple(() =>
+    async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:item"),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = window.container;
+
+  async = true;
+  const changing = window.setTitle("New title");
+  await tick();
+  assert.equal(pending.length, 1);
+  assert.notEqual(window.container, first, "the replacement container exists");
+
+  emitVirtualContainerClose({
+    container: { size: first.size },
+    filterContainer: first,
+    player,
+    reason: "PlayerClosed",
+  });
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"], "the player's close is not lost");
+  assert.deepEqual(opened.map((entry) => entry.container), [first]);
+
+  pending[0](stack("minecraft:item"));
+  await changing;
+  assert.equal(window.status, "closed");
+});
+
+/**
+ * Wrap the event hooks of a filter-capable adapter so a test can see which
+ * container each subscription belongs to and whether it is still active.
+ */
+function trackContainerSubscriptions(adapter) {
+  const records = [];
+  for (const kind of ["subscribeClose", "subscribeItemChange"]) {
+    const subscribe = adapter[kind].bind(adapter);
+    adapter[kind] = (handler, container) => {
+      const record = { kind, container, active: true };
+      const unsubscribe = subscribe(handler, container);
+      records.push(record);
+      return () => {
+        record.active = false;
+        unsubscribe();
+      };
+    };
+  }
+  return records;
+}
+
+test("a filtered adapter releases a regenerated screen's subscriptions", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const subscriptions = trackContainerSubscriptions(adapter);
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("title 0")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const first = window.container;
+  for (let index = 1; index <= 5; index += 1) {
+    await window.setTitle(`title ${index}`);
+  }
+  assert.equal(window.status, "open");
+  const second = window.container;
+  assert.notEqual(second, first);
+
+  // Only the screen that is actually shown keeps a subscription. The closed
+  // screens would otherwise pin their container and engine filter until the
+  // Window closes (a title updated regularly would grow without bound).
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active).map((record) => record.container),
+    [second, second],
+    "one close and one itemChange subscription for the current container only",
+  );
+
+  // The retired screen's events are ignored rather than acting on the Window.
+  emitVirtualContainerClose({
+    container: { size: first.size },
+    filterContainer: first,
+    player,
+    reason: "ServerClosed",
+  });
+  assert.equal(window.status, "open");
+
+  emitVirtualContainerClose({
+    container: { size: second.size },
+    filterContainer: second,
+    player,
+    reason: "PlayerClosed",
+  });
+  assert.equal(window.status, "closed");
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active),
+    [],
+    "closing the Window releases its remaining subscriptions",
+  );
+});
+
+test("a filtered adapter releases a container replaced while opening", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const subscriptions = trackContainerSubscriptions(adapter);
+  let switched = false;
+  let window;
+  const trigger = Item.simple(() => {
+    if (!switched) {
+      // A provider writing state makes the first render pass stale; the next
+      // pass selects a tab whose layout needs a bigger container.
+      switched = true;
+      window.setState({ tab: 1 });
+    }
+    return stack("minecraft:trigger");
+  });
+  const tab0 = Gui.normal({ structure: ["a"], ingredients: { a: trigger } });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:tab1")) },
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(window.container.size, 27);
+  assert.equal(subscriptions.length, 4, "both containers were subscribed");
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active).map((record) => record.container),
+    [window.container, window.container],
+    "the never-shown container's subscriptions were released",
+  );
+  assert.ok(
+    subscriptions
+      .filter((record) => record.container.size === 9)
+      .every((record) => !record.active),
+  );
+  window.close();
 });
 
 test("a throwing Window error handler still logs the original error", async () => {
