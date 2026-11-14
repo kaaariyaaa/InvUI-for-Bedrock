@@ -1550,6 +1550,17 @@ export class Window {
         return;
       }
       this.#status = "open";
+      // The render loop above had already finished when the open started
+      // retrying, so a state or GUI change during the retry only set
+      // `#refreshPending` and nothing consumes it any more. Without this pass
+      // the Window would resolve `open()` with the screen showing the state
+      // from before the change until some later notification happens to
+      // refresh it. The normal refresh also regenerates the container when the
+      // change altered its size; it retries PreviousScreenClosing itself.
+      if (this.#refreshPending) {
+        this.#refreshPending = false;
+        this.#scheduleRefresh();
+      }
       // A new open cycle is a new input session: a notification naming the
       // previous session (or a previous script reload's `window-N`) must fail.
       this.#inputSessionId = createInputSessionId();

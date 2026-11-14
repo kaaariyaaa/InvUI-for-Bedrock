@@ -5011,6 +5011,69 @@ test("a close during a retried open does not tear down the newer reopen", async 
   window.close("PlayerClosed");
 });
 
+test("a state change during a retried open is rendered instead of leaving it stale", async () => {
+  // The render loop that applies changes made while opening has already
+  // finished when the open starts retrying PreviousScreenClosing. A state
+  // change in that window must still reach the screen: the opened container
+  // would otherwise show the previous state (here: the wrong tab, and the old
+  // container size) until some later notification happened to refresh it.
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const gui = Gui.tab({
+    tabs: [
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:one")) },
+      }),
+      Gui.normal({
+        structure: ["a", "a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:two")) },
+      }),
+    ],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.close("PlayerClosed");
+
+  const openContainer = adapter.openContainer.bind(adapter);
+  let attempts = 0;
+  adapter.openContainer = (container, viewer) => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw previousScreenClosingError();
+    }
+    openContainer(container, viewer);
+  };
+
+  const reopening = window.open();
+  await tick();
+  // The open is still waiting for the previous screen to finish closing.
+  window.setState({ tab: 1 });
+  await settleRetry(() => window.status === "open");
+  await reopening;
+  for (let i = 0; i < 4; i += 1) {
+    for (const callback of scheduledRuns.splice(0)) callback();
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.ok(attempts >= 2, "the first open attempt was retried");
+  assert.equal(window.container.size, 18, "the size change is applied");
+  assert.equal(
+    adapter.containers.at(-1).items[0].typeId,
+    "minecraft:two",
+    "the tab change is rendered",
+  );
+  assert.deepEqual(errors, []);
+  window.close("PlayerClosed");
+});
+
 test("a non-PreviousScreenClosing error during a retry still propagates", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
