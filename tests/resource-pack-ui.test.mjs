@@ -29,7 +29,8 @@ const readText = (file) => fs.readFileSync(file, "utf8");
 const DEFS_PATH = path.join(uiDir, "invui_controls.json");
 const MODS_PATH = path.join(uiDir, "invui_controls_data_driven.json");
 const UI_DEFS_PATH = path.join(uiDir, "_ui_defs.json");
-const STATIC_EXAMPLE = "!invui:window-1:0:1";
+const STATIC_EXAMPLE = "!invui:<session-id>:<slot>:<sequence>";
+const SESSION_GETTER = "Window._inputSessionId";
 
 test("the manual payload probe stays opt-in and out of the default connection", () => {
   const uiDefs = readJson(UI_DEFS_PATH).ui_defs;
@@ -59,7 +60,9 @@ test("the text input reuses only the evidenced chat-screen identity", () => {
   assert.equal(textInput.always_listening, true);
   assert.equal(textInput.max_length, 64);
   assert.equal(textInput.$focus_id, "invui_controls_probe_focus_id");
-  assert.match(textInput.$place_holder_text, /^!invui:window-1:\d+:\d+$/);
+  // The notification names the per-open session id, not `window-N`. The probe
+  // cannot resolve it, so the example stays a placeholder a player replaces.
+  assert.equal(textInput.$place_holder_text, STATIC_EXAMPLE);
 
   // No invented content injection: the edit box content is supplied by the
   // chat screen's hardcoded binding, not by JSON UI.
@@ -83,7 +86,7 @@ test("the text input reuses only the evidenced chat-screen identity", () => {
   assert.ok(rootText.includes("invui_controls_probe_text_input"), "root panel must reference the text input");
   assert.ok(
     Object.keys(root).length > 0 && JSON.stringify(root.controls).includes(STATIC_EXAMPLE),
-    "root must show the fixed example payload",
+    "root must show the placeholder payload",
   );
   assert.match(rootText, /manual typing only/i);
   assert.match(rootText, /No automatic payload/i);
@@ -177,6 +180,9 @@ test("README documents the static fallback, its limits, and the sample evidence"
     "自動生成できない",
     "使い捨てワールド",
     "偽装",
+    SESSION_GETTER,
+    "100 ms",
+    "rate-limited",
   ]) {
     assert.ok(packReadme.includes(phrase), `resource_pack/README.md must mention ${phrase}`);
   }
@@ -191,6 +197,8 @@ test("README documents the static fallback, its limits, and the sample evidence"
   const rootReadme = readText(rootReadmePath);
   assert.ok(rootReadme.includes(STATIC_EXAMPLE), "README.md must show the static payload example");
   assert.ok(rootReadme.includes("オプトイン"), "README.md must state that the manual probe is opt-in");
+  assert.ok(rootReadme.includes(SESSION_GETTER), "README.md must say the session id comes from the public getter");
+  assert.ok(rootReadme.includes("100 ms"), "README.md must document the default 100 ms rate limit");
   assert.ok(
     rootReadme.includes("自動生成は実装していません") || rootReadme.includes("自動生成は未実装"),
     "README.md must keep the automatic payload generation marked as unimplemented",

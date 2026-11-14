@@ -21,9 +21,12 @@
  * single `world.beforeEvents.chatSend` subscription and registers the open
  * Window for its viewer. `Window.close()` and every layout page/line/tab change
  * invalidate the bridge generation, so a queued notification can never click a
- * closed, reopened, or replaced screen. Nothing is installed when the game API
- * (or a test double) omits `beforeEvents.chatSend` or `system.run`; the Window
- * still works and chat input fails closed.
+ * closed, reopened, or replaced screen. Every successful `open()` also mints a
+ * new `_inputSessionId`: the chat notification must name the current open, so a
+ * delayed line from an earlier open (or from before a script reload, when
+ * `Window.id` restarts at `window-1`) cannot match a new screen. Nothing is
+ * installed when the game API (or a test double) omits `beforeEvents.chatSend`
+ * or `system.run`; the Window still works and chat input fails closed.
  *
  * The notification is a player-typed chat line. Every field except the sender
  * id is attacker controlled and can be typed by hand, so the bridge's checks
@@ -711,6 +714,21 @@ export class WindowBuilder {
 }
 
 let nextWindowId = 1;
+let nextInputSessionId = 1;
+
+/**
+ * Mints the input session id of one open cycle. `Window.id` cannot be used:
+ * after a script reload it starts at `window-1` again, so a delayed
+ * notification from the previous run could match. The wall clock, a
+ * process-local counter, and a random tail keep the id unique per open; the
+ * format fits the notification grammar and is not a secret or authentication.
+ */
+function createInputSessionId(): string {
+  const time = Date.now().toString(36);
+  const counter = (nextInputSessionId++).toString(36);
+  const random = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return `session-${time}-${counter}-${random}`;
+}
 
 export class Window {
   readonly id = `window-${nextWindowId++}`;
@@ -720,6 +738,8 @@ export class Window {
   readonly lowerGui: Gui | undefined;
 
   #status: WindowStatus = "created";
+  /** Per-open chat input session id; see `_inputSessionId`. */
+  #inputSessionId: string | undefined;
   #stateScope: StateScope;
   #stateKey: string | undefined;
   #stateLifetime: StateLifetime;
@@ -850,6 +870,17 @@ export class Window {
     });
   }
 
+  /**
+   * Internal: identifies the current open cycle to the chat input bridge.
+   * Changes on every successful `open()`. `Window.id` stays the public,
+   * stable `window-N` identity and is deliberately not used for this: it is
+   * reused across script reloads, where a delayed notification could match.
+   * Not part of the exported API; no UI payload is generated yet.
+   */
+  get _inputSessionId(): string | undefined {
+    return this.#inputSessionId;
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -967,6 +998,9 @@ export class Window {
         return;
       }
       this.#status = "open";
+      // A new open cycle is a new input session: a notification naming the
+      // previous session (or a previous script reload's `window-N`) must fail.
+      this.#inputSessionId = createInputSessionId();
       // Register before open handlers run: a handler may immediately render a
       // button the player can click. Registration also installs the single
       // chatSend subscription on the first successful open.

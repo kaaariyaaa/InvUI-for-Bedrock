@@ -36,6 +36,13 @@
  * owns only the game-event wiring, the per-sender Window lookup, and the
  * Window open-cycle generation counter.
  *
+ * Defaults: the rate limit is enabled with `DEFAULT_MIN_INTERVAL_MS` and a
+ * `Date.now()` clock, because a disabled limit lets one player flood clicks.
+ * The session id is the Window's per-open `_inputSessionId` when present, not
+ * `Window.id`: `window-N` is reused after a script reload, so a delayed
+ * notification from an earlier open could otherwise match a new screen. This
+ * is still consistency checking, not authentication.
+ *
  * Generation gap: `Window` does not expose its private layout generation, so
  * this bridge's counter knows only open cycles it observed or was told about.
  * `Window.handleClick()` re-validates slot, page/tab/line, element identity,
@@ -67,9 +74,26 @@ const ALL_BUTTON: readonly InputSlotMode[] = Object.freeze(
   Array.from({ length: 54 }, () => "button" as const),
 );
 
-/** The public shape of `Window` this bridge depends on. */
+/**
+ * Default minimum gap between accepted notifications (design 10.5 only says
+ * repeats must be limited). 100 ms still allows fast human clicking while
+ * bounding a flood; callers can raise it or pass 0 to disable.
+ *
+ * ponytail: one fixed interval, no token bucket. Replace it if legitimate
+ * automated input ever needs a short burst above 10 notifications per second.
+ */
+const DEFAULT_MIN_INTERVAL_MS = 100;
+
+/** The shape of `Window` this bridge depends on. */
 export interface ChatInputWindow {
   readonly id: string;
+  /**
+   * Per-open input session id. `Window` mints a new one on every successful
+   * `open()`, so a delayed notification from a previous open (or a previous
+   * script reload) fails the session check. When absent, the bridge falls back
+   * to `id` for compatibility with caller-provided windows.
+   */
+  readonly _inputSessionId?: string;
   readonly viewer: { readonly id: string };
   readonly isOpen: boolean;
   handleClick(slot: number): Promise<boolean>;
@@ -100,9 +124,13 @@ export interface ChatInputBridgeOptions {
    * closed). When omitted, mode checking is delegated to `handleClick()`.
    */
   readonly slotModes?: (window: ChatInputWindow) => readonly InputSlotMode[];
-  /** Caller clock in ms for the repeat limit; defaults to a disabled limit. */
+  /** Caller clock in ms for the repeat limit; defaults to `Date.now()`. */
   readonly now?: () => number;
-  /** Minimum gap between accepted notifications. Defaults to 0 (disabled). */
+  /**
+   * Minimum gap between accepted notifications. Defaults to
+   * `DEFAULT_MIN_INTERVAL_MS` (100); 0 disables the interval but keeps the
+   * clock checks.
+   */
   readonly minIntervalMs?: number;
   /** Candidates waiting to start; forwarded to `createInputAcceptor`. */
   readonly maxQueue?: number;
@@ -171,8 +199,13 @@ function readIsOpen(window: ChatInputWindow): boolean {
   }
 }
 
-function readWindowId(window: ChatInputWindow): string | null {
+function readSessionId(window: ChatInputWindow): string | null {
   try {
+    const sessionId = window._inputSessionId;
+    if (typeof sessionId === "string" && sessionId.length > 0) {
+      return sessionId;
+    }
+    // Compatibility: a caller-provided window that has no per-open id yet.
     return typeof window.id === "string" ? window.id : null;
   } catch {
     return null;
@@ -219,8 +252,14 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
   ) {
     throw new RangeError("InvUI: maxQueue must be a positive safe integer.");
   }
-  const now = options.now ?? (() => 0);
-  const minIntervalMs = options.minIntervalMs ?? 0;
+  if (
+    options.minIntervalMs !== undefined &&
+    (!Number.isSafeInteger(options.minIntervalMs) || options.minIntervalMs < 0)
+  ) {
+    throw new RangeError("InvUI: minIntervalMs must be a non-negative safe integer.");
+  }
+  const now = options.now ?? (() => Date.now());
+  const minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
 
   const states = new WeakMap<ChatInputWindow, WindowBridgeState>();
 
@@ -252,7 +291,7 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
 
   function snapshot(window: ChatInputWindow, state: WindowBridgeState): InputAcceptorSnapshot | null {
     const ownerId = readViewerId(window);
-    const sessionId = readWindowId(window);
+    const sessionId = readSessionId(window);
     if (ownerId === null || sessionId === null) {
       return null;
     }

@@ -29,7 +29,7 @@
           "anchor_to": "top_left",
           "offset": [4, 52],
           "size": ["default", "default"],
-          "text": "First Window example (adjust slot): !invui:window-1:0:1",
+          "text": "Typed payload (replace session-id, slot, sequence): !invui:<session-id>:<slot>:<sequence>",
           "color": [0.7, 0.7, 0.7, 1],
           "shadow": false
         }
@@ -61,7 +61,7 @@
     "$focus_id": "invui_controls_probe_focus_id",
     "$text_box_name": "#message_text_box",
     "$text_edit_box_content_binding_name": "#message_text_box_content",
-    "$place_holder_text": "!invui:window-1:0:1"
+    "$place_holder_text": "!invui:<session-id>:<slot>:<sequence>"
   },
 
   "invui_controls_probe_send_button": {

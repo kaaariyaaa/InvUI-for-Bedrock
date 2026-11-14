@@ -67,6 +67,8 @@ function makeBridge(windows, options = {}) {
   const bridge = createChatInputBridge({
     windows: () => windows,
     now: () => 1000,
+    // Most tests exercise routing/sequence logic, not the default repeat limit.
+    minIntervalMs: 0,
     onRejected: (rejection) => rejections.push(rejection),
     ...options,
   });
@@ -407,6 +409,58 @@ test("applies the caller-injected repeat limit", async () => {
   now = 1200;
   assert.equal((await bridge.dispatch("!invui:window-1:7:3", "player-1")).ok, true);
   assert.deepEqual(window.clicks, [7, 7]);
+});
+
+test("enables the repeat limit by default", async () => {
+  const window = makeWindow();
+  // Fix the clock only; the interval must come from the bridge default.
+  const bridge = createChatInputBridge({ windows: () => [window], now: () => 1000 });
+
+  assert.equal((await bridge.dispatch("!invui:window-1:7:1", "player-1")).ok, true);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:2", "player-1"), {
+    ok: false,
+    reason: "rate-limited",
+  });
+  assert.deepEqual(window.clicks, [7]);
+});
+
+test("uses the per-open input session id and rejects the previous open's line", async () => {
+  const window = makeWindow();
+  let sessionId = "session-a";
+  Object.defineProperty(window, "_inputSessionId", {
+    get: () => sessionId,
+  });
+  const { bridge } = makeBridge([window]);
+
+  // `window-1` is the public identity, not the input session.
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
+    ok: false,
+    reason: "session-mismatch",
+  });
+  const first = await bridge.dispatch("!invui:session-a:7:1", "player-1");
+  assert.equal(first.ok, true);
+  assert.equal(first.notification.sessionId, "session-a");
+  assert.equal(first.clicked, true);
+
+  // A reopen changes only the session id; the old line must not click.
+  sessionId = "session-b";
+  assert.deepEqual(await bridge.dispatch("!invui:session-a:7:2", "player-1"), {
+    ok: false,
+    reason: "session-mismatch",
+  });
+  assert.equal((await bridge.dispatch("!invui:session-b:7:2", "player-1")).clicked, true);
+  assert.deepEqual(window.clicks, [7, 7]);
+});
+
+test("rejects an invalid repeat-limit interval at construction", () => {
+  assert.throws(
+    () => createChatInputBridge({ windows: () => [], minIntervalMs: -1 }),
+    RangeError,
+  );
+  assert.throws(
+    () => createChatInputBridge({ windows: () => [], minIntervalMs: 1.5 }),
+    RangeError,
+  );
 });
 
 test("reports a discarded click and a thrown handler without crashing", async () => {

@@ -1200,6 +1200,15 @@ async function flushChatInput() {
   await tick();
 }
 
+/**
+ * Sends a chat notification naming the Window's current open session after the
+ * default repeat-limit gap, so tests about routing are not rate-limited.
+ */
+async function sendChat(window, slot, sequence, sender = { id: window.viewer.id }) {
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  return emitChatSend(`!invui:${window._inputSessionId}:${slot}:${sequence}`, sender);
+}
+
 /** Window with one button at logical slot 1 (structure "ab"). */
 function chatButtonWindow(viewer, clicks, options = {}) {
   const adapter = new InMemoryTestAdapter();
@@ -3890,7 +3899,7 @@ test("an open Window auto-connects chatSend to its own button slot", async () =>
   const window = chatButtonWindow(viewer, clicks);
   await window.open();
 
-  const event = emitChatSend(`!invui:${window.id}:1:1`, { id: viewer.id });
+  const event = await sendChat(window, 1, 1);
   assert.equal(event.cancel, true);
   assert.deepEqual(clicks, [], "the before-event must never click");
 
@@ -3899,7 +3908,7 @@ test("an open Window auto-connects chatSend to its own button slot", async () =>
 
   // Slot 0 has no element at all: the layout probe must report it as
   // non-button instead of letting handleClick() guess.
-  const notButton = emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  const notButton = await sendChat(window, 0, 2);
   assert.equal(notButton.cancel, true);
   await flushChatInput();
   assert.deepEqual(clicks, [1]);
@@ -3907,7 +3916,7 @@ test("an open Window auto-connects chatSend to its own button slot", async () =>
   window.close();
   // A closed Window is out of the registry: the reserved line is still hidden
   // from chat, but nothing runs.
-  const closed = emitChatSend(`!invui:${window.id}:1:3`, { id: viewer.id });
+  const closed = await sendChat(window, 1, 3);
   assert.equal(closed.cancel, true);
   await flushChatInput();
   assert.deepEqual(clicks, [1]);
@@ -3925,18 +3934,18 @@ test("chat input never routes one viewer's line into another viewer's Window", a
 
   // The line names the owner's Window but the sender is the other player:
   // the bridge looks up the sender's Window, so the session id mismatches.
-  const spoofed = emitChatSend(`!invui:${ownerWindow.id}:1:1`, { id: other.id });
+  const spoofed = await sendChat(ownerWindow, 1, 1, { id: other.id });
   assert.equal(spoofed.cancel, true);
   await flushChatInput();
   assert.deepEqual(ownerClicks, []);
   assert.deepEqual(otherClicks, []);
 
-  emitChatSend(`!invui:${otherWindow.id}:1:2`, { id: other.id });
+  await sendChat(otherWindow, 1, 2, { id: other.id });
   await flushChatInput();
   assert.deepEqual(ownerClicks, []);
   assert.deepEqual(otherClicks, [1]);
 
-  emitChatSend(`!invui:${ownerWindow.id}:1:3`, { id: viewer.id });
+  await sendChat(ownerWindow, 1, 3, { id: viewer.id });
   await flushChatInput();
   assert.deepEqual(ownerClicks, [1]);
   assert.deepEqual(otherClicks, [1]);
@@ -3951,16 +3960,23 @@ test("close and reopen start a new chat input session", async () => {
   const window = chatButtonWindow(viewer, clicks);
 
   await window.open();
-  emitChatSend(`!invui:${window.id}:1:5`, { id: viewer.id });
+  const firstSession = window._inputSessionId;
+  assert.match(firstSession, /^[A-Za-z0-9_-]{1,64}$/);
+  await sendChat(window, 1, 5);
   await flushChatInput();
   assert.deepEqual(clicks, [1]);
 
   window.close();
   await window.open();
 
+  // The public id stays stable; the input session is new per open, so a late
+  // line naming the previous session cannot match.
+  assert.match(window.id, /^window-\d+$/);
+  assert.notEqual(window._inputSessionId, firstSession);
+
   // The same sequence is valid again only because close invalidated the bridge
   // and the reopen reset the per-session sequence.
-  emitChatSend(`!invui:${window.id}:1:5`, { id: viewer.id });
+  await sendChat(window, 1, 5);
   await flushChatInput();
   assert.deepEqual(clicks, [1, 1]);
 
@@ -4000,7 +4016,7 @@ test("a page change invalidates a notification queued for the previous page", as
 
   await window.open();
 
-  emitChatSend(`!invui:${window.id}:0:1`, { id: viewer.id });
+  await sendChat(window, 0, 1);
   for (const callback of scheduledRuns.splice(0)) {
     callback();
   }
@@ -4008,7 +4024,7 @@ test("a page change invalidates a notification queued for the previous page", as
   assert.deepEqual(clicked, ["page0"]);
 
   // Queued behind the running click, still against page 0.
-  emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  await sendChat(window, 0, 2);
   for (const callback of scheduledRuns.splice(0)) {
     callback();
   }
@@ -4023,7 +4039,7 @@ test("a page change invalidates a notification queued for the previous page", as
   await tick();
   assert.deepEqual(clicked, ["page0"], "the queued page-0 click is discarded");
 
-  emitChatSend(`!invui:${window.id}:0:3`, { id: viewer.id });
+  await sendChat(window, 0, 3);
   await flushChatInput();
   assert.deepEqual(clicked, ["page0", "page1"]);
 
@@ -4062,7 +4078,7 @@ test("a slot element swap on the same page invalidates a notification queued for
 
   await window.open();
 
-  emitChatSend(`!invui:${window.id}:0:1`, { id: viewer.id });
+  await sendChat(window, 0, 1);
   for (const callback of scheduledRuns.splice(0)) {
     callback();
   }
@@ -4070,7 +4086,7 @@ test("a slot element swap on the same page invalidates a notification queued for
   assert.deepEqual(clicked, ["first"]);
 
   // Queued behind the running click, still against the first element.
-  emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  await sendChat(window, 0, 2);
   for (const callback of scheduledRuns.splice(0)) {
     callback();
   }
@@ -4086,7 +4102,7 @@ test("a slot element swap on the same page invalidates a notification queued for
   await tick();
   assert.deepEqual(clicked, ["first"], "the queued click must not hit the new element");
 
-  emitChatSend(`!invui:${window.id}:0:3`, { id: viewer.id });
+  await sendChat(window, 0, 3);
   await flushChatInput();
   assert.deepEqual(clicked, ["first", "second"]);
 
