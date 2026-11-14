@@ -185,10 +185,12 @@ test("a state update discards an in-flight async provider result for an unchange
   assert.equal(container.items[0].typeId, "minecraft:initial");
   assert.equal(container.items[1].typeId, "minecraft:page_1");
 
-  // Start an async provider call that reads the pre-change state.
+  // Start an async provider call that reads the pre-change state. The slot
+  // notification is batched, so the provider starts on the next timing.
   iconLabel = "before";
   mode = "pending";
   icon.notifyWindows();
+  await tick();
   assert.equal(pending.length, 1);
 
   // Change state so the icon's result should become "after"; the content slot
@@ -251,5 +253,36 @@ test("an Item notification during a state refresh is delivered to its new slot",
     "minecraft:after",
     "notification lost when the subscription moved to the new slot",
   );
+  window.close();
+});
+
+test("multiple Item notifications in one timing render the slot once", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let label = "first";
+  let calls = 0;
+  const icon = Item.simple(() => {
+    calls += 1;
+    return stack(`minecraft:${label}`);
+  });
+  const window = buildWindow(
+    Gui.normal({ structure: ["a"], ingredients: { a: icon } }),
+    adapter,
+  );
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  // Three notifications in the same timing: the last value is rendered once
+  // (design 11.2 step 3), not once per notification.
+  calls = 0;
+  icon.notifyWindows();
+  label = "second";
+  icon.notifyWindows();
+  label = "third";
+  icon.notifyWindows();
+  assert.equal(calls, 0, "the notifications are batched");
+  await tick();
+  assert.equal(calls, 1);
+  assert.equal(container.items[0].typeId, "minecraft:third");
   window.close();
 });

@@ -80,7 +80,9 @@ npx tsc -p tsconfig.examples-check.tmp.json
 - 画面が開いた状態では、表示専用アイテムをプレイヤーが取り出せます（実機未検証）。取り出した後に `refresh()`（状態更新や購読による再描画）が走ると、同じアイテムが `setItem()` で再び書き込まれるため、複製が起こり得ます。逆にプレイヤーが入れたアイテムが上書きされて消失し得ます。
 - 既定では `window.open()` した Window が `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流します（Node.js テスト済み・実機未検証）。ただし UI 側がその行を生成する実装はなく、行は手入力で偽装でき、入力抑制・アイテム保護もありません。ボタン押下が通知を生むかは未検証で、この経路を安全な機能として扱わないでください。
 - 退出時は、最初の `open()` で購読した `world.afterEvents.playerLeave` が退出したプレイヤーの Window（`opening` / `open`）を `PlayerLeft` で close します（Node.js テスト済み・実機未検証）。自動再オープンはしません。
-- 死亡時も、同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で close します（Node.js テスト済み・実機未検証）。プレイヤー以外や他プレイヤーの死亡は無視し、アダプタには close を要求しません。自動再オープンはしません。shutdown・スクリプト再読み込み時の後始末は未実装です。
+- 死亡時も、同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で close します（Node.js テスト済み・実機未検証）。プレイヤー以外や他プレイヤーの死亡は無視し、アダプタには close を要求しません。自動再オープンはしません。
+- ディメンション移動時は同じ `open()` で購読した `world.afterEvents.playerDimensionChange` が対象プレイヤーの Window を `ServerClosed` で、スペクテイター切替時は `world.afterEvents.playerGameModeChange` が `toGameMode === "Spectator"` のときだけ `PlayerSpectating` で close します（Node.js テスト済み・実機未検証）。どちらもプレイヤーが有効なのでアダプタにも close を要求し、自動再オープンはしません。
+- shutdown 時は、最初の `open()` で購読した `system.beforeEvents.shutdown` が `opening` / `open` の全 Window を `ServerClosed` で close します（Node.js テスト済み・実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面とアダプタ購読の破棄はエンジンに任せ、ローカル資源だけを解放します。close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）も同じ restricted なコールバック内で実行され、close ハンドラーは 1 回だけ呼ばれます。そこで `open()` しても画面は開かず `closed` のままで、shutdown 後の `open()` はモジュールの生存期間中ずっと抑止されます。2 回目の shutdown は何もしません。shutdown API がない環境では購読せず、Window は通常どおり動きます。スクリプト再読み込み時の後始末は未対応です。
 
 ## 読み方
 

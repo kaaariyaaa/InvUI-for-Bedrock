@@ -5,7 +5,9 @@
  * 目的:
  * - 既定の init がどのファイルも書き換えないこと（読み取り専用）
  * - --install-resource-pack 明示時だけ ui/invui.json と試験的接続 2 ファイルを追加すること
- * - 既存の ui/_ui_defs.json を自動変更せず、登録は手動だと表示すること
+ * - 既存の ui/_ui_defs.json を既定では自動変更せず、登録は手動だと表示すること
+ * - --register-ui-defs 明示時だけ、既存 _ui_defs.json へバックアップ付きで追記し、
+ *   競合・登録失敗時は追記もテンプレート追加も残さないこと
  * - 既存ファイルを上書きせず、競合時は差分を出して中断すること
  * - 失敗時に部分適用を残さないこと
  * - 未検証の隔離プローブであり、置くだけでは有効にならないと表示すること
@@ -30,7 +32,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { generateResourcePack, placeFileWithoutOverwrite } from '../../bin/cli.js';
+import { applyTemplate, generateResourcePack, placeFileWithoutOverwrite } from '../../bin/cli.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.resolve(here, '..', '..', 'bin', 'cli.js');
@@ -158,6 +160,7 @@ test('--help は beta・未検証・明示インストールの注意を表示�
   assert.match(result.stdout, /VirtualContainer/);
   assert.match(result.stdout, /未検証/);
   assert.match(result.stdout, /--install-resource-pack/);
+  assert.match(result.stdout, /--register-ui-defs/);
   assert.match(result.stdout, /generate-resource-pack/);
   assert.match(result.stdout, /--output/);
   assert.match(result.stdout, /既定では.*書き込みません/);
@@ -1004,5 +1007,475 @@ test(
       fs.writeFileSync = originalWriteFile;
       fs.rmSync(root, { recursive: true, force: true });
     }
+  },
+);
+
+test('--register-ui-defs は --install-resource-pack なしでは拒否する', () => {
+  withFixture(({ resourcePack }) => {
+    const before = snapshot(resourcePack);
+    const result = runCli(['init', '--resource-pack', resourcePack, '--register-ui-defs']);
+
+    assert.equal(result.status, 1);
+    assert.match(result.both, /--install-resource-pack/);
+    assert.match(result.both, /併用/);
+    assert.deepEqual(snapshot(resourcePack), before);
+  });
+});
+
+test('--register-ui-defs は既存 _ui_defs.json へバックアップ付きで不足分だけ追記する', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const userDefs = `${JSON.stringify({ ui_defs: ['ui/user_screen.json'] }, null, 2)}\n`;
+    fs.writeFileSync(uiDefsPath, userDefs);
+
+    const result = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--register-ui-defs',
+      '--json',
+    ]);
+
+    assert.equal(result.status, 0, result.both);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.resourcePackInstall.status, 'installed');
+    const uiDefs = report.resourcePackInstall.uiDefs;
+    assert.equal(uiDefs.action, 'registered');
+    assert.deepEqual(
+      uiDefs.added,
+      installedFiles.map(([relativePath]) => relativePath),
+    );
+    assert.deepEqual(uiDefs.missing, []);
+    assert.equal(typeof uiDefs.backup, 'string');
+    assert.equal(fs.readFileSync(uiDefs.backup, 'utf8'), userDefs);
+    assert.ok(
+      report.resourcePackInstall.restore.some(
+        (line) => line.startsWith('cp ') && line.includes('_ui_defs.json'),
+      ),
+    );
+
+    const registered = JSON.parse(fs.readFileSync(uiDefsPath, 'utf8'));
+    assert.deepEqual(registered.ui_defs, [
+      'ui/user_screen.json',
+      ...installedFiles.map(([relativePath]) => relativePath),
+    ]);
+
+    // 再実行では追記もバックアップ作成もせず、既存の登録を尊重する。
+    const before = snapshot(resourcePack);
+    const rerun = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--register-ui-defs',
+      '--json',
+    ]);
+    assert.equal(rerun.status, 0, rerun.both);
+    const rerunReport = JSON.parse(rerun.stdout);
+    assert.equal(rerunReport.resourcePackInstall.status, 'already-installed');
+    assert.equal(rerunReport.resourcePackInstall.uiDefs.action, 'already-registered');
+    assert.equal(rerunReport.resourcePackInstall.uiDefs.backup, null);
+    assert.deepEqual(snapshot(resourcePack), before);
+  });
+});
+
+test('--register-ui-defs で登録済みの場合は手動登録を促さず、バックアップが無いことを表示する', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const userDefs = `${JSON.stringify({ ui_defs: ['ui/user_screen.json'] }, null, 2)}\n`;
+    fs.writeFileSync(uiDefsPath, userDefs);
+
+    const first = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack', '--register-ui-defs']);
+    assert.equal(first.status, 0, first.both);
+
+    const before = snapshot(resourcePack);
+    const backupNames = () =>
+      fs.readdirSync(path.join(resourcePack, 'ui')).filter((name) => name.includes('.invui-backup.'));
+    const backupsBefore = backupNames();
+
+    const rerun = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack', '--register-ui-defs']);
+    assert.equal(rerun.status, 0, rerun.both);
+    // registered と already-registered は別文言。二重追記・二重バックアップも案内しない。
+    assert.match(rerun.stdout, /ui\/_ui_defs\.json は登録済みのため変更していません/);
+    assert.match(rerun.stdout, /登録済みのため、追記もバックアップ作成もしていません/);
+    assert.match(rerun.stdout, /バックアップも作成していません/);
+    assert.doesNotMatch(rerun.stdout, /ui\/_ui_defs\.json へ不足分を追記しました/);
+    assert.doesNotMatch(rerun.stdout, /手動で ui_defs 配列へ追記/);
+    assert.doesNotMatch(rerun.stdout, /\.bak/);
+    assert.deepEqual(backupNames(), backupsBefore);
+    assert.deepEqual(snapshot(resourcePack), before);
+
+    const rerunJson = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--register-ui-defs',
+      '--json',
+    ]);
+    const report = JSON.parse(rerunJson.stdout);
+    assert.equal(report.resourcePackInstall.uiDefs.action, 'already-registered');
+    assert.equal(report.resourcePackInstall.uiDefs.backup, null);
+    const uiDefsEntry = report.notCreated.find((entry) => entry.path.endsWith('ui/_ui_defs.json'));
+    assert.match(uiDefsEntry.reason, /登録済みのため変更していません/);
+    assert.match(uiDefsEntry.reason, /バックアップ作成も行っていません/);
+    assert.doesNotMatch(uiDefsEntry.reason, /手動で ui_defs 配列へ追記/);
+    const step = report.manualSteps.find((text) => text.includes('ui/_ui_defs.json'));
+    assert.match(step, /登録済み/);
+    assert.match(step, /バックアップは存在しません/);
+    assert.doesNotMatch(step, /手動で追記/);
+  });
+});
+
+test('--register-ui-defs はテンプレート追加時も既登録なら手動登録を促さない', () => {
+  withFixture(({ resourcePack }) => {
+    writeJson(path.join(resourcePack, 'ui', '_ui_defs.json'), {
+      ui_defs: installedFiles.map(([relativePath]) => relativePath),
+    });
+
+    const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack', '--register-ui-defs']);
+    assert.equal(result.status, 0, result.both);
+    assert.match(result.stdout, /ui\/_ui_defs\.json は登録済みのため変更していません/);
+    assert.match(result.stdout, /登録済みのため、追記もバックアップ作成もしていません/);
+    assert.doesNotMatch(result.stdout, /手動で ui_defs 配列へ追記/);
+    assert.doesNotMatch(result.stdout, /\.bak/);
+    assert.equal(
+      fs.readdirSync(path.join(resourcePack, 'ui')).some((name) => name.includes('.invui-backup.')),
+      false,
+    );
+    for (const [relativePath] of installedFiles) {
+      assert.equal(fs.existsSync(path.join(resourcePack, relativePath)), true, relativePath);
+    }
+  });
+});
+
+test('--register-ui-defs は壊れた _ui_defs.json を競合として扱い、テンプレートも追加しない', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const broken = '{ this is not json';
+    fs.writeFileSync(uiDefsPath, broken);
+    const before = snapshot(resourcePack);
+
+    const result = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--register-ui-defs',
+    ]);
+
+    assert.equal(result.status, 1, result.both);
+    assert.match(result.stdout, /競合/);
+    assert.match(result.stdout, /ui\/_ui_defs\.json/);
+    for (const [relativePath] of installedFiles) {
+      assert.equal(fs.existsSync(path.join(resourcePack, relativePath)), false);
+    }
+    assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), broken);
+    assert.deepEqual(
+      fs.readdirSync(path.join(resourcePack, 'ui')).filter(
+        (name) => name.includes('.invui-backup.') || name.endsWith('.tmp'),
+      ),
+      [],
+    );
+    assert.deepEqual(snapshot(resourcePack), before);
+  });
+});
+
+test(
+  '--register-ui-defs の追記失敗時は追加済みテンプレートを戻す',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ resourcePack }) => {
+      const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      fs.renameSync = (from, to) => {
+        if (to === uiDefsPath) {
+          const error = new Error('simulated rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return originalRename(from, to);
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /simulated rename failure/);
+      assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), originalDefs);
+      for (const [relativePath] of installedFiles) {
+        assert.equal(fs.existsSync(path.join(resourcePack, relativePath)), false);
+      }
+      assert.deepEqual(
+        fs.readdirSync(path.join(resourcePack, 'ui')).filter(
+          (name) => name.includes('.invui-backup.') || name.endsWith('.tmp'),
+        ),
+        [],
+      );
+    });
+  },
+);
+
+test('--register-ui-defs は追記しても改行コードとインデントを変えない', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const crlfIndented = '{\r\n    "ui_defs": [\r\n        "ui/user_screen.json"\r\n    ]\r\n}\r\n';
+    fs.writeFileSync(uiDefsPath, crlfIndented);
+
+    const result = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--register-ui-defs',
+      '--json',
+    ]);
+
+    assert.equal(result.status, 0, result.both);
+    const text = fs.readFileSync(uiDefsPath, 'utf8');
+    assert.equal(/(?<!\r)\n/.test(text), false, 'CRLF のファイルへ LF を混ぜない');
+    assert.match(text, /\r\n    "ui_defs": \[\r\n {8}"ui\/user_screen\.json",/);
+    assert.deepEqual(
+      JSON.parse(text).ui_defs,
+      ['ui/user_screen.json', ...installedFiles.map(([relativePath]) => relativePath)],
+    );
+  });
+});
+
+test(
+  '--register-ui-defs は事前検査後に ui/ がシンボリックリンクへ差し替えられたらパック外へ書き込まない',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ root, resourcePack }) => {
+      const uiDir = path.join(resourcePack, 'ui');
+      const uiDefsPath = path.join(uiDir, '_ui_defs.json');
+      const outside = path.join(root, 'outside');
+      const userDefs = `${JSON.stringify({ ui_defs: ['ui/user_screen.json'] }, null, 2)}\n`;
+      fs.writeFileSync(uiDefsPath, userDefs);
+      // 同梱テンプレートと同一内容にして、追記だけが書き込みになる状態にする。
+      for (const [relativePath, , content] of installedFiles) {
+        fs.writeFileSync(path.join(resourcePack, relativePath), content);
+      }
+      // 差し替え先にも同じ内容を置き、内容比較だけでは検出できない状況にする。
+      fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(outside, '_ui_defs.json'), userDefs);
+
+      const uiReal = path.join(resourcePack, 'ui_real');
+      const originalReadFile = fs.readFileSync;
+      let swapped = false;
+      fs.readFileSync = (target, ...args) => {
+        const result = originalReadFile(target, ...args);
+        // 事前検査が _ui_defs.json を読んだ直後に差し替える（書き込み前の再確認を試す）。
+        if (!swapped && String(target) === uiDefsPath) {
+          swapped = true;
+          fs.renameSync(uiDir, uiReal);
+          fs.symlinkSync(outside, uiDir, 'dir');
+        }
+        return result;
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.readFileSync = originalReadFile;
+      }
+
+      assert.equal(swapped, true, '事前検査後の差し替えを再現できた');
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /シンボリックリンク/);
+      assert.deepEqual(fs.readdirSync(outside), ['_ui_defs.json']);
+      assert.equal(fs.readFileSync(path.join(outside, '_ui_defs.json'), 'utf8'), userDefs);
+      assert.equal(fs.readFileSync(path.join(uiReal, '_ui_defs.json'), 'utf8'), userDefs);
+    });
+  },
+);
+
+test(
+  '--register-ui-defs は rename 後に例外が出ても追記を元へ戻す',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ resourcePack }) => {
+      const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      fs.renameSync = (from, to) => {
+        const result = originalRename(from, to);
+        // rename 自体は成功し、その直後に例外が出た状況を再現する。
+        if (to === uiDefsPath) {
+          const error = new Error('simulated post-rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return result;
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /simulated post-rename failure/);
+      assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), originalDefs);
+      for (const [relativePath] of installedFiles) {
+        assert.equal(fs.existsSync(path.join(resourcePack, relativePath)), false);
+      }
+      assert.deepEqual(
+        fs.readdirSync(path.join(resourcePack, 'ui')).filter(
+          (name) => name.includes('.invui-backup.') || name.endsWith('.tmp'),
+        ),
+        [],
+      );
+    });
+  },
+);
+
+test(
+  '--register-ui-defs は追記後に別 inode の同一内容ファイルへ差し替えられたら上書きしない',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ resourcePack }) => {
+      const uiDir = path.join(resourcePack, 'ui');
+      const uiDefsPath = path.join(uiDir, '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      let appended = null;
+      let replacementInode = null;
+      fs.renameSync = (from, to) => {
+        const result = originalRename(from, to);
+        if (to === uiDefsPath) {
+          // 別プロセスが「同じ内容の別ファイル」で置き換えた状況を再現する。
+          appended = fs.readFileSync(uiDefsPath);
+          fs.unlinkSync(uiDefsPath);
+          fs.writeFileSync(uiDefsPath, appended);
+          replacementInode = fs.statSync(uiDefsPath).ino;
+          const error = new Error('simulated post-rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return result;
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /別プロセス/);
+      assert.match(result.error, /退避/);
+      assert.notEqual(replacementInode, null);
+      assert.equal(fs.statSync(uiDefsPath).ino, replacementInode, '別プロセスのファイルを置き換えない');
+      assert.deepEqual(fs.readFileSync(uiDefsPath), appended);
+      const backups = fs.readdirSync(uiDir).filter((name) => name.includes('.invui-backup.'));
+      assert.equal(backups.length, 1);
+      assert.equal(fs.readFileSync(path.join(uiDir, backups[0]), 'utf8'), originalDefs);
+    });
+  },
+);
+
+test(
+  '--register-ui-defs は追記後にシンボリックリンクへ差し替えられたらリンク先へ復元書き込みしない',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ root, resourcePack }) => {
+      const uiDir = path.join(resourcePack, 'ui');
+      const uiDefsPath = path.join(uiDir, '_ui_defs.json');
+      const outside = path.join(root, 'outside-restore');
+      const outsideDefsPath = path.join(outside, '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      let appended = null;
+      fs.renameSync = (from, to) => {
+        const result = originalRename(from, to);
+        if (to === uiDefsPath) {
+          // 追記後に本体をシンボリックリンクへ差し替え、リンク先にも同じ内容を置く。
+          appended = fs.readFileSync(uiDefsPath);
+          fs.mkdirSync(outside);
+          fs.writeFileSync(outsideDefsPath, appended);
+          fs.unlinkSync(uiDefsPath);
+          fs.symlinkSync(outsideDefsPath, uiDefsPath, 'file');
+          const error = new Error('simulated post-rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return result;
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /退避|戻せません/);
+      assert.equal(
+        fs.lstatSync(uiDefsPath).isSymbolicLink(),
+        true,
+        'シンボリックリンクを通常ファイルで置き換えない',
+      );
+      assert.deepEqual(
+        fs.readFileSync(outsideDefsPath),
+        appended,
+        'パック外へ復元内容を書き込まない',
+      );
+      const backups = fs.readdirSync(uiDir).filter((name) => name.includes('.invui-backup.'));
+      assert.equal(backups.length, 1);
+      assert.equal(fs.readFileSync(path.join(uiDir, backups[0]), 'utf8'), originalDefs);
+    });
+  },
+);
+
+test(
+  '--register-ui-defs は追記後に他プロセスが内容を変えたら戻さずバックアップを残す',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ resourcePack }) => {
+      const uiDir = path.join(resourcePack, 'ui');
+      const uiDefsPath = path.join(uiDir, '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      let modified = null;
+      fs.renameSync = (from, to) => {
+        const result = originalRename(from, to);
+        if (to === uiDefsPath) {
+          // 追記後に別プロセスが同じ inode へ書き込んだ状況を再現する。
+          fs.appendFileSync(uiDefsPath, ' ');
+          modified = fs.readFileSync(uiDefsPath);
+          const error = new Error('simulated post-rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return result;
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /別プロセス/);
+      assert.match(result.error, /退避/);
+      assert.deepEqual(fs.readFileSync(uiDefsPath), modified, '他プロセスの変更を上書きしない');
+      const backups = fs.readdirSync(uiDir).filter((name) => name.includes('.invui-backup.'));
+      assert.equal(backups.length, 1);
+      assert.equal(fs.readFileSync(path.join(uiDir, backups[0]), 'utf8'), originalDefs);
+    });
   },
 );

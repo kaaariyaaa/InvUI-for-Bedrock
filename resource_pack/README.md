@@ -7,6 +7,7 @@
 > - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。VirtualContainer 画面がこのパネルを使っているかも未確定です。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
 > - **透明ブロッカーは保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆う透明な `button` で、スロット系の入力を `button.invui_connect_blocked` へ付け替えるだけです。この ID を処理するスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリやホットバーは覆わず、controller・タッチ入力の遮断を保証しません**。フォーカスが下のスロットへ移る、JSON UI を経由しない操作、タッチの長押し・ドラッグなどは止まらない可能性があります。**アイテム保護・入力抑制・画面終了処理は未完成**で、ブロッカーによる遮断を保証しません。表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
 > - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく実装できません。このファイルは、chat と同じ text box 名と `button.send` を使い、`!invui:<session-id>:<slot>:<sequence>`（session-id は開いた `Window` の公開 getter `_inputSessionId` から取得）を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
+> - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**です（設計 10.3 の代替候補 `button.drop_one` → コンテナ変化）。デスクトップのスロットグリッド上に透明ボタンを重ね、通常クリックを `button.drop_one` へ付け替えます。クリックでスロットが変われば `VirtualContainerItemChangeAfterEvent` が `player` / `container` / `slot` を伴って自動で届くため、チャット文字列の手入力は不要です。ただし**1 クリックごとにアイテムが 1 個ドロップされ得る破壊的プローブ**で、**サーバー側のクリック処理は未実装**です。現在のコアは itemChange を危険として close するため、そのままではクリックとして実行されません。既定未登録・CLI 対象外・pocket 非対応で、`data_driven_container.desktop_panel` を使う全画面に影響し得ます。詳細と制約は下記の専用節を参照してください。
 > - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対応ゲーム版・パックの適用方法・読み込み順は確定していません。
 > - 他の Resource Pack との競合を検出・解消する機能はありません。他パックが同じ `invui_probe` / `invui_connect_probe` / `data_driven_container` 名前空間や同じ UUID を使っている場合も衝突し得ます。
 > - **使い捨てワールド専用。** バックアップを取り、試験後はワールドごと破棄するか、変更したファイルを元に戻してください。通常のワールドや配布物へ入れないでください。
@@ -28,8 +29,11 @@ resource_pack/
     ├── invui_connect_data_driven.json
     │                      # data_driven_container の desktop/pocket への modifications
     ├── invui_controls.json # 手動・静的ペイロード送信プローブ（オプトイン・未登録）
-    └── invui_controls_data_driven.json
-                           # そのプローブを desktop/pocket へ差し込む opt-in modifications
+    ├── invui_controls_data_driven.json
+    │                      # そのプローブを desktop/pocket へ差し込む opt-in modifications
+    ├── invui_grid_input.json # 自動コンテナ変更プローブ（オプトイン・未登録）
+    └── invui_grid_input_data_driven.json
+                           # それを desktop のスロットグリッドへ差し込む opt-in modifications
 ```
 
 ## 既定で有効な画面接続
@@ -132,6 +136,63 @@ node --test tests/resource-pack-ui.test.mjs
 
 確認できるのは、既定の `_ui_defs.json` に登録されていないこと、text input が chat と同じ 2 つの識別子だけを使っていること、初期文字・`bindings`・collection・発明した slot/session binding がないこと、ボタンが `button.send` だけを発火すること、README に制約と出典が残っていることです。実機での表示・入力・送信は確認できません。
 
+## `ui/invui_grid_input.json`（自動コンテナ変更プローブ／オプトイン・未登録）
+
+これは設計 10.3 の**代替候補**「`button.drop_one` → コンテナ変化」を、チャット通知とは別の経路として切り分けるプローブです。`ui/invui_controls.json`（手入力の chat ペイロード）の複製ではありません。文字入力も `button.send` も使わず、**クリック自体をコンテナのアイテム変化に変換**して、公式イベント [`VirtualContainerItemChangeAfterEvent`](https://github.com/MicrosoftDocs/minecraft-creator/blob/main/creator/ScriptAPI/minecraft/server/VirtualContainerItemChangeAfterEvent.md) に `player` / `container` / `slot` / 変更前後のアイテムを出させることを狙います。
+
+### 根拠（実機未検証）
+
+| 確認したこと | 実装への影響 |
+|---|---|
+| [`ui/ui_common.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/ui_common.json) の `common.container_slot_button` は `button.menu_inventory_drop` → `button.drop_one` を `pressed` で結び、`button.container_slot_hovered` も同じ `button_mappings` に置いている | `button.drop_one` と `button.container_slot_hovered` はバニラのチェスト系 UI で使われる実在の hardcoded button ID。発明した binding ではない |
+| `data_driven_container.container_grid_item` は `common.container_item` を継承し、`collection_name: "container_items"` を使う | グリッドのコレクション名はこの名前を使う。スロットは `common.container_slot_button_prototype` を継承して `collection_details` とフォーカスの binding を再利用し、`#collection_index` のような実行時 index binding は使わない |
+| `VirtualContainerItemChangeAfterEvent` は `player` / `container` / `slot` / `beforeItemStack` / `itemStack` を持つ（`@minecraft/server` 2.13.0-beta.1.26.70-preview.24 の型定義と公式ドキュメント） | 通知に session-id や sequence を埋め込まなくても、どのプレイヤーのどの slot かはイベント側で分かる、という設計判断の根拠 |
+
+一方で、**バニラは `button.drop_one` を「ドロップキー」から発火**しており、このプローブは**通常クリック（`button.menu_select` など）から同じ action を発火**します。action が入力元に依存しないか、オーバーレイしたボタンが下のコンテナ slot を正しく「hovered」として扱うかは**未検証**です。陰性なら「この画面・この版ではこの経路が成立しなかった」ことしか分かりません。
+
+### 何をするか
+
+`ui/invui_grid_input_data_driven.json` を有効にすると、`data_driven_container.desktop_panel` へ警告ラベルを `insert_front` し、`panel_top_half` の `item_grid`（`offset [7, 10]` / `size [162, "default"]`）に重なる**透明なグリッド**を `insert_back` します。
+
+- グリッドは `collection_name: "container_items"`、`maximum_grid_items: "$container_size"`、`grid_item_template: invui_grid_input_probe.invui_grid_input_slot` を使い、スロットごとに 18×18 のボタンを生成します。
+- 各ボタンは `common.container_slot_button_prototype` を継承してバニラのコレクション・フォーカス binding を再利用し、`button_mappings` だけを差し替えます。`button.menu_select` / `button.menu_ok` / `button.menu_secondary_select` / `button.controller_select` / `button.controller_secondary_select` を **`button.drop_one`** へ、加えてバニラと同じ **`button.container_slot_hovered`** へ `pressed` で結びます。
+- ホバー時だけ赤く色づきます。**赤い色づきは、下のスロットを正しく対象にできた証明ではありません。**
+- **通常クリックが 1 回通るたびに、そのスロットのアイテムが 1 個ドロップされ得ます。** 表示アイテムの保護ではありません。ドロップされたアイテムが戻らない・消える可能性があります。**必ず使い捨てのマーカーアイテムだけで試してください。**
+
+### サーバー側の制約（この変更には含まれない）
+
+このプローブが実現するのは**自動の入力「源」**です。`VirtualContainerItemChangeAfterEvent` をクリックとして `Window.handleClick()` に振り分ける処理は**実装していません**。現行コアの `minecraftVirtualContainerAdapter` はこのイベントを `WindowItemChangeDangerError` として扱い、再描画停止と `close()` 要求を行うため、**このプローブを有効にするとクリックがハンドラー実行ではなく画面 close につながり得ます**。また itemChange は、プレイヤーが普通にアイテムを動かした場合とも区別できません。クリックの証明・認証・保護にはなりません。
+
+この節の実装は、**「チャット文字列を自動生成できない」制約を迂回する別候補の UI 側を用意し、サーバー側をどう変えるべきかを実機で切り分ける**ためのものです。自動入力経路の完成ではありません。
+
+### 適用範囲と既存画面への影響
+
+- 対象は `data_driven_container.desktop_panel` / `panel_top_half` です。**VirtualContainer を識別できないため、このパネルを使う全画面（通常の data-driven コンテナを含み得る）に影響し得ます。** 画面タイトル等による限定はしていません。
+- **pocket 画面は対象外**です。`pocket_panel` のコンテナ側グリッドとプレイヤー側グリッドは同じ `pocket_half_screen` を共有しており、片方だけを根拠ある形で覆えなかったため、実装していません。
+- 既定の接続（透明ブロッカーと警告ラベル）と同じ `panel_top_half` / `desktop_panel` に差し込むため、**同時に有効化しないでください**。重なり・入力の奪い合い・ラベルの衝突が起き得ます。単独のパックで試してください。
+- 通常チェストのアイテム移動が壊れた、表示アイテムが消えた・増えた、画面が閉じた、などの異常が出たら**即時中止**してください。
+
+### オプトイン手順（既定では無効）
+
+`ui/_ui_defs.json` へは**登録していません**。CLI の導入対象でもありません。使う場合だけ、次の 2 ファイルをパックへコピーし、既定の接続 2 ファイルを `ui_defs` から外したうえで追加します。
+
+```json
+{
+  "ui_defs": [
+    "ui/invui_grid_input.json",
+    "ui/invui_grid_input_data_driven.json"
+  ]
+}
+```
+
+構造チェック（実機の代替ではありません）:
+
+```bash
+node --test tests/resource-pack-ui.test.mjs
+```
+
+確認できるのは、既定の `_ui_defs.json` に登録されていないこと、デスクトップの `panel_top_half` の `item_grid` と同じ位置・サイズ・コレクションを参照していること、通常クリックが `button.drop_one` と `button.container_slot_hovered` だけへ向くこと、`button.send`・text box・`#collection_index` などの発明した binding がないこと、README に根拠・制約・影響範囲が残っていることです。**表示・クリック・ドロップ・イベント受信・close の挙動は確認できません。**
+
 ## `experimental/connect-data-driven/`（隔離コピー・独立した実験用）
 
 以前は明示 opt-in だった接続を、現在は main の `ui/` へ組み込んで既定で有効にしています。
@@ -209,6 +270,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 3. 透明ブロッカーの範囲（desktop: `offset [7, 10]` / `size [162, "100%-24px"]`、pocket: 右半分）で、ホバー・押下時に赤く色づくか、**通常クリックが止まるか**、**ボタンや inventory slot まで押せなくなっていないか**を入力方式ごとに記録する。プレイヤー側・ホットバーはブロッカーの範囲外であり、controller・タッチ入力は未検証である。赤く色づいてもアイテムが動く場合は、上重ねでは遮断できないという結果として扱う。
 4. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。アイテム保護・画面終了処理・スクリプト側の入力処理は未実装であり、ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、`button.send` 部品からチャット送信が成立するかも未確認です。**ブロッカーがあることを保護の合格根拠にしないでください。**
 5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で `!invui:<session-id>:<slot>:<sequence>` を送って観察する。session-id は開いた `Window._inputSessionId` をスクリプトから表示して取得し、open のたびに読み直す（「session-id の取得手順」）。slot / session / sequence の自動生成はできない。既定 100 ms 間隔（10 回/秒）を超える連投は `rate-limited` で拒否される。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
+6. `ui/invui_grid_input.json` を使う場合は、既定の接続 2 ファイルを外した単独パックで、**使い捨てのマーカーアイテムだけ**をグリッドに置き、クリックごとにドロップ・スロット変化・`VirtualContainerItemChangeAfterEvent`・画面 close のどれが起きるかを記録する。`data_driven_container.desktop_panel` を使う全画面に影響し得る。pocket は対象外。通常画面への影響とアイテム消失が出た時点で中止する。**現行コアは itemChange をクリックとして扱わない**ため、このプローブ単体で `handleClick()` が走ることはない。
 
 画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
 
@@ -223,6 +285,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。
 - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id は開発者スクリプトが `Window._inputSessionId` を表示して取得します（JSON UI からは取得できません）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
+- `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**で、既定では未登録・未接続・CLI 対象外です。通常クリックを `button.drop_one` へ付け替えるため、**1 クリックごとにアイテムが 1 個ドロップされ得ます**（保護ではありません）。`button.drop_one` を通常クリックから発火させる書式と、オーバーレイが下の slot を対象にできるかは未検証です。サーバー側で itemChange をクリックとして処理する実装はなく、現行コアは itemChange を危険として close します。対象は `data_driven_container.desktop_panel` のみで、**同パネルを使う全画面に影響し得ます**。pocket は対象外です。既定の接続とは併用しないでください。
 - 既存 Resource Pack との競合をゼロにはできません。追加するファイルは最小限ですが、無影響を保証するものではありません。
 - `manifest.json` の UUID は固定のプレースホルダです。同じ内容のパックを複数入れると UUID が衝突し得ます。
 - このテンプレートは実験用であり、初期リリースの正式機能ではありません。

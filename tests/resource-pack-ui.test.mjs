@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /*
- * Structure check for the opt-in manual chat-payload probe in resource_pack/ui.
+ * Structure checks for the opt-in probes in resource_pack/ui.
  *
- * The probe only reproduces the chat screen's evidenced text box identity and
- * `button.send`, so a player can type a fixed notification by hand. It does NOT
- * generate slot/session/sequence values: official samples and the Bedrock Wiki
- * provide no JSON UI binding that writes chat text or passes UI values to a
- * script. This test locks that boundary in place.
+ * 1. The manual chat-payload probe only reproduces the chat screen's evidenced
+ *    text box identity and `button.send`, so a player can type a fixed
+ *    notification by hand. It does NOT generate slot/session/sequence values:
+ *    official samples and the Bedrock Wiki provide no JSON UI binding that
+ *    writes chat text or passes UI values to a script.
+ * 2. The automatic container-change probe remaps a normal click to the
+ *    evidenced `button.drop_one` / `button.container_slot_hovered` container
+ *    actions, so a slot change can raise VirtualContainerItemChangeAfterEvent
+ *    without any chat text. Server-side click routing is NOT implemented.
  *
- * It cannot prove that the pack loads, that the edit box accepts typing, that
- * `button.send` sends, or that the bridge receives a notification.
+ * Neither test can prove that the pack loads, that the UI appears, that a
+ * click drops an item, that the event fires, or that any click handler runs.
  */
 
 import assert from "node:assert/strict";
@@ -28,6 +32,8 @@ const readText = (file) => fs.readFileSync(file, "utf8");
 
 const DEFS_PATH = path.join(uiDir, "invui_controls.json");
 const MODS_PATH = path.join(uiDir, "invui_controls_data_driven.json");
+const GRID_DEFS_PATH = path.join(uiDir, "invui_grid_input.json");
+const GRID_MODS_PATH = path.join(uiDir, "invui_grid_input_data_driven.json");
 const UI_DEFS_PATH = path.join(uiDir, "_ui_defs.json");
 const STATIC_EXAMPLE = "!invui:<session-id>:<slot>:<sequence>";
 const SESSION_GETTER = "Window._inputSessionId";
@@ -211,5 +217,161 @@ test("the default probe still ships no text box or automatic payload", () => {
     assert.ok(!text.includes('"text_box_name"'), `${file} must not add a text box`);
     assert.ok(!text.includes(STATIC_EXAMPLE), `${file} must not pre-fill a payload`);
     assert.ok(!text.includes("#message_text_box"), `${file} must not reuse the chat text box by default`);
+  }
+});
+
+test("the automatic container-change probe stays opt-in and unregistered", () => {
+  const uiDefs = readJson(UI_DEFS_PATH).ui_defs;
+  assert.deepEqual(
+    uiDefs,
+    ["ui/invui.json", "ui/invui_connect.json", "ui/invui_connect_data_driven.json"],
+    "the automatic probe must not be registered by default: it drops items and changes the grid",
+  );
+  assert.ok(
+    !uiDefs.some((entry) => entry.includes("invui_grid_input")),
+    "ui_defs must not register the automatic grid probe",
+  );
+  assert.ok(fs.existsSync(GRID_DEFS_PATH), "missing ui/invui_grid_input.json");
+  assert.ok(fs.existsSync(GRID_MODS_PATH), "missing ui/invui_grid_input_data_driven.json");
+});
+
+test("the grid probe aligns with the evidenced desktop item grid", () => {
+  const defs = readJson(GRID_DEFS_PATH);
+  assert.equal(defs.namespace, "invui_grid_input_probe");
+
+  const root = defs.invui_grid_input_root;
+  assert.ok(root, "missing invui_grid_input_root");
+  assert.equal(root.type, "grid");
+  assert.deepEqual(root.size, [162, "default"]);
+  assert.equal(root.collection_name, "container_items");
+  assert.equal(root.maximum_grid_items, "$container_size");
+  assert.ok(
+    root.grid_item_template.endsWith("invui_grid_input_slot"),
+    "the grid must use the probe's slot template",
+  );
+
+  const mods = readJson(GRID_MODS_PATH);
+  assert.equal(mods.namespace, "data_driven_container");
+  assert.deepEqual(Object.keys(mods).sort(), ["desktop_panel", "namespace", "panel_top_half"]);
+
+  const desktop = mods.desktop_panel.modifications;
+  assert.equal(desktop.length, 1);
+  assert.equal(desktop[0].array_name, "controls");
+  assert.equal(desktop[0].operation, "insert_front");
+  const labels = desktop[0].value[0];
+  assert.ok(
+    labels["invui_grid_input_warning@invui_grid_input_probe.invui_grid_input_warning"],
+    "missing warning label",
+  );
+  assert.ok(
+    labels["invui_grid_input_note@invui_grid_input_probe.invui_grid_input_note"],
+    "missing note label",
+  );
+
+  const topHalf = mods.panel_top_half.modifications;
+  assert.equal(topHalf.length, 1);
+  assert.equal(topHalf[0].array_name, "controls");
+  assert.equal(topHalf[0].operation, "insert_back", "the transparent grid must render above the item grid");
+  const [entryName, overrides] = Object.entries(topHalf[0].value[0])[0];
+  assert.equal(entryName.split("@")[1], "invui_grid_input_probe.invui_grid_input_root");
+  assert.deepEqual(overrides, {
+    anchor_from: "top_left",
+    anchor_to: "top_left",
+    offset: [7, 10],
+  });
+});
+
+test("the grid slot maps click to evidenced container actions only", () => {
+  const defs = readJson(GRID_DEFS_PATH);
+  const slotEntry = Object.entries(defs).find(([name]) => name.startsWith("invui_grid_input_slot@"));
+  assert.ok(slotEntry, "missing invui_grid_input_slot");
+  const [slotName, slot] = slotEntry;
+  assert.equal(
+    slotName,
+    "invui_grid_input_slot@common.container_slot_button_prototype",
+    "the slot must reuse the vanilla container slot button, not re-implement its collection bindings",
+  );
+  assert.equal(slot.$item_collection_name, "container_items");
+  assert.equal(slot.$highlight_control, "invui_grid_input_probe.invui_grid_input_highlight");
+  assert.deepEqual(slot.size, [18, 18]);
+  assert.equal(slot.layer, 50);
+  assert.ok(!("bindings" in slot), "collection/focus bindings must come from the vanilla prototype, not be re-invented");
+  assert.ok(!("controls" in slot), "the slot must reuse the vanilla prototype's hover control");
+  assert.ok(defs.invui_grid_input_highlight, "missing the custom hover highlight");
+  assert.equal(defs.invui_grid_input_highlight.type, "image");
+  assert.deepEqual(defs.invui_grid_input_highlight.size, ["100%", "100%"]);
+  assert.deepEqual(slot.button_mappings, [
+    { from_button_id: "button.menu_select", to_button_id: "button.drop_one", mapping_type: "pressed" },
+    { from_button_id: "button.menu_ok", to_button_id: "button.drop_one", mapping_type: "pressed" },
+    {
+      from_button_id: "button.menu_secondary_select",
+      to_button_id: "button.drop_one",
+      mapping_type: "pressed",
+    },
+    {
+      from_button_id: "button.controller_select",
+      to_button_id: "button.drop_one",
+      mapping_type: "pressed",
+    },
+    {
+      from_button_id: "button.controller_secondary_select",
+      to_button_id: "button.drop_one",
+      mapping_type: "pressed",
+    },
+    { to_button_id: "button.container_slot_hovered", mapping_type: "pressed" },
+  ]);
+  assert.ok(!("$pressed_button_name" in slot), "the probe must not invent a custom pressed-button id");
+
+  const json = JSON.stringify(defs);
+  // `button.drop_one` and `button.container_slot_hovered` are evidenced vanilla
+  // hardcoded ids; no chat, text-box, collection-index, or session binding.
+  for (const forbidden of [
+    "button.send",
+    "text_box_name",
+    "#message_text_box",
+    "#collection_index",
+    "#slot_index",
+    "#session_id",
+    "#window_id",
+    "#sequence",
+    "#invui_",
+    "button.invui_",
+  ]) {
+    assert.ok(!json.includes(forbidden), `the grid probe must not use ${forbidden}`);
+  }
+});
+
+test("the grid probe documents evidence, limits, and impact on other screens", () => {
+  const readme = readText(packReadmePath);
+  for (const phrase of [
+    "自動コンテナ変更プローブ",
+    "button.drop_one",
+    "button.container_slot_hovered",
+    "VirtualContainerItemChangeAfterEvent",
+    "オプトイン",
+    "既定未登録",
+    "1 個ドロップ",
+    "サーバー側のクリック処理は未実装",
+    "WindowItemChangeDangerError",
+    "全画面",
+    "pocket 画面は対象外",
+    "未検証",
+    "使い捨て",
+  ]) {
+    assert.ok(readme.includes(phrase), `resource_pack/README.md must mention ${phrase}`);
+  }
+  for (const url of [
+    "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/ui_common.json",
+    "https://github.com/MicrosoftDocs/minecraft-creator/blob/main/creator/ScriptAPI/minecraft/server/VirtualContainerItemChangeAfterEvent.md",
+  ]) {
+    assert.ok(readme.includes(url), `resource_pack/README.md must cite ${url}`);
+  }
+});
+
+test("the default connection files do not reference the grid probe", () => {
+  for (const file of ["invui.json", "invui_connect.json", "invui_connect_data_driven.json"]) {
+    const text = readText(path.join(uiDir, file));
+    assert.ok(!text.includes("invui_grid_input"), `${file} must not reference the opt-in grid probe`);
+    assert.ok(!text.includes("button.drop_one"), `${file} must not remap clicks to drop_one by default`);
   }
 });

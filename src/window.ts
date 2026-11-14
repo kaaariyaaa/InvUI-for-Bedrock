@@ -53,7 +53,27 @@
  * the same close path and module-level subscription shape as `playerLeave`, and
  * the adapter is not asked to close a screen that went away with the player.
  * An environment without the event is detected separately and latches off.
- * This is NOT verified on a real device.
+ *
+ * `world.afterEvents.playerDimensionChange` closes the viewer's Window with
+ * `ServerClosed` (design 13.1) and `world.afterEvents.playerGameModeChange`
+ * closes it with `PlayerSpectating` when the new mode is `Spectator`. Both
+ * match the viewer id captured at open, ignore other players and non-spectator
+ * mode changes, and are feature-detected separately, so one missing event never
+ * disables the others. The player is still valid here, so these closes also ask
+ * the adapter to close the screen; the game usually closes it first and the
+ * duplicate request is harmless. Both are NOT verified on a real device.
+ *
+ * `system.beforeEvents.shutdown` closes every `opening`/`open` Window with
+ * `ServerClosed` before the world goes away. No close event is raised on that
+ * path, so the subscription is installed with the leave/death ones on the
+ * first `open()`. The callback runs with restricted-execution privilege: it
+ * does not call `VirtualContainer.close()`, adapter unsubscribers, or any event
+ * `unsubscribe()`. Only local resources are released (chat routing, registry
+ * entries, state handle, GUI/element subscriptions, container references); the
+ * engine drops the screens and subscriptions with the session. Close handlers
+ * still run exactly once, and an `open()` they attempt is suppressed for the
+ * rest of the module lifetime, so a shutdown cannot be followed by a new
+ * screen. A repeated shutdown event is a no-op.
  */
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
@@ -107,7 +127,8 @@ export type WindowOpenHandler = () => void;
  * A handler may close and reopen the Window, which starts a new generation:
  * the remaining handlers then belong to the generation that is already gone and
  * are not called, and an exception thrown by such a handler is not reported
- * either (the error handler could close the reopened Window).
+ * either (the error handler could close the reopened Window). During a world
+ * shutdown a reopen is suppressed: `open()` resolves without opening.
  */
 export type WindowCloseHandler = (reason: WindowCloseReason) => void;
 
@@ -444,118 +465,256 @@ function invalidateChatInputWindow(window: Window): void {
 }
 
 /**
- * Windows that are `opening` or `open` and must be closed when their viewer
- * leaves or dies, one set shared by the module so a single `playerLeave` and a
- * single `entityDie` subscription serve every Window. A Window is added when
- * `open()` starts and removed by `#teardown()`.
+ * Windows that are `opening` or `open` and must be closed when their viewer's
+ * session ends (leave, death, dimension change, spectator) or the world shuts
+ * down, one set shared by the module so each game event is subscribed once for
+ * every Window. A Window is added when `open()` starts and removed by
+ * `#teardown()`.
  */
-const leaveWindows = new Set<Window>();
-let playerLeaveSubscribed = false;
-let entityDieSubscribed = false;
-/** Latches the feature-detection failure, like the chat input bridge. */
-let playerLeaveUnavailable = false;
-let entityDieUnavailable = false;
+const lifecycleWindows = new Set<Window>();
+
+interface AfterEventSubscriptionState {
+  subscribed: boolean;
+  /** Latches the feature-detection failure, like the chat input bridge. */
+  unavailable: boolean;
+}
+
+type LifecycleEventName =
+  | "playerLeave"
+  | "entityDie"
+  | "playerDimensionChange"
+  | "playerGameModeChange";
+
+function afterEventState(): AfterEventSubscriptionState {
+  return { subscribed: false, unavailable: false };
+}
+
+const playerLeaveState = afterEventState();
+const entityDieState = afterEventState();
+const playerDimensionChangeState = afterEventState();
+const playerGameModeChangeState = afterEventState();
+const shutdownState = afterEventState();
 
 /**
- * Installs the `playerLeave` subscription on first use, or latches it off when
- * the game API is absent (older `@minecraft/server`, test doubles, or a world
- * with the event disabled). A Window still opens and closes normally then:
- * only the automatic close on leave is skipped, and neither `open()` nor
- * `close()` fails because of it.
+ * Set by the first shutdown event and never cleared: the session is ending, so
+ * every later `open()` is suppressed and every later close skips adapter/signal
+ * calls that restricted execution forbids.
  */
-function ensurePlayerLeaveSubscription(): void {
-  if (playerLeaveSubscribed || playerLeaveUnavailable) {
-    return;
-  }
-  let playerLeave: typeof world.afterEvents.playerLeave | undefined;
+let shutdownInProgress = false;
+
+/** Read a property of an event without letting an invalid entity throw. */
+function readProperty(value: unknown, key: string): unknown {
   try {
-    playerLeave = world.afterEvents?.playerLeave;
+    return (value as Record<string, unknown> | undefined)?.[key];
   } catch {
-    playerLeave = undefined;
+    return undefined;
   }
-  if (!playerLeave || typeof playerLeave.subscribe !== "function") {
-    playerLeaveUnavailable = true;
-    return;
-  }
-  try {
-    playerLeave.subscribe((event) => {
-      const playerId = event?.playerId;
-      if (typeof playerId !== "string" || playerId.length === 0) {
-        return;
-      }
-      // Snapshot: a close handler may open or close other Windows while this
-      // loop runs. Each Window re-checks its own status and generation.
-      for (const window of [...leaveWindows]) {
-        try {
-          window._onViewerLeft(playerId);
-        } catch (error) {
-          // One Window's close handler must not keep the other Windows open.
-          console.error("InvUI: closing a Window after its viewer left failed.", error);
-        }
-      }
-    });
-    playerLeaveSubscribed = true;
-  } catch (error) {
-    console.error(
-      "InvUI: playerLeave subscription could not be installed; Windows will not close automatically when a player leaves.",
-      error,
-    );
-    playerLeaveUnavailable = true;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Read `value.id`: only an id is used, so a departed entity cannot invalidate it. */
+function readId(value: unknown): string | undefined {
+  return readString(readProperty(value, "id"));
+}
+
+/**
+ * Run `close` for every tracked Window. The set is snapshotted because a close
+ * handler may open or close other Windows while this loop runs; each Window
+ * re-checks its own status, generation, and viewer id.
+ */
+function forEachLifecycleWindow(
+  close: (window: Window) => void,
+  action: string,
+): void {
+  for (const window of [...lifecycleWindows]) {
+    try {
+      close(window);
+    } catch (error) {
+      // One Window's close handler must not keep the other Windows open.
+      console.error(`InvUI: closing a Window after ${action} failed.`, error);
+    }
   }
 }
 
 /**
- * Installs the `entityDie` subscription on first use, or latches it off when the
- * game API is absent. It is separate from `playerLeave`: either signal may be
- * missing in an older API or a test double, and one must not disable the other.
- * A Window still opens and closes normally without it.
+ * Installs one `world.afterEvents` subscription on first use, or latches it off
+ * when the game API is absent (older `@minecraft/server`, test doubles, or a
+ * world with the event disabled). A Window still opens and closes normally
+ * then: only the automatic close for that signal is skipped, and neither
+ * `open()` nor `close()` fails because of it.
+ *
+ * Every signal has its own state: one missing event (or one throwing
+ * `subscribe`) must not disable the others, and failures are never retried.
+ */
+function ensureAfterEventSubscription(
+  state: AfterEventSubscriptionState,
+  name: LifecycleEventName,
+  purpose: string,
+  dispatch: (event: unknown) => void,
+): void {
+  if (state.subscribed || state.unavailable) {
+    return;
+  }
+  const signal = readProperty(world.afterEvents, name) as
+    | { subscribe?: (callback: (event: unknown) => void) => unknown }
+    | undefined;
+  if (!signal || typeof signal.subscribe !== "function") {
+    state.unavailable = true;
+    return;
+  }
+  try {
+    signal.subscribe(dispatch);
+    state.subscribed = true;
+  } catch (error) {
+    console.error(
+      `InvUI: ${name} subscription could not be installed; Windows will not close automatically ${purpose}.`,
+      error,
+    );
+    state.unavailable = true;
+  }
+}
+
+/**
+ * `playerLeave` closes the Window of the viewer that left. The event carries
+ * only a player id, captured when the open cycle registers.
+ */
+function ensurePlayerLeaveSubscription(): void {
+  ensureAfterEventSubscription(
+    playerLeaveState,
+    "playerLeave",
+    "when a player leaves",
+    (event) => {
+      const playerId = readString(readProperty(event, "playerId"));
+      if (!playerId) {
+        return;
+      }
+      forEachLifecycleWindow(
+        (window) => window._onViewerLeft(playerId),
+        "its viewer left",
+      );
+    },
+  );
+}
+
+/**
+ * `entityDie` closes the Window of its viewer. Only the dead entity's id is
+ * read, so a non-player death, another player, or an entity whose id cannot be
+ * read is ignored; the game's own `PlayerDied` close event is the fallback.
  */
 function ensureEntityDieSubscription(): void {
-  if (entityDieSubscribed || entityDieUnavailable) {
+  ensureAfterEventSubscription(
+    entityDieState,
+    "entityDie",
+    "when a player dies",
+    (event) => {
+      const entityId = readId(readProperty(event, "deadEntity"));
+      if (!entityId) {
+        return;
+      }
+      forEachLifecycleWindow(
+        (window) => window._onViewerDied(entityId),
+        "its viewer died",
+      );
+    },
+  );
+}
+
+/**
+ * `playerDimensionChange` closes the Window of the viewer that changed
+ * dimension (design 13.1). Bedrock reports the matching container close as
+ * `ServerClosed`; this explicit signal gives the Window the same cleanup even
+ * when that close event is delayed or the adapter hook is absent.
+ */
+function ensurePlayerDimensionChangeSubscription(): void {
+  ensureAfterEventSubscription(
+    playerDimensionChangeState,
+    "playerDimensionChange",
+    "when a player changes dimension",
+    (event) => {
+      const playerId = readId(readProperty(event, "player"));
+      if (!playerId) {
+        return;
+      }
+      forEachLifecycleWindow(
+        (window) => window._onViewerChangedDimension(playerId),
+        "its viewer changed dimension",
+      );
+    },
+  );
+}
+
+/** Spectator mode closes the screen (design 13.1). */
+function ensurePlayerGameModeChangeSubscription(): void {
+  ensureAfterEventSubscription(
+    playerGameModeChangeState,
+    "playerGameModeChange",
+    "when a player starts spectating",
+    (event) => {
+      // Only spectator mode closes a Window; Creative/Survival switches do not.
+      if (readString(readProperty(event, "toGameMode")) !== "Spectator") {
+        return;
+      }
+      const playerId = readId(readProperty(event, "player"));
+      if (!playerId) {
+        return;
+      }
+      forEachLifecycleWindow(
+        (window) => window._onViewerStartedSpectating(playerId),
+        "its viewer started spectating",
+      );
+    },
+  );
+}
+
+/**
+ * Installs the `system.beforeEvents.shutdown` subscription on first use, or
+ * latches it off when the API is absent. The callback runs with
+ * restricted-execution privilege, so it must not close containers or call
+ * event unsubscribers; it only tears down local state through the normal close
+ * path (flagged by `shutdownInProgress`) and notifies close handlers once.
+ */
+function ensureShutdownSubscription(): void {
+  if (shutdownState.subscribed || shutdownState.unavailable) {
     return;
   }
-  let entityDie: typeof world.afterEvents.entityDie | undefined;
+  let shutdown: typeof server.system.beforeEvents.shutdown | undefined;
   try {
-    entityDie = world.afterEvents?.entityDie;
+    shutdown = server.system?.beforeEvents?.shutdown;
   } catch {
-    entityDie = undefined;
+    shutdown = undefined;
   }
-  if (!entityDie || typeof entityDie.subscribe !== "function") {
-    entityDieUnavailable = true;
+  if (!shutdown || typeof shutdown.subscribe !== "function") {
+    shutdownState.unavailable = true;
     return;
   }
   try {
-    entityDie.subscribe((event) => {
-      // Only the id is read: the Window matches it against the id captured at
-      // open, like playerLeave, and a dead entity whose id cannot be read is
-      // skipped (the game's own PlayerDied close event still closes the Window).
-      let entityId: string | undefined;
-      try {
-        entityId = event?.deadEntity?.id;
-      } catch {
+    shutdown.subscribe(() => {
+      // A repeated delivery must not notify close handlers again.
+      if (shutdownInProgress) {
         return;
       }
-      if (typeof entityId !== "string" || entityId.length === 0) {
-        return;
-      }
-      // Snapshot: a close handler may open or close other Windows while this
-      // loop runs. Each Window re-checks its own status and generation.
-      for (const window of [...leaveWindows]) {
+      shutdownInProgress = true;
+      // Snapshot: a close handler may close other Windows or try to reopen.
+      // Each Window re-checks its status and the shutdown flag.
+      for (const window of [...lifecycleWindows]) {
         try {
-          window._onViewerDied(entityId);
+          window._onWorldShutdown();
         } catch (error) {
           // One Window's close handler must not keep the other Windows open.
-          console.error("InvUI: closing a Window after its viewer died failed.", error);
+          console.error("InvUI: closing a Window during world shutdown failed.", error);
         }
       }
     });
-    entityDieSubscribed = true;
+    shutdownState.subscribed = true;
   } catch (error) {
     console.error(
-      "InvUI: entityDie subscription could not be installed; Windows will not close automatically when a player dies.",
+      "InvUI: system.beforeEvents.shutdown subscription could not be installed; Windows will not be torn down at world shutdown.",
       error,
     );
-    entityDieUnavailable = true;
+    shutdownState.unavailable = true;
   }
 }
 
@@ -914,6 +1073,13 @@ export class Window {
    * failed write is retried on the next pass.
    */
   #writeCache: SlotWriteCache | undefined;
+  /**
+   * Structure width the current container's physical slots were last laid out
+   * with. A narrower layout in the same container (same height) leaves the
+   * columns beyond its width stale, so `#renderAll` clears them when the width
+   * shrinks. Undefined means no layout has been rendered into this container.
+   */
+  #renderedWidth: number | undefined;
   #stateHandle: StateHandle | undefined;
   /** Schema token the current state handle was acquired with. */
   #stateSchema: string | undefined;
@@ -948,8 +1114,11 @@ export class Window {
   #renderEpoch = 0;
   /** Set when state or GUI changes while `open()` is still resolving providers. */
   #refreshPending = false;
-  /** Serializes async title changes so two regenerations cannot overlap. */
-  #titleQueue: Promise<void> = Promise.resolve();
+  /**
+   * Serializes async container regenerations (title change, layout size change)
+   * so two of them cannot close a container the other is still using.
+   */
+  #regenerationQueue: Promise<void> = Promise.resolve();
   /**
    * Bumped for every `setTitle` request. A queued change that can only store
    * the title (the Window closed or reopened while it waited) is dropped when a
@@ -959,6 +1128,13 @@ export class Window {
   #titleVersion = 0;
   /** A state/GUI notification is waiting for the batched refresh microtask. */
   #fullRefreshQueued = false;
+  /**
+   * Slots whose Item/Inventory notification waits for the batched render
+   * (design 11.2 step 3). The slot's render token is already bumped when it is
+   * queued, so a provider result started before the notification is discarded
+   * even though the render itself runs in the shared microtask.
+   */
+  #pendingSlotRenders = new Set<number>();
   /** One microtask serves every notification delivered in the same timing. */
   #flushQueued = false;
   #generation = 0;
@@ -1063,6 +1239,54 @@ export class Window {
     this.#performClose("PlayerDied", false);
   }
 
+  /**
+   * Internal: close this Window because its viewer changed dimension (design
+   * 13.1). Bedrock closes the screen as `ServerClosed`, so the reason recorded
+   * here is the same; the adapter is asked to close as well because the player
+   * is still valid, which cleans up if the automatic close was missed.
+   */
+  _onViewerChangedDimension(playerId: string): void {
+    if (this.#viewerId !== playerId) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("ServerClosed", true);
+  }
+
+  /**
+   * Internal: close this Window because its viewer switched to spectator mode
+   * (design 13.1). The game closes the screen with `PlayerSpectating`; asking
+   * the adapter too is safe because the player is valid.
+   */
+  _onViewerStartedSpectating(playerId: string): void {
+    if (this.#viewerId !== playerId) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("PlayerSpectating", true);
+  }
+
+  /**
+   * Internal: close this Window because the world is shutting down.
+   *
+   * The shutdown callback runs with restricted-execution privilege, so the
+   * adapter must not be asked to close a screen and neither adapter nor event
+   * unsubscribers may be called. `#performClose` reads the module-level latch
+   * and releases only local resources; screens and subscriptions are dropped
+   * by the engine with the session. Close handlers still run exactly once so
+   * the end is observable (they run under the same privilege).
+   */
+  _onWorldShutdown(): void {
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("ServerClosed", false);
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -1088,6 +1312,17 @@ export class Window {
    * the Window, its state, or its container.
    */
   async open(): Promise<void> {
+    if (shutdownInProgress) {
+      // The session is ending. A close handler may still call open(); close
+      // the Window through the restricted path instead of creating a screen,
+      // and resolve so an un-awaited reopen cannot become an unhandled
+      // rejection. A created Window is left closed and cannot be opened later.
+      this._onWorldShutdown();
+      if (this.#status === "created") {
+        this.#status = "closed";
+      }
+      return;
+    }
     if (this.#status !== "created" && this.#status !== "closed") {
       throw new Error(`InvUI: Window ${this.id} is already ${this.#status}.`);
     }
@@ -1102,10 +1337,11 @@ export class Window {
     const generation = ++this.#generation;
 
     try {
-      // Register before the screen can be shown so a leave or death during
-      // `opening` closes this Window too. A synchronous event delivered by the
-      // subscription closes it here; open() then resolves as closed.
-      this.#registerForPlayerLeave();
+      // Register before the screen can be shown so a leave, death, dimension
+      // change, or spectator switch during `opening` closes this Window too. A
+      // synchronous event delivered by a subscription closes it here; open()
+      // then resolves as closed.
+      this.#registerForLifecycleClose();
       if (this.#status !== "opening" || generation !== this.#generation) {
         return;
       }
@@ -1136,6 +1372,7 @@ export class Window {
         // while opening) starts empty, so nothing is skipped against slots the
         // previous container owned.
         this.#writeCache = new SlotWriteCache();
+        this.#renderedWidth = undefined;
         return container;
       };
 
@@ -1219,6 +1456,7 @@ export class Window {
     // covers notifications that arrived before the call. Dropping their queued
     // counterpart keeps it from invalidating this pass's in-flight results.
     this.#fullRefreshQueued = false;
+    this.#pendingSlotRenders.clear();
     await this.#refresh();
   }
 
@@ -1259,10 +1497,10 @@ export class Window {
     // Two overlapping regenerations would each close a container the other is
     // still using, so run them in call order. Equality is checked when the turn
     // arrives, after any earlier change, so "B" then "A" settles on "A".
-    const run = this.#titleQueue.then(() =>
+    const run = this.#regenerationQueue.then(() =>
       this.#applyTitle(title, version, generation),
     );
-    this.#titleQueue = run.then(
+    this.#regenerationQueue = run.then(
       () => undefined,
       () => undefined,
     );
@@ -1293,19 +1531,31 @@ export class Window {
       }
       return;
     }
-    await this.#reopenWithTitle(title);
+    await this.#regenerateContainer(title, this.#layout, "titleChange");
   }
 
   /**
-   * Regenerate the container with a new title while the Window stays logically
-   * open. The caller (`setTitle`) has checked status, layout, and state handle.
+   * Regenerate the container while the Window stays logically open (design
+   * 8.4 / 11.4). The caller has checked status, layout, and state handle.
+   *
+   * `title` and `layout` are what the new container must show; `operation` is
+   * the error-operation name used by the caller (`titleChange`, `resize`). The
+   * new container is created and fully rendered before the old screen is
+   * closed, so a render failure leaves the old screen showing. Only after that
+   * is the old screen closed and the new one opened. Open and close handlers do
+   * not run again for this internal reopen.
    */
-  async #reopenWithTitle(title: string): Promise<void> {
+  async #regenerateContainer(
+    title: string,
+    layout: ResolvedGuiLayout,
+    operation: string,
+  ): Promise<void> {
     const generation = this.#generation;
     const previousTitle = this.#title;
     const previousContainer = this.#container as VirtualContainer;
+    const previousLayout = this.#layout as ResolvedGuiLayout;
     const previousCache = this.#writeCache;
-    const size = previousContainer.size;
+    const size = containerSizeOf(layout);
     const options: VirtualContainerOptions =
       title.length === 0 ? { size } : { size, title };
 
@@ -1313,7 +1563,7 @@ export class Window {
     try {
       nextContainer = this.#adapter.createContainer(options);
     } catch (error) {
-      this.#report(error, "titleChange");
+      this.#report(error, operation);
       throw error;
     }
 
@@ -1326,20 +1576,31 @@ export class Window {
     // handled as this Window's events until then (see #onContainerClose).
     this.#retiringContainer = previousContainer;
     this.#writeCache = new SlotWriteCache();
+    this.#renderedWidth = undefined;
     this.#title = title;
 
     try {
+      this.#applyLayout(layout);
       await this.#renderAll(generation);
     } catch (error) {
       // #renderAll normally reports per-slot failures instead of throwing. If
       // it does throw, the old screen is still showing: restore it and report
-      // the title change as not applied.
-      this.#container = previousContainer;
-      this.#retiringContainer = undefined;
-      this.#writeCache = previousCache;
-      this.#title = previousTitle;
-      this.#report(error, "titleChange");
-      this.#scheduleRefresh();
+      // the change as not applied. A close or reopen during the render owns
+      // the Window now; restoring then would resurrect a torn-down screen.
+      this.#report(error, operation);
+      if (
+        generation === this.#generation &&
+        this.#status === "open" &&
+        this.#container === nextContainer
+      ) {
+        this.#container = previousContainer;
+        this.#retiringContainer = undefined;
+        this.#writeCache = previousCache;
+        this.#renderedWidth = previousLayout.width;
+        this.#title = previousTitle;
+        this.#applyLayout(previousLayout);
+        this.#scheduleRefresh();
+      }
       throw error;
     }
 
@@ -1361,8 +1622,8 @@ export class Window {
     } catch (error) {
       // The old screen may or may not have closed. Do not open a second screen
       // on an unknown state: report, retry closing the old screen, and fail
-      // closed. The requested title stays for the next open().
-      this.#report(error, "titleChange");
+      // closed. The requested change stays for the next open().
+      this.#report(error, operation);
       if (generation === this.#generation && this.#status === "open") {
         this.#retiringContainer = previousContainer;
         this.#performClose("ServerClosed", true);
@@ -1386,7 +1647,7 @@ export class Window {
       // The old screen is already closed, so the Window cannot stay open with
       // an unknown container. `openContainer` may also have dispatched a close
       // event synchronously; #performClose is idempotent.
-      this.#report(error, "titleChange");
+      this.#report(error, operation);
       if (generation === this.#generation && this.#status === "open") {
         this.#performClose("ServerClosed", false);
       }
@@ -1508,17 +1769,13 @@ export class Window {
     }
     const current = this.#layout;
     if (
-      !current ||
-      layout.width !== current.width ||
-      layout.height !== current.height ||
+      current &&
       containerSizeOf(layout) !== this.#container.size
     ) {
-      // Recreating the screen is required for a size change (design 8.4), and
-      // that path depends on the unverified close/reopen behavior.
-      this.#report(
-        new Error("InvUI: layout size changed; reopen the Window to apply it."),
-        "refresh",
-      );
+      // The container size cannot change in place, so the Window regenerates
+      // it (design 8.4 / 11.4). A width-only change (same container size) is
+      // applied to the existing container below.
+      await this.#resizeTo();
       return;
     }
     this.#applyLayout(layout);
@@ -1531,6 +1788,76 @@ export class Window {
         this.#report(error, "refresh");
       }
     }
+  }
+
+  /**
+   * Regenerate the container for a layout whose size no longer matches the
+   * open one (design 8.4 / 11.4). Runs on the regeneration queue so it cannot
+   * race a title change, and re-resolves the current state when its turn
+   * arrives: an earlier queued change may already have settled the size.
+   *
+   * Failures keep the current screen: the error is reported with operation
+   * `resize` and the previous container stays in place.
+   */
+  async #resizeTo(): Promise<void> {
+    const generation = this.#generation;
+    const run = this.#regenerationQueue.then(async () => {
+      try {
+        if (
+          generation !== this.#generation ||
+          this.#status !== "open" ||
+          this.#renderingHalted
+        ) {
+          return;
+        }
+        const container = this.#container;
+        const handle = this.#stateHandle;
+        if (!container || !handle) {
+          return;
+        }
+        let next: ResolvedGuiLayout;
+        try {
+          next = this.upperGui.resolve(this.viewer, handle.get());
+        } catch (error) {
+          this.#report(error, "resize");
+          return;
+        }
+        if (
+          generation !== this.#generation ||
+          this.#status !== "open" ||
+          this.#container !== container
+        ) {
+          return;
+        }
+        if (containerSizeOf(next) === container.size) {
+          // The state settled back to the current size: no regeneration needed.
+          this.#applyLayout(next);
+          try {
+            await this.#renderAll(generation);
+          } catch (error) {
+            if (generation === this.#generation) {
+              this.#report(error, "refresh");
+            }
+          }
+          return;
+        }
+        try {
+          await this.#regenerateContainer(this.title, next, "resize");
+        } catch {
+          // #regenerateContainer already reported the failure and restored
+          // the previous container; a later refresh may try again.
+        }
+      } catch (error) {
+        // The queue must never produce an unhandled rejection from a refresh
+        // microtask; the Window stays usable with the current screen.
+        this.#report(error, "resize");
+      }
+    });
+    this.#regenerationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 
   /** Patch the Window's state. Subscribers (including this Window) refresh. */
@@ -1671,21 +1998,33 @@ export class Window {
     // reach the close handlers exactly once: `open()` then resolves as closed,
     // and dropping the reason here would make the close look like a no-op.
     const notifyCloseHandlers = wasVisible || this.#status === "opening";
+    // The shutdown callback runs with restricted-execution privilege, where
+    // VirtualContainer.close() and every event unsubscribe() throw. Skipping
+    // both keeps the teardown to local resources; the engine drops the screen
+    // and subscriptions with the session. The latch is permanent, so a later
+    // close() during the same shutdown takes the same path.
+    const restricted = shutdownInProgress;
     this.#status = "closing";
     const generation = ++this.#generation;
     this.#stopRendering();
 
     // Detach before touching the adapter: closeContainer may dispatch the
     // close event synchronously and must not run this path twice.
-    this.#unsubscribeFromContainerEvents();
-    // An unsubscribe failure is reported, and the error handler may have closed
-    // and reopened the Window: the rest of this close belongs to a generation
-    // that is gone, and its teardown must not destroy the reopened screen.
-    if (generation !== this.#generation) {
-      return;
+    if (restricted) {
+      // Drop the local handles without calling them; see above.
+      this.#eventUnsubscribers = [];
+    } else {
+      this.#unsubscribeFromContainerEvents();
+      // An unsubscribe failure is reported, and the error handler may have
+      // closed and reopened the Window: the rest of this close belongs to a
+      // generation that is gone, and its teardown must not destroy the
+      // reopened screen.
+      if (generation !== this.#generation) {
+        return;
+      }
     }
 
-    if (requestAdapterClose && wasVisible) {
+    if (requestAdapterClose && wasVisible && !restricted) {
       // During a title regeneration the old screen is the visible one; the
       // replacement exists but was never shown. Closing it keeps an interrupted
       // regeneration from leaving the old screen on the player's display.
@@ -1704,7 +2043,7 @@ export class Window {
       }
     }
 
-    this.#teardown();
+    this.#teardown(restricted);
     this.#status = "closed";
 
     // Exactly once: a duplicate or delayed close event sees status `closed`.
@@ -1800,23 +2139,25 @@ export class Window {
   }
 
   /**
-   * Track this Window for automatic close when its viewer leaves or dies. The
-   * viewer id is read here, before the player can go invalid; if it cannot be
-   * read the Window is simply not auto-closed, so opening still works (fail
-   * closed for this feature only).
+   * Track this Window for automatic close when its viewer's session ends
+   * (leave, death, dimension change, spectator) and for the shutdown teardown.
+   * The viewer id is read here, before the player can go invalid; if it cannot
+   * be read, session matching simply ignores the Window, but it is still
+   * tracked so shutdown can release it.
    */
-  #registerForPlayerLeave(): void {
+  #registerForLifecycleClose(): void {
+    lifecycleWindows.add(this);
+    ensurePlayerLeaveSubscription();
+    ensureEntityDieSubscription();
+    ensurePlayerDimensionChangeSubscription();
+    ensurePlayerGameModeChangeSubscription();
+    ensureShutdownSubscription();
+
     try {
       this.#viewerId = this.viewer.id;
     } catch {
       this.#viewerId = undefined;
     }
-    if (this.#viewerId === undefined) {
-      return;
-    }
-    leaveWindows.add(this);
-    ensurePlayerLeaveSubscription();
-    ensureEntityDieSubscription();
   }
 
   /**
@@ -1894,6 +2235,7 @@ export class Window {
     this.#renderEpoch += 1;
     this.#refreshPending = false;
     this.#fullRefreshQueued = false;
+    this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
   }
 
@@ -2021,19 +2363,58 @@ export class Window {
   }
 
   /**
-   * Run the state/GUI refresh collected since the last flush. A close or a
-   * reopen before the microtask drops the work: the new generation either
-   * renders in `open()` or has already prepared its own notifications.
+   * Queue one slot for re-evaluation after an Item/Inventory notification.
+   *
+   * The token is bumped now, not when the batched render starts: a result that
+   * the previous provider of this slot resolves before the microtask would
+   * otherwise land and stay on screen until the new result arrives.
+   */
+  #queueSlotRender(slot: number): void {
+    if (this.#renderingHalted) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#slotRenderTokens.set(slot, (this.#slotRenderTokens.get(slot) ?? 0) + 1);
+    this.#pendingSlotRenders.add(slot);
+    this.#queueRefreshFlush();
+  }
+
+  /**
+   * Run the state/GUI refresh and the per-slot notifications collected since
+   * the last flush. Multiple notifications in one timing are evaluated once
+   * (design 11.2 step 3 / 11.5). A full refresh covers every queued slot; a
+   * close or reopen before the microtask drops the work: the new generation
+   * either renders in `open()` or has already prepared its own notifications.
    */
   #runRefreshFlush(): void {
-    if (!this.#fullRefreshQueued) {
-      return;
-    }
+    const slots = this.#pendingSlotRenders;
+    this.#pendingSlotRenders = new Set();
+    const fullRefresh = this.#fullRefreshQueued;
     this.#fullRefreshQueued = false;
-    if (this.#renderingHalted || this.#status !== "open") {
+    if (this.#renderingHalted) {
       return;
     }
-    void this.#refresh();
+    if (fullRefresh) {
+      if (this.#status !== "open") {
+        return;
+      }
+      void this.#refresh();
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    const layout = this.#layout;
+    if (!layout) {
+      return;
+    }
+    for (const slot of slots) {
+      if (slot < layout.slots.length) {
+        void this.#renderSlot(slot);
+      }
+    }
   }
 
   #applyLayout(layout: ResolvedGuiLayout): void {
@@ -2063,6 +2444,13 @@ export class Window {
     if (!layout || this.#renderingHalted) {
       return;
     }
+    // A narrower Structure reuses the same container: the columns beyond its
+    // width are no longer addressed, so slots a wider layout wrote there must
+    // be cleared instead of left visible.
+    if (this.#renderedWidth !== undefined && this.#renderedWidth > layout.width) {
+      this.#clearUnmappedColumns(layout);
+    }
+    this.#renderedWidth = layout.width;
     // A new batch invalidates every result started before it.
     const epoch = ++this.#renderEpoch;
     const renders: Array<Promise<void>> = [];
@@ -2075,6 +2463,37 @@ export class Window {
       renders.push(this.#renderSlot(slot, epoch));
     }
     await Promise.all(renders);
+  }
+
+  /**
+   * Clear the physical columns a wider Structure previously wrote but the
+   * current layout no longer addresses. `container.size` covers `height` full
+   * nine-column rows, so only the tail of each row can be stale (a height
+   * change creates a new container instead).
+   */
+  #clearUnmappedColumns(layout: ResolvedGuiLayout): void {
+    const container = this.#container;
+    const cache = this.#writeCache;
+    if (!container || !cache) {
+      return;
+    }
+    for (let row = 0; row < layout.height; row += 1) {
+      for (let column = layout.width; column < PHYSICAL_COLUMNS; column += 1) {
+        const physicalSlot = row * PHYSICAL_COLUMNS + column;
+        if (physicalSlot >= container.size || !cache.shouldWrite(physicalSlot, undefined)) {
+          continue;
+        }
+        try {
+          // The layout has no logical slot for this index, so the reported
+          // slot is the physical one.
+          container.setItem(physicalSlot, undefined);
+        } catch (error) {
+          this.#report(error, "setItem", physicalSlot);
+          continue;
+        }
+        cache.markWritten(physicalSlot, undefined);
+      }
+    }
   }
 
   async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {
@@ -2272,7 +2691,7 @@ export class Window {
           next.set(slot, {
             element,
             unsubscribe: element.subscribe(() => {
-              void this.#renderSlot(slot);
+              this.#queueSlotRender(slot);
             }),
           });
         } catch (error) {
@@ -2304,13 +2723,22 @@ export class Window {
     }
   }
 
-  #teardown(): void {
-    // Drop the Window from chat routing and leave handling first: a close
+  /**
+   * `restricted` is the shutdown path: adapter unsubscribers are dropped, not
+   * called, because they run `unsubscribe()` on game signals, which restricted
+   * execution forbids. Everything else is local and released either way.
+   */
+  #teardown(restricted = false): void {
+    // Drop the Window from chat routing and lifecycle handling first: a close
     // handler may reopen it, and the reopened generation must be registered
     // afresh (with its own viewer id) instead of inheriting this teardown.
     forgetChatInputWindow(this);
-    leaveWindows.delete(this);
-    this.#unsubscribeFromContainerEvents();
+    lifecycleWindows.delete(this);
+    if (restricted) {
+      this.#eventUnsubscribers = [];
+    } else {
+      this.#unsubscribeFromContainerEvents();
+    }
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
     this.#guiSubscription?.();
@@ -2325,9 +2753,11 @@ export class Window {
     this.#expectedCloseContainer = undefined;
     this.#layout = undefined;
     this.#writeCache = undefined;
+    this.#renderedWidth = undefined;
     this.#screenRequested = false;
     this.#refreshPending = false;
     this.#fullRefreshQueued = false;
+    this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
   }
 

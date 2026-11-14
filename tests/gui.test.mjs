@@ -570,6 +570,33 @@ test("Gui changes propagate through existing GuiLinks to every linked parent", (
   assert.equal(rootNotified, 3);
 });
 
+test("a child reached through two links notifies each owner once (design 11.2.3)", () => {
+  const leaf = Gui.normal({ structure: ["x"], ingredients: { x: H }, content: [item("leaf")] });
+  const a = Gui.normal({ structure: ["@"], ingredients: { "@": new GuiLink(leaf) } });
+  const b = Gui.normal({ structure: ["@"], ingredients: { "@": new GuiLink(leaf) } });
+  const root = Gui.normal({ structure: ["#@"], ingredients: { "#": new GuiLink(a), "@": new GuiLink(b) } });
+
+  let rootCount = 0;
+  let aCount = 0;
+  let bCount = 0;
+  root.subscribe(() => {
+    rootCount += 1;
+  });
+  a.subscribe(() => {
+    aCount += 1;
+  });
+  b.subscribe(() => {
+    bCount += 1;
+  });
+
+  leaf.setContent([item("leaf2")]);
+  // Every path must deliver the change, and the shared root must not coalesce
+  // into a double notification for one source change.
+  assert.deepEqual([rootCount, aCount, bCount], [1, 1, 1]);
+  // The same child is displayed at both positions (design 11.3).
+  assert.deepEqual(ids(root.resolve()), ["leaf2", "leaf2"]);
+});
+
 test("retargeting a GuiLink subscribes to the new child and drops the old one", () => {
   const a = Gui.normal({ structure: ["a"], ingredients: { a: item("a") } });
   const b = Gui.normal({ structure: ["b"], ingredients: { b: item("b") } });
