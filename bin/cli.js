@@ -1985,8 +1985,19 @@ function main(argv) {
 // npm の bin はシンボリックリンク経由で起動され、Node はメインモジュールの
 // リンクを解決するため import.meta.url は実体パスになる。一方 process.argv[1]
 // はリンクのパスのまま残るので、両方を実体パスに直してから比較する。
-const scriptPath = process.argv[1] ? fs.realpathSync(process.argv[1]) : undefined;
-if (scriptPath && scriptPath === fs.realpathSync(fileURLToPath(import.meta.url))) {
+// import 経路では process.argv[1] が無い・消えていることがある（node -e、起動後に
+// 削除されたスクリプト等）。そこで realpath の失敗は「直接実行ではない」として扱い、
+// import しただけで throw しない。
+function realPathOrNull(target) {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return null;
+  }
+}
+
+const scriptPath = process.argv[1] ? realPathOrNull(process.argv[1]) : null;
+if (scriptPath && scriptPath === realPathOrNull(fileURLToPath(import.meta.url))) {
   process.exitCode = main(process.argv.slice(2));
 }
 
