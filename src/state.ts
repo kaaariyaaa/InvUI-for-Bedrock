@@ -61,6 +61,8 @@ export interface StoredGuiState {
  * write can leave the new record in place while the in-memory state keeps the
  * old value, so a later `acquire` may load data the manager never committed.
  * Implement `setItem` as one atomic write of the whole value to avoid that.
+ * `removeItem` has the same caveat: a store that deleted the record and then
+ * threw leaves it gone, and the deletion is not restored.
  */
 export interface StateStore {
   getItem(key: string): string | null | undefined;
@@ -120,6 +122,19 @@ export interface StateMigrationOptions {
  * returns the GUI state for the current storage version.
  */
 export type StateMigration = (legacy: unknown) => GuiState;
+
+/**
+ * Identity of the persisted record {@link StateManager.remove} deletes.
+ * The same identity rules as {@link StateAcquireOptions} apply.
+ */
+export interface StateRemoveOptions {
+  /** Defaults to `"player"`. */
+  scope?: StateScope;
+  /** Required for `shared`; defaults to `"default"` for `player`. */
+  key?: string;
+  /** Required for `player`; rejected for `shared`. */
+  ownerId?: string;
+}
 
 export type StateUnsubscribe = () => void;
 
@@ -286,6 +301,7 @@ const MIGRATION_KEYS = new Set([
   "fromSchema",
   "schema",
 ]);
+const REMOVE_KEYS = new Set(["scope", "key", "ownerId"]);
 const MANAGER_KEYS = new Set(["onError"]);
 const EMPTY_STATE: StateSnapshot = Object.freeze({});
 const EMPTY_CHANGED: readonly GuiStateField[] = Object.freeze([]);
@@ -670,6 +686,18 @@ interface NormalizedMigrationOptions extends NormalizedIdentityOptions {
   schema: string;
 }
 
+function normalizeRemoveOptions(input: unknown): NormalizedIdentityOptions {
+  if (!isPlainObject(input)) {
+    throw new StateValidationError("remove options must be a plain object");
+  }
+  for (const key of Object.keys(input)) {
+    if (!REMOVE_KEYS.has(key)) {
+      throw new StateValidationError(`unknown remove option "${key}"`);
+    }
+  }
+  return normalizeIdentityOptions(input);
+}
+
 function normalizeMigrationOptions(
   input: unknown,
 ): NormalizedMigrationOptions {
@@ -820,11 +848,13 @@ export class StateManager {
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #entries = new Map<string, StateEntry>();
   /**
-   * Identities whose migration callback is running. `acquire` and `migrate`
-   * reject these so a reentrant lease cannot resurrect a stale entry that a
-   * successful migration would then leave registered with the old schema.
+   * Identities whose record is being mutated (a running migration callback or
+   * a running `store.removeItem`). `acquire`, `migrate`, and `remove` reject
+   * these so a reentrant call from inside the callback cannot resurrect a stale
+   * entry, register a lease that survives the mutation, or delete a record the
+   * mutation is still writing.
    */
-  readonly #migrating = new Set<string>();
+  readonly #mutating = new Set<string>();
 
   constructor(
     store?: StateStore | null,
@@ -871,8 +901,9 @@ export class StateManager {
    * Registers a Window's interest in a state identity and returns its lease.
    * The state starts from the live value, then persisted data, then `initial`.
    *
-   * Acquiring an identity whose {@link migrate} callback is running throws a
-   * `LIVE_STATE` {@link StateConflictError}; other identities are unaffected.
+   * Acquiring an identity whose {@link migrate} callback or {@link remove}
+   * store call is running throws a `LIVE_STATE` {@link StateConflictError};
+   * other identities are unaffected.
    */
   acquire(options: StateAcquireOptions): StateHandle {
     const optionsInput: unknown = options;
@@ -883,10 +914,10 @@ export class StateManager {
       normalized.key,
     );
 
-    if (this.#migrating.has(identity)) {
+    if (this.#mutating.has(identity)) {
       throw new StateConflictError(
         "LIVE_STATE",
-        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated; acquire it after the migration settles`,
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated or removed; acquire it after the operation settles`,
       );
     }
 
@@ -953,8 +984,9 @@ export class StateManager {
    * callback and validation succeed, so a decoding, callback, or validation
    * error leaves the stored value untouched. A store error is not rolled back:
    * if the store partially applied the write before throwing, the record may
-   * already mix old and new data. Nothing is ever deleted, and
-   * {@link acquire} never invokes this automatically.
+   * already mix old and new data. `migrate` never deletes the record (use
+   * {@link remove} for that), and {@link acquire} never invokes it
+   * automatically.
    *
    * Any released zero-handle entry for the identity is evicted before the
    * callback runs. A failed migration therefore cannot leave an old in-memory
@@ -985,10 +1017,10 @@ export class StateManager {
       normalized.ownerId,
       normalized.key,
     );
-    if (this.#migrating.has(identity)) {
+    if (this.#mutating.has(identity)) {
       throw new StateConflictError(
         "LIVE_STATE",
-        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is already being migrated`,
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is already being migrated or removed`,
       );
     }
     const entry = this.#entries.get(identity);
@@ -1009,7 +1041,7 @@ export class StateManager {
       this.#entries.delete(identity);
     }
 
-    this.#migrating.add(identity);
+    this.#mutating.add(identity);
     try {
       const legacy = this.#readStoredObject(identity);
       if (legacy === null) {
@@ -1034,7 +1066,75 @@ export class StateManager {
       };
       this.#store.setItem(storageKeyOf(identity), JSON.stringify(record));
     } finally {
-      this.#migrating.delete(identity);
+      this.#mutating.delete(identity);
+    }
+  }
+
+  /**
+   * Deletes the persisted record for an identity. This is the supported escape
+   * hatch for a record that {@link acquire} rejects as corrupt or for an
+   * incompatible schema; without it a caller has to reach into the injected
+   * store and reproduce {@link storageKeyOf} by hand.
+   *
+   * The stored value is not decoded or validated first: removal works on
+   * unreadable data. A missing record is not an error, so calling this twice is
+   * safe. The identity must not be live: a state with handles, a non-persistent
+   * registration, or an identity whose migration/removal is already running is
+   * rejected with a `LIVE_STATE` {@link StateConflictError}. Any released
+   * zero-handle persistent entry is evicted before the store call; if the store
+   * then throws, the record may still be present but the next `acquire` reloads
+   * it from the store instead of reusing stale memory.
+   *
+   * While `store.removeItem` runs, this identity is locked like a running
+   * {@link migrate}: a reentrant `acquire`, `migrate`, or `remove` for it throws
+   * a `LIVE_STATE` {@link StateConflictError}, so the injected store cannot
+   * register a fresh lease and have its record (or its write) deleted by the
+   * removal in progress. The lock is cleared even when the store throws, and
+   * other identities are unaffected.
+   *
+   * A store error is not rolled back: a store that deleted the record and then
+   * threw leaves it gone even though `remove` throws, so the caller cannot tell
+   * "not removed" from "removed, error reported" by the exception alone. The
+   * in-memory entry is evicted either way, so memory never resurrects a value
+   * the store rejected.
+   */
+  remove(options: StateRemoveOptions): void {
+    const normalized = normalizeRemoveOptions(options);
+    const store = this.#store;
+    if (store === undefined) {
+      throw new StateValidationError(
+        "removal requires an injected state store",
+      );
+    }
+    const identity = identityOf(
+      normalized.scope,
+      normalized.ownerId,
+      normalized.key,
+    );
+    if (this.#mutating.has(identity)) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated or removed; remove it after the operation settles`,
+      );
+    }
+    const entry = this.#entries.get(identity);
+    if (
+      entry !== undefined &&
+      (entry.handles.size > 0 || entry.lifetime !== "persistent")
+    ) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is still in use; release it before removing`,
+      );
+    }
+    this.#mutating.add(identity);
+    try {
+      if (entry !== undefined) {
+        this.#entries.delete(identity);
+      }
+      store.removeItem(storageKeyOf(identity));
+    } finally {
+      this.#mutating.delete(identity);
     }
   }
 

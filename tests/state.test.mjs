@@ -1317,6 +1317,224 @@ test("corrupt nested guiState fails closed", () => {
   assert.equal(store.getItem(storageKey), raw);
 });
 
+test("remove deletes a persisted record so corrupt or incompatible state can be reset", () => {
+  const store = new MemoryStore();
+  const initial = { ownerId: "p", key: "shop", lifetime: "persistent", initial: { page: 1 } };
+  new StateManager(store).acquire(initial).release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "shop");
+  store.setItem(storageKey, "{not json");
+
+  const manager = new StateManager(store);
+  assert.throws(
+    () => manager.acquire({ ...initial, initial: { page: 7 } }),
+    (error) => error instanceof StateCorruptionError,
+  );
+
+  manager.remove({ ownerId: "p", key: "shop" });
+  assert.equal(store.getItem(storageKey), null, "the unreadable record is deleted");
+  manager.remove({ ownerId: "p", key: "shop" });
+  assert.equal(store.removeCalls.length, 2, "removing a missing record is not an error");
+
+  const fresh = manager.acquire({ ...initial, initial: { page: 7 } });
+  assert.deepEqual(fresh.get(), { page: 7 });
+  fresh.release();
+});
+
+test("remove validates options and refuses live or non-persistent identities", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+
+  assert.throws(
+    () => new StateManager().remove({ ownerId: "p" }),
+    (error) => error instanceof StateValidationError && /store/.test(error.message),
+  );
+  assert.throws(() => manager.remove(null), StateValidationError);
+  assert.throws(
+    () => manager.remove({ ownerId: "p", lifetime: "persistent" }),
+    StateValidationError,
+  );
+  assert.throws(() => manager.remove({ scope: "shared" }), StateValidationError);
+
+  const live = manager.acquire({
+    ownerId: "p",
+    key: "live",
+    lifetime: "persistent",
+    initial: { page: 1 },
+  });
+  assert.throws(
+    () => manager.remove({ ownerId: "p", key: "live" }),
+    (error) => expectCode(error, "LIVE_STATE"),
+  );
+  live.release();
+  manager.remove({ ownerId: "p", key: "live" });
+  assert.equal(
+    store.records().some(({ record }) => record.key === "live"),
+    false,
+    "a released persistent record is removable",
+  );
+
+  const session = manager.acquire({ ownerId: "p", key: "session", lifetime: "session" });
+  session.release();
+  assert.throws(
+    () => manager.remove({ ownerId: "p", key: "session" }),
+    (error) => expectCode(error, "LIVE_STATE"),
+  );
+
+  const migrationStore = new MemoryStore();
+  const migrationManager = new StateManager(migrationStore);
+  seedLegacyRecord(
+    migrationStore,
+    { ownerId: "p", key: "legacy" },
+    {
+      version: 0,
+      scope: "player",
+      ownerId: "p",
+      key: "legacy",
+      guiState: { page: 3 },
+    },
+  );
+  migrationManager.migrate(
+    { ownerId: "p", key: "legacy", fromVersion: 0, fromSchema: null, schema: "v2" },
+    () => {
+      assert.throws(
+        () => migrationManager.remove({ ownerId: "p", key: "legacy" }),
+        (error) => expectCode(error, "LIVE_STATE"),
+      );
+      return { page: 4 };
+    },
+  );
+});
+
+test("remove locks the identity so a reentrant store call cannot resurrect or delete it", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+  manager
+    .acquire({
+      ownerId: "p",
+      key: "locked",
+      lifetime: "persistent",
+      schema: "v1",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "locked");
+  const writes = store.setCalls.length;
+  const attempts = [];
+  const removeItem = store.removeItem.bind(store);
+
+  store.removeItem = (key) => {
+    // A store hook that touches the same identity from inside removeItem must
+    // not be able to register a lease whose record this removal then deletes,
+    // nor delete a second time after a fresh acquire wrote a new record.
+    const attempt = (label, run) => {
+      try {
+        run();
+        attempts.push([label, "allowed"]);
+      } catch (error) {
+        attempts.push([label, error.code]);
+      }
+    };
+    attempt("acquire", () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "locked",
+        lifetime: "persistent",
+        schema: "v1",
+      }),
+    );
+    attempt("remove", () => manager.remove({ ownerId: "p", key: "locked" }));
+    attempt("migrate", () =>
+      manager.migrate(
+        {
+          ownerId: "p",
+          key: "locked",
+          fromVersion: STATE_STORAGE_VERSION,
+          fromSchema: "v1",
+          schema: "v2",
+        },
+        () => ({ page: 9 }),
+      ),
+    );
+    removeItem(key);
+  };
+
+  manager.remove({ ownerId: "p", key: "locked" });
+
+  assert.deepEqual(attempts, [
+    ["acquire", "LIVE_STATE"],
+    ["remove", "LIVE_STATE"],
+    ["migrate", "LIVE_STATE"],
+  ]);
+  assert.equal(
+    store.removeCalls.length,
+    1,
+    "the reentrant remove never reached the store",
+  );
+  assert.equal(
+    store.setCalls.length,
+    writes,
+    "no reentrant acquire or migration persisted anything",
+  );
+  assert.equal(store.getItem(storageKey), null);
+
+  // The lock is cleared in a finally block, so the identity is usable again.
+  const fresh = manager.acquire({
+    ownerId: "p",
+    key: "locked",
+    lifetime: "persistent",
+    schema: "v1",
+    initial: { page: 5 },
+  });
+  assert.deepEqual(fresh.get(), { page: 5 });
+  fresh.release();
+});
+
+test("a failing remove store call clears the lock and cannot roll back the deletion", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+  manager
+    .acquire({
+      ownerId: "p",
+      key: "gone",
+      lifetime: "persistent",
+      schema: "v1",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "gone");
+  const removeItem = store.removeItem.bind(store);
+
+  store.removeItem = (key) => {
+    removeItem(key);
+    throw new Error("io error");
+  };
+  assert.throws(() => manager.remove({ ownerId: "p", key: "gone" }), /io error/);
+  assert.equal(
+    store.getItem(storageKey),
+    null,
+    "the deletion is not rolled back when the store throws afterwards",
+  );
+
+  store.removeItem = removeItem;
+  manager.remove({ ownerId: "p", key: "gone" });
+  assert.equal(
+    store.removeCalls.length,
+    2,
+    "the identity lock is released after a store failure",
+  );
+
+  const revived = manager.acquire({
+    ownerId: "p",
+    key: "gone",
+    lifetime: "persistent",
+    schema: "v1",
+    initial: { page: 7 },
+  });
+  assert.deepEqual(revived.get(), { page: 7 });
+  revived.release();
+  assert.equal(revived.released, true);
+});
+
 test("tabs and children round-trip through StateManager and persist", () => {
   const store = new MemoryStore();
   const manager = new StateManager(store);
