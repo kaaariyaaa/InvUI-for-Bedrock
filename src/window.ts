@@ -1176,6 +1176,12 @@ export class Window {
    * overwrite it after the fact.
    */
   #titleVersion = 0;
+  /**
+   * Bumped for every `setUpperGui` request. A queued size-changing swap applies
+   * only while it is still the newest request, so a later same-size swap cannot
+   * be overwritten by an older candidate when its turn arrives.
+   */
+  #guiChangeVersion = 0;
   /** A state/GUI notification is waiting for the batched refresh microtask. */
   #fullRefreshQueued = false;
   /**
@@ -1731,12 +1737,37 @@ export class Window {
   /**
    * Replace the upper GUI of an open Window (design 8.4).
    *
-   * The slot layout is re-evaluated and written again, so the container and the
-   * screen are kept. Only the same container size can be applied in place: a
-   * different size needs a new VirtualContainer, so it is reported and the
-   * current GUI stays in place. A different state schema would leave the
-   * acquired state describing the previous shape, so it fails closed through
-   * the same path as a structural GUI change.
+   * A layout with the same container size is applied in place: the slot layout
+   * is re-evaluated and written again, so the container and the screen are
+   * kept.
+   *
+   * A different size cannot be applied to an existing container, so it is
+   * queued on the regeneration queue used by `setTitle()` and a state-driven
+   * resize: the replacement container is created and rendered, then the old
+   * screen is closed and the new one shown. The candidate is re-resolved when
+   * its turn arrives, and dropped when a newer `setUpperGui()` request already
+   * superseded it.
+   *
+   * The state schema contains the Structure rows, so a size change always
+   * describes a different GUI shape. Before the replacement is shown, the
+   * Window re-registers its state for the new schema. The StateManager's
+   * existing rules decide whether that is allowed: a shared identity still in
+   * use by another registration, an idle `session` registration, and a
+   * `persistent` registration keep their schema and reject the
+   * re-registration. (A declared migration only runs for an acquire with no
+   * live registration, so it cannot rescue a live Window here.) On a rejection
+   * the previous GUI, screen, and state registration stay as they were, and
+   * the conflict is reported (`guiChange`) without writing anything under the
+   * new schema, so shared and persisted data cannot be mixed or damaged. A
+   * registration that does change schema starts from the previous values as its
+   * initial state, so a size change does not discard the user's page, tab,
+   * selection, or data; the new layout clamps out-of-range values. This means
+   * the swap applies in full only while the identity is not pinned by another
+   * registration, which is the default `window` lifetime with no other live
+   * user of the same state identity.
+   *
+   * A same-size swap that also changes the schema fails closed through the
+   * structural-change path below, as before.
    */
   setUpperGui(gui: Gui): void {
     if (!gui || typeof gui.resolve !== "function" || typeof gui.subscribe !== "function") {
@@ -1749,6 +1780,7 @@ export class Window {
       this.#upperGui = gui;
       return;
     }
+    const version = ++this.#guiChangeVersion;
     const handle = this.#stateHandle;
     if (!handle) {
       return;
@@ -1767,44 +1799,39 @@ export class Window {
       return;
     }
     if (!this.#container || containerSizeOf(layout) !== this.#container.size) {
+      if (this.#status === "open" && this.#container) {
+        this.#queueGuiSizeSwap(gui, version, generation);
+        return;
+      }
       this.#report(
         new Error("InvUI: layout size changed; reopen the Window to apply it."),
         "guiChange",
       );
       return;
     }
+    this.#applySameSizeUpperGui(gui, layout, generation);
+  }
+
+  /**
+   * Apply an upper GUI whose resolved layout fits the current container
+   * (design 8.4). The state registration is not touched: the caller has
+   * checked that its schema still describes the new GUI.
+   */
+  #applySameSizeUpperGui(
+    gui: Gui,
+    layout: ResolvedGuiLayout,
+    generation: number,
+  ): void {
     if (!this.#schemaMatchesGui(gui)) {
       this.#failStateSchema("guiChange");
       return;
     }
-
-    // Detach the old GUI before attaching the new one so a notification from
-    // either cannot refresh against the other GUI's layout.
-    const previousUnsubscribe = this.#guiSubscription;
-    this.#guiSubscription = undefined;
-    if (previousUnsubscribe) {
-      try {
-        previousUnsubscribe();
-      } catch (error) {
-        this.#report(error, "unsubscribe");
-        // The error handler may have closed and reopened the Window.
-        if (generation !== this.#generation) {
-          return;
-        }
-      }
+    this.#attachGuiSubscription(gui, generation);
+    if (generation !== this.#generation) {
+      return;
     }
-    try {
-      this.#guiSubscription = gui.subscribe(() => this.#onGuiChanged());
-    } catch (error) {
-      // The swap stays safe: the new layout is applied below, only push updates
-      // from the new GUI are missing.
-      this.#report(error, "subscribe");
-      if (generation !== this.#generation) {
-        return;
-      }
-    }
-    this.#upperGui = gui;
     const previousLayout = this.#layout;
+    this.#upperGui = gui;
     this.#applyLayout(layout);
     // A failed element subscription inside #applyLayout is reported, and the
     // handler may have closed and reopened: do not refresh the new generation.
@@ -1828,6 +1855,272 @@ export class Window {
       return;
     }
     this.#queueChangedSlots(previousLayout, layout);
+  }
+
+  /**
+   * Detach the current GUI subscription and attach `gui`. A failure to
+   * unsubscribe is reported and the swap continues, matching the previous
+   * in-place path; a failure to subscribe is reported and only push updates
+   * from the new GUI are missing.
+   */
+  #attachGuiSubscription(gui: Gui, generation: number): void {
+    // Detach the old GUI before attaching the new one so a notification from
+    // either cannot refresh against the other GUI's layout.
+    const previousUnsubscribe = this.#guiSubscription;
+    this.#guiSubscription = undefined;
+    if (previousUnsubscribe) {
+      try {
+        previousUnsubscribe();
+      } catch (error) {
+        this.#report(error, "unsubscribe");
+        // The error handler may have closed and reopened the Window.
+        if (generation !== this.#generation) {
+          return;
+        }
+      }
+    }
+    try {
+      this.#guiSubscription = gui.subscribe(() => this.#onGuiChanged());
+    } catch (error) {
+      // The swap stays safe: the new layout is applied by the caller, only
+      // push updates from the new GUI are missing.
+      this.#report(error, "subscribe");
+    }
+  }
+
+  /**
+   * Queue a size-changing upper GUI swap on the regeneration queue. The
+   * candidate re-resolves when its turn arrives because an earlier queued
+   * state or title regeneration may already have created a container it fits.
+   */
+  #queueGuiSizeSwap(gui: Gui, version: number, generation: number): void {
+    const run = this.#regenerationQueue.then(() =>
+      this.#applyGuiSizeSwap(gui, version, generation),
+    );
+    this.#regenerationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  /**
+   * Apply a queued size-changing upper GUI swap (design 8.4).
+   *
+   * The new schema is registered before the replacement container is created,
+   * because the final layout (and therefore the container size) depends on the
+   * state the new registration holds. A registration that is refused leaves
+   * everything as it was. If the container cannot be created afterwards, the
+   * GUI and the previous registration are restored; the Window only fails
+   * closed when the previous registration cannot be recovered, because then
+   * no acquired state describes the screen still on display.
+   */
+  async #applyGuiSizeSwap(
+    gui: Gui,
+    version: number,
+    generation: number,
+  ): Promise<void> {
+    if (version !== this.#guiChangeVersion || gui === this.#upperGui) {
+      return;
+    }
+    if (
+      generation !== this.#generation ||
+      this.#status !== "open" ||
+      this.#renderingHalted
+    ) {
+      return;
+    }
+    const container = this.#container;
+    const handle = this.#stateHandle;
+    if (!container || !handle) {
+      return;
+    }
+
+    const previousGui = this.#upperGui;
+    const previousState = handle.get();
+    // Re-register the state under the new shape. A refusal restores the
+    // previous registration and reports nothing here; the caller reports it
+    // after the restore, so an error handler that closes and reopens the
+    // Window cannot be re-entered from the state swap.
+    let nextHandle: StateHandle | undefined;
+    try {
+      nextHandle = this.#reacquireStateForGui(gui, generation);
+    } catch (error) {
+      const current = generation === this.#generation && this.#status === "open";
+      if (current) {
+        this.#report(error, "guiChange");
+      }
+      return;
+    }
+    if (
+      nextHandle === undefined ||
+      generation !== this.#generation ||
+      this.#status !== "open" ||
+      this.#container !== container
+    ) {
+      return;
+    }
+    this.#attachGuiSubscription(gui, generation);
+    if (generation !== this.#generation) {
+      return;
+    }
+    this.#upperGui = gui;
+
+    // The new registration may clamp page/line/tab differently from the
+    // previous one, and the container size follows the resolved layout, so
+    // resolve after the swap instead of reusing the caller's candidate.
+    let next: ResolvedGuiLayout;
+    try {
+      this.#revalidateStateRanges = false;
+      next = this.#resolveCurrentState(nextHandle, true);
+    } catch (error) {
+      this.#report(error, "guiChange");
+      if (generation === this.#generation && this.#status === "open") {
+        this.#rollbackGuiSizeSwap(previousGui, previousState);
+      }
+      return;
+    }
+    if (generation !== this.#generation || this.#status !== "open") {
+      return;
+    }
+    if (containerSizeOf(next) === container.size) {
+      // A queued regeneration already created a container this GUI fits, or
+      // the re-registered state settled back to the current size. The
+      // replacement is unnecessary; render every slot because a different
+      // Structure width maps logical slots to different physical ones.
+      this.#applyLayout(next);
+      this.#scheduleRefresh();
+      return;
+    }
+    try {
+      await this.#regenerateContainer(this.title, next, "guiChange");
+    } catch {
+      // #regenerateContainer reported the failure and restored the previous
+      // container and layout. Restore the GUI and registration so the screen
+      // still shown is described by the acquired state; a failure while doing
+      // so fails closed instead of leaving the two out of step.
+      if (generation === this.#generation && this.#status === "open") {
+        this.#rollbackGuiSizeSwap(previousGui, previousState);
+      }
+    }
+  }
+
+  /**
+   * Re-register the Window's state for `gui` (design 8.4 size change).
+   *
+   * Returns the current handle when the schema already describes `gui`: a size
+   * difference caused only by the selected tab does not reset the state. A
+   * different schema is a new registration under the same identity, which the
+   * StateManager accepts or rejects by its schema/lifetime rules. The previous
+   * values seed an accepted registration so the swap keeps the user's state.
+   * On rejection the previous registration is restored before the conflict is
+   * rethrown, and no state write reached the new schema. Returns `undefined`
+   * when a state callback closed or reopened the Window while the registration
+   * was being acquired: the new generation owns its own registration then.
+   */
+  #reacquireStateForGui(
+    gui: Gui,
+    generation: number,
+  ): StateHandle | undefined {
+    const previous = this.#stateHandle;
+    if (!previous) {
+      throw new Error(`InvUI: Window ${this.id} is not open.`);
+    }
+    const previousSchema = this.#stateSchema;
+    // A GUI whose schema cannot be described cannot be matched to any state.
+    const nextSchema = schemaOf(gui);
+    if (nextSchema === previousSchema) {
+      return previous;
+    }
+    // Carry the user's state into the new shape. A `window`-lifetime entry
+    // dropped by the release would otherwise restart from the initial state;
+    // `initial` is ignored when another registration still holds the identity,
+    // so shared state is not overwritten here.
+    const previousState = previous.get();
+
+    // Detach before the release: the old registration's listener must not run
+    // against the new GUI while the replacement is being prepared.
+    const previousUnsubscribe = this.#stateSubscription;
+    this.#stateSubscription = undefined;
+    previousUnsubscribe?.();
+    previous.release();
+    this.#stateHandle = undefined;
+    let next: StateHandle;
+    try {
+      next = this.#acquireState(gui, previousState);
+    } catch (error) {
+      if (generation === this.#generation && this.#status === "open") {
+        this.#restoreStateRegistration(previousState);
+      }
+      throw error;
+    }
+    if (generation !== this.#generation) {
+      // A state callback closed and reopened the Window during the acquire.
+      // The new generation already registered its own state and must keep it.
+      next.release();
+      return undefined;
+    }
+    this.#installState(next);
+    return next;
+  }
+
+  /** Subscribe this Window to `handle` and make it the acquired registration. */
+  #installState(handle: StateHandle): void {
+    this.#stateHandle = handle;
+    this.#stateSchema = handle.schema;
+    this.#stateSubscription = handle.subscribe((_state, changed) =>
+      this.#onStateChanged(changed),
+    );
+  }
+
+  /**
+   * Restore the state registration for the GUI that is still displayed after a
+   * refused or failed swap. The re-registration attempt fails before any write
+   * for schema/lifetime conflicts, so the stored record and any other
+   * registration are untouched; re-acquiring the previous schema returns the
+   * state that survived the release. A Window-lifetime entry that only this
+   * Window held was dropped by the release, so `previousState` seeds the new
+   * registration instead of resetting the values; an existing registration
+   * ignores `initial`, so shared state is not overwritten with a stale
+   * snapshot. If even that re-acquire fails, the Window has no state describing
+   * the screen and fails closed.
+   */
+  #restoreStateRegistration(previousState?: StateSnapshot): void {
+    try {
+      const handle = this.#acquireState(undefined, previousState);
+      this.#installState(handle);
+    } catch (error) {
+      this.#report(error, "guiChange");
+      if (this.#status === "opening" || this.#status === "open") {
+        this.#performClose("ServerClosed", true);
+      }
+    }
+  }
+
+  /**
+   * Undo a size-swap preparation that could not be shown: release the new
+   * registration, restore the GUI the screen still shows, and re-acquire the
+   * previous schema (the reported container failure left the old screen up).
+   */
+  #rollbackGuiSizeSwap(previousGui: Gui, previousState: StateSnapshot): void {
+    const handle = this.#stateHandle;
+    if (handle) {
+      const unsubscribe = this.#stateSubscription;
+      this.#stateSubscription = undefined;
+      unsubscribe?.();
+      handle.release();
+      this.#stateHandle = undefined;
+    }
+    this.#attachGuiSubscription(previousGui, this.#generation);
+    this.#upperGui = previousGui;
+    // The previous registration was dropped by the successful re-registration,
+    // so its values seed the restored one; an existing shared registration
+    // ignores them.
+    this.#restoreStateRegistration(previousState);
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#revalidateStateRanges = true;
+    this.#scheduleRefresh();
   }
 
   /**
@@ -2516,11 +2809,15 @@ export class Window {
     this.#slotRenderTokens.clear();
   }
 
-  #acquireState(): StateHandle {
+  #acquireState(
+    gui: Gui = this.upperGui,
+    initial?: StateSnapshot,
+  ): StateHandle {
     const common = {
       scope: this.#stateScope,
       lifetime: this.#stateLifetime,
-      schema: schemaOf(this.upperGui),
+      schema: schemaOf(gui),
+      ...(initial === undefined ? {} : { initial }),
     } as const;
     if (this.#stateScope === "shared") {
       return this.#stateManager.acquire({
