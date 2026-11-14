@@ -100,7 +100,7 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 | CLICK-JSON-02 | 同じ画面で edit_box に手入力し、`button.send` を押す | 入力内容がチャットとして送信されるか。`#message_text_box` が機能するか | `edit-box-resource-pack/` |
 | CLICK-JSON-03 | `data_driven_container` パネルを使う画面で同じ操作 | `VirtualContainer` が data_driven 画面を使う場合に送信経路が成立するか | `resource_pack/ui/invui_controls*.json` |
 | CLICK-JSON-04 | chest 画面と data_driven 画面にマーカーを出し、`title_marker` の `$container_title` を読む | `VirtualContainer` がどちらのパネルを使うか。マーカーのパネルが開いたコンテナのタイトルを受けているか（`$container_title` の伝播は実機未検証） | `chest-resource-pack/`、`data-driven-resource-pack/` |
-| CLICK-JSON-05 | 既定接続を有効にして `VirtualContainer` を開く | `$container_title` ゲートが `InvUI` / 空タイトルで一致するか | `resource_pack/` |
+| CLICK-JSON-05 | 既定接続を有効にして `VirtualContainer` を開き、続けて通常チェストも開く | **`$container_title` ゲートは実装していません**（タイトル gate は不採用）。既定接続は `data_driven_container` のパネルを使う全画面に適用される想定なので、警告ラベル・ブロッカーの有無を VirtualContainer と通常チェストで比べ、実際の適用範囲を記録する | `resource_pack/` |
 | CLICK-JSON-06 | PC / タッチ / コントローラーでマーカー入り slot を通常クリック | itemChange が 1 回か。`beforeItemStack` / `itemStack` / cursor / inventory の変化。タッチでも slot が変わるか | マーカー版プローブ（未作成。V-4 を試す場合だけ） |
 | CLICK-JSON-07 | マーカー入り slot に自分のアイテムを置く / swap / shift-click / drop | 前後状態と、プレイヤーのアイテムがどこへ行くか。上書き・close で消失しないか | 同上 |
 | CLICK-JSON-08 | `ItemLockMode.slot` のアイテムを通常クリック | itemChange が発生するか（発生しないならロックは通知に使えない） | 同上 |
