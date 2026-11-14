@@ -117,22 +117,38 @@ function keyFor(size, mode) {
 }
 
 function fillContainer(container, size, mode) {
+  const expectedLock =
+    mode === "slot" ? ItemLockMode.slot : mode === "inventory" ? ItemLockMode.inventory : undefined;
   let filled = 0;
+  let locked = 0;
   for (let slot = 0; slot < size; slot += 1) {
     try {
       const stack = new ItemStack(ITEM_TYPES[slot % ITEM_TYPES.length], 1);
-      if (mode === "slot") {
-        stack.lockMode = ItemLockMode.slot;
-      } else if (mode === "inventory") {
-        stack.lockMode = ItemLockMode.inventory;
+      if (expectedLock !== undefined) {
+        stack.lockMode = expectedLock;
       }
       container.setItem(slot, stack);
       filled += 1;
+      if (expectedLock !== undefined) {
+        // Read back what the container actually holds. The hypothesis only means
+        // something if the lock was applied; without this the run could silently
+        // be a `plain` run and report a false negative.
+        const stored = container.getItem(slot);
+        const actual = stored ? stored.lockMode : undefined;
+        if (actual === expectedLock) {
+          locked += 1;
+        } else {
+          log(
+            `FILL_LOCK_MISMATCH slot=${slot} mode=${mode} expected=${expectedLock} actual=${actual ?? "none"}`,
+          );
+        }
+      }
     } catch (error) {
       log(`FILL_FAILED slot=${slot} mode=${mode} error=${describeError(error)}`);
     }
   }
-  log(`FILLED size=${size} mode=${mode} slots=${filled}/${size}`);
+  const lockNote = expectedLock === undefined ? "" : ` locked=${locked}/${size}`;
+  log(`FILLED size=${size} mode=${mode} slots=${filled}/${size}${lockNote}`);
 }
 
 function createContainer(size, mode) {
@@ -301,6 +317,37 @@ function describeStack(stack) {
   }
 }
 
+/**
+ * Close イベントの `items` から、空でないスロット数と typeId ごとの合計をまとめる。
+ * 「クリックでアイテムが動かなかった」ことを後から提出できるようにするための記録で、
+ * 会計や STOP 判定はしない（このプローブは観測のみ）。
+ */
+function summarizeCloseItems(items) {
+  if (!Array.isArray(items)) {
+    return undefined;
+  }
+  const totals = new Map();
+  let nonEmpty = 0;
+  for (const stack of items) {
+    if (!stack) {
+      continue;
+    }
+    nonEmpty += 1;
+    try {
+      totals.set(stack.typeId, (totals.get(stack.typeId) ?? 0) + stack.amount);
+    } catch {
+      totals.set("unreadable", (totals.get("unreadable") ?? 0) + 1);
+    }
+  }
+  return {
+    nonEmpty,
+    totals:
+      [...totals.entries()]
+        .map(([typeId, amount]) => `${typeId}x${amount}`)
+        .join(", ") || "(none)",
+  };
+}
+
 function readCursorStack(player) {
   try {
     const component = player.getComponent("cursor_inventory");
@@ -385,16 +432,22 @@ function subscribe(name, getSignal, handler) {
 
 subscribe("virtualContainerItemChange", () => world.afterEvents.virtualContainerItemChange, (event) => {
   const kind = classifyItemChange(event);
+  const title = containerTitle(event.container);
+  const titleText = safeText(title ?? "?");
   const cursor = readCursorStack(event.player);
+  // `size` alone cannot tell the three modes apart (9:slot and 9:plain are both
+  // size=9), and the run matrix repeats each size in every mode. Log the
+  // creation-fixed title ("Lock probe <size> <mode>") so a captured line stays
+  // attributable after the console is pasted into a report.
   log(
-    `ITEM_CHANGE size=${containerSize(event.container)} slot=${event.slot} kind=${kind} ` +
+    `ITEM_CHANGE size=${containerSize(event.container)} slot=${event.slot} title="${titleText}" kind=${kind} ` +
       `sameItem=${kind === "SAME_ITEM_CANDIDATE"} player=${playerLabel(event.player)} ` +
       `before="${describeStack(event.beforeItemStack)}" after="${describeStack(event.itemStack)}" ` +
       `cursor="${describeStack(cursor)}"`,
   );
   if (kind === "SAME_ITEM_CANDIDATE") {
     log(
-      `CANDIDATE_SAME_ITEM size=${containerSize(event.container)} slot=${event.slot} ` +
+      `CANDIDATE_SAME_ITEM size=${containerSize(event.container)} slot=${event.slot} title="${titleText}" ` +
         `player=${playerLabel(event.player)} (no restore, no click action)`,
     );
   }
@@ -417,16 +470,26 @@ subscribe("virtualContainerClose", () => world.afterEvents.virtualContainerClose
   if (pending && closedPlayerId !== undefined) {
     pending.delete(closedPlayerId);
   }
+  const title = containerTitle(event.container);
+  const titleText = safeText(title ?? "?");
+  const items = Array.isArray(event.items) ? event.items : undefined;
+  const summary = summarizeCloseItems(items);
   // Logged so a manual run can tell "our screen closed" from "another
   // container's screen closed, pending untouched".
-  const matchNote = closedContainer
-    ? ""
-    : ` unmatchedTitle="${safeText(containerTitle(event.container) ?? "?")}"`;
+  const matchNote = closedContainer ? "" : ` unmatchedTitle="${titleText}"`;
   log(
-    `CLOSE size=${containerSize(event.container)} reason=${event.reason} ` +
-      `player=${playerLabel(event.player)} items=${Array.isArray(event.items) ? event.items.length : "unknown"}` +
+    `CLOSE size=${containerSize(event.container)} title="${titleText}" reason=${event.reason} ` +
+      `player=${playerLabel(event.player)} items=${items ? "array" : "missing"}` +
       matchNote,
   );
+  if (summary) {
+    // Contents at close. This is the evidence that a click did not move or
+    // consume the items, which the decision rule asks the tester to record.
+    log(
+      `CLOSE_CONTENTS size=${containerSize(event.container)} title="${titleText}" ` +
+        `nonEmptySlots=${summary.nonEmpty}/${items.length} totals=${summary.totals}`,
+    );
+  }
 });
 
 subscribe("playerCursorItemGrab", () => world.afterEvents.playerCursorItemGrab, (event) => {

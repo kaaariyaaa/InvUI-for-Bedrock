@@ -35,9 +35,9 @@
 含まれるもの:
 
 - `behavior_pack/manifest.json`: 新規 UUID、`@minecraft/server` `2.13.0-beta`、警告入り description
-- `behavior_pack/scripts/main.js`: コンテナ作成、ロック済みアイテムの配置、観測イベントのログ、自動 close
+- `behavior_pack/scripts/main.js`: コンテナ作成、ロック済みアイテムの配置とロック適用の読み戻し、観測イベントのログ、close 時点の内容合計、自動 close
 - `locked-click-probe.mcpack`: `behavior_pack/` の `manifest.json` と `scripts/main.js` をそのまま ZIP にした導入用ファイル（実機取り込みは未検証）
-- `locked-click-probe.test.mjs`: manifest / 構文 / 危険警告 / モック上の fill・ロック・分類の静的確認、`.mcpack` とソースの一致
+- `locked-click-probe.test.mjs`: manifest / 構文 / 危険警告 / モック上の fill・ロックの読み戻し・分類・close 内容の記録の静的確認、`.mcpack` とソースの一致
 
 含まれないもの:
 
@@ -109,11 +109,16 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 ## 6. 手順
 
 1. 通常のチェストでアイテム移動が従来どおり動くことを確認する。
-2. `!lockprobe open 9 slot 1200` を実行する。
-3. 画面が表示されたら、**スロットを通常クリック（PC: 左クリック / タッチ: タップ / コントローラー: 決定）**する。Shift クリック・ドロップ・ドラッグは別操作として記録する。
-4. 自動 close 後にコンソール / チャットのログを確認する。
-5. `slot` / `inventory` / `plain` の 3 モード、9 / 27 / 54 スロット、PC / タッチ / コントローラーで繰り返す。
-6. 画面を開いたまま死亡・切断・次元移動も行い、ログが壊れないことを確認する（任意）。
+2. `!lockprobe help` を実行し、チャットにコマンド一覧が返ることを確認する（返らなければパックが読み込まれていない）。
+3. `!lockprobe open 9 slot 1200` を実行する。チャットに `OPEN_REQUESTED size=9 mode=slot ...` が返る。
+4. 画面が表示されたら、**スロットを通常クリック（PC: 左クリック / タッチ: タップ / コントローラー: 決定）**する。Shift クリック・ドロップ・ドラッグは別操作として記録する。
+5. 自動 close 後、Content Log のログを確認する。`FILLED ... locked=9/9`、`CLOSE`、`CLOSE_CONTENTS ... totals=...` が出ているか、内容がクリック前後で変わっていないかを記録する（ログの見方は下記）。
+6. `CLOSE` を確認してから次の `open` を実行する。`OPEN_REJECTED ... previous open still pending` が返ったら、close イベントがまだ届いていないので少し待って再実行する。
+7. `slot` / `inventory` / `plain` の 3 モード、9 / 27 / 54 スロット、PC / タッチ / コントローラーで繰り返す。
+8. 画面を開いたまま死亡・切断・次元移動も行い、ログが壊れないことを確認する（任意）。
+
+> [!TIP]
+> **観測行は Content Log にだけ出ます。** チャットに返るのは `OPEN_REQUESTED` / `OPEN_REJECTED` などのコマンド応答だけです。`ITEM_CHANGE` / `CANDIDATE_SAME_ITEM` / `CLOSE_CONTENTS` を提出するには、設定の Creator（クリエイター）セクションで「コンテンツログ GUI」を有効にするか、BDS / 開発環境のコンソールを使ってください。1 回の `open` に対応する `[invui-lockprobe]` 行を、`FILLED` → `OPEN_REQUESTED` → `ITEM_CHANGE...` → `CLOSE` / `CLOSE_CONTENTS` のまとまりとして保存します。
 
 **画面を開く前に、カーソルにアイテムを持たないでください。** サーバー側 auto close でカーソル上のアイテムが失われ得ます（未検証）。このプローブはカーソル退避を行いません。
 
@@ -123,11 +128,13 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 
 | ログ | 意味 |
 |---|---|
-| `FILLED size=9 mode=slot slots=9/9` | 9 スロットすべてにロック済みアイテムを置けた |
-| `FILL_FAILED slot=...` | ロック済みアイテムの `setItem` に失敗した（この時点で仮説は否定寄り） |
+| `FILLED size=9 mode=slot slots=9/9 locked=9/9` | 9 スロットすべてにアイテムを置き、`getItem` で読み戻してロック適用も 9/9 確認できた。`locked` が `slots` より少ない場合は、その run の結果を判定に使わない |
+| `FILL_LOCK_MISMATCH slot=... expected=... actual=...` | `setItem` 後にロックが読み戻せなかった。ロックが適用されていない可能性があるため、この run は判定不能として扱う |
+| `FILLED size=9 mode=plain slots=9/9` | `plain` はロックを要求しないため `locked=` を出さない |
+| `FILL_FAILED slot=...` | アイテムの `setItem` に失敗した（この時点で仮説は否定寄り） |
 | `OPEN_REQUESTED ...` | `open()` を要求した。表示成功の保証ではない |
-| `ITEM_CHANGE ... kind=SAME_ITEM_CANDIDATE sameItem=true ...` | **通常クリックでロック済みアイテムが動かず、同じ内容の itemChange が届いた**。クリック源の候補 |
-| `CANDIDATE_SAME_ITEM ...` | 上記の候補を明示した行。クリック実行はしていない |
+| `ITEM_CHANGE ... title="Lock probe 9 slot" kind=SAME_ITEM_CANDIDATE sameItem=true ...` | **通常クリックでロック済みアイテムが動かず、同じ内容の itemChange が届いた**。クリック源の候補。`title=` は size と mode を兼ねる |
+| `CANDIDATE_SAME_ITEM ... title="Lock probe 9 slot"` | 上記の候補を明示した行。クリック実行はしていない |
 | `ITEM_CHANGE ... kind=REMOVED` | アイテムがスロットから出た。ロックが効いていない、またはドロップ等 |
 | `ITEM_CHANGE ... kind=CHANGED` / `INSERTED` | アイテムが入れ替わった／置かれた。通常クリック以外の操作か、ロックが効いていない |
 | `CURSOR_GRAB` / `CURSOR_RELEASE` | カーソル移動。タッチでは発生しない想定（未検証） |
@@ -135,31 +142,35 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 | `INPUT_MODE` / `BUTTON_INPUT` | 生の入力デバイスとボタン状態。クリック以外でも大量に出る |
 | `INVENTORY_CHANGE` | プレイヤーのインベントリ変化。クリックでアイテムが動いた場合の傍証 |
 | `MESSAGE_RECEIVE` | 内部 API。現状は機能しない想定で、記録のみ（設計10の経路にはしない） |
-| `CLOSE ... reason=...` | 画面が閉じた理由。`ServerClosed` は自動 close |
+| `CLOSE ... title="Lock probe 9 slot" reason=...` | 画面が閉じた理由。`ServerClosed` は自動 close。`items=array` は close 時内容を `event.items` から読めたことを示す |
+| `CLOSE_CONTENTS ... nonEmptySlots=9/9 totals=minecraft:stickx5, minecraft:paperx4` | close 時点の空でないスロット数と typeId ごとの合計。クリック前後で合計が変わっていないことの記録に使う |
 | `CLOSE ... unmatchedTitle="..."` | 自作した container と title が一致しない close。pending は消さない。逆に、別パックの同じ title の close はこの行が出ずに一致扱いになる（区別できない） |
 | `AUTOCLOSE skip stale` | 同じキーを開き直したため、古いタイマーが新しい画面を閉じなかった |
 
+`title=` は作成時に固定される `Lock probe <size> <mode>` です。size が同じでも mode が違う run を区別するために、`ITEM_CHANGE` と `CLOSE_CONTENTS` の `title=` を必ずセットで記録してください。`title=` が `Lock probe ...` でない行は、このプローブが作っていない container の観測なので、自分の結果として数えません（単独導入が前提です）。
+
 ### 判定
 
-- **陽性（経路候補）**: 通常クリックごとに `kind=SAME_ITEM_CANDIDATE` が 1 回だけ出て、スロットの内容と個数が変わらない。PC / タッチ / コントローラーで同じ。`SAME_ITEM_CANDIDATE` は `typeId` / `amount` / `nameTag` の一致で判定し、`lockMode` は意図的に除外している（ロックが外れてもイベントを見落とさないため）。`before` と `after` の `lock=` が異なる場合はロックが外れた証拠なので、ログが候補でもクリック源として採用しない。
-- **陰性（ロックはクリック源に使えない）**: 通常クリックで `ITEM_CHANGE` がまったく出ない。または `REMOVED` / `CHANGED` になる。
-- **判定不能**: 画面が表示されない、`open` が失敗する、イベント購読が `SUBSCRIBE_UNAVAILABLE` になる。ゲーム版・Beta API・パック適用を確認して再試行する。
+- **陽性（経路候補）**: 通常クリックごとに `title="Lock probe <size> <mode>"` 付きの `kind=SAME_ITEM_CANDIDATE` が 1 回だけ出て、スロットの内容と個数が変わらない。PC / タッチ / コントローラーで同じ。`CLOSE_CONTENTS` の `totals` が `FILLED` 直後の期待値（9 なら stick×5 / paper×4）と一致する。`SAME_ITEM_CANDIDATE` は `typeId` / `amount` / `nameTag` の一致で判定し、`lockMode` は意図的に除外している（ロックが外れてもイベントを見落とさないため）。`before` と `after` の `lock=` が異なる場合はロックが外れた証拠なので、ログが候補でもクリック源として採用しない。
+- **陰性（ロックはクリック源に使えない）**: 通常クリックで `ITEM_CHANGE` がまったく出ない。または `REMOVED` / `CHANGED` / `INSERTED` になる。
+- **判定不能**: 画面が表示されない、`open` が失敗する、イベント購読が `SUBSCRIBE_UNAVAILABLE` になる。`FILLED` の `locked=` が `slots=` より少ない、または `FILL_LOCK_MISMATCH` が出た run も判定不能として扱う。ゲーム版・Beta API・パック適用を確認して再試行する。
 
 陽性でも、**通常クリックと Shift クリック・ドロップ・配置を itemChange の前後だけで完全に区別できるとは限りません。** ロックが全操作を拒否したように見えても、それを read-only 制御の根拠にしないでください（設計7.2）。区別できない操作が残るなら、この経路は採用しません。陽性の場合は、同じスロットで Shift クリック・ドロップ・ドラッグ・アイテム配置を試し、`ITEM_CHANGE` の有無と種類を記録してください。
 
 ## 8. 結果の記録
 
-[CHECKLIST.md](../CHECKLIST.md) の記録ヘッダーに加え、次を残します。
+[CHECKLIST.md](../CHECKLIST.md) の記録ヘッダーに加え、次を残します。**1 回の run ごとに、`[invui-lockprobe]` のログを `FILLED` から `CLOSE_CONTENTS` まで切れ目なく保存してください。**
 
 | 項目 | 記録 |
 |---|---|
 | ゲーム版 / `@minecraft/server` 版 | |
-| モード（slot / inventory / plain） | |
+| モード（slot / inventory / plain）と、ログの `title=` | |
 | スロット数（9 / 27 / 54） | |
 | 入力方式（PC / タッチ / コントローラー） | |
+| `FILLED ... slots=` と `locked=`（ロック適用の読み戻し） | |
 | 通常クリック 1 回あたりの `ITEM_CHANGE` 回数 | |
 | `kind` と `sameItem` | |
-| クリック前後のスロット内容・個数 | |
+| クリック前後のスロット内容・個数（`CLOSE_CONTENTS` の `nonEmptySlots` / `totals`） | |
 | Shift クリック / ドロップ / ドラッグ / 配置の結果 | |
 | カーソル・ホットバー・インベントリのログ | |
 | 異常（増減・画面が閉じない・クラッシュ） | |
@@ -169,6 +180,8 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 - 実機のイベント順序・ロックの挙動は公式ドキュメントに保証がありません。**陽性/陰性は記録した版と環境でしか通用しません。**
 - `ItemLockMode.slot` は「そのスロットから動かせない」と説明されていますが、**クリックイベントが発生するとは説明されていません**。このプローブはその未文書の挙動を確かめるためのものです。
 - `VirtualContainerItemChangeAfterEvent` は after イベントです。このプローブは変更を止めず、復元もしません。
+- `CLOSE_CONTENTS` は close 時点の `event.items` を合計した**記録だけ**で、会計・STOP 判定・復元は行いません。`event.items` が配列でない版では `CLOSE ... items=missing` になり、内容をログから確認できません。
+- `title=` は mode の識別に使う観測上の近道で、保証ではありません（別パックが同じ title を作れば区別できません）。
 - ロックが効かない場合、表示アイテムは通常どおり持ち出せます。**保護の検証ではありません。** 持ち出したアイテムがロック状態のままプレイヤーのインベントリに残る可能性があり（未検証）、その場合は移動・破棄できなくなり得ます。
 - このプローブは InvUI コアの `Window` を使いません。結果をコアのクリック機能の合格根拠にしないでください。
 - 設計7.2 により、`ItemLockMode.slot` は VirtualContainer のスロットを読み取り専用にする手段として使えません。陽性でも、このプローブの結果を表示スロット保護の根拠にしないでください。
