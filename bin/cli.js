@@ -759,7 +759,7 @@ function registerUiDefs(preflight) {
     if (!fs.readFileSync(destination).equals(originalContent)) {
       throw new Error('確認中に ui/_ui_defs.json が別プロセスに変更されたため書き込みませんでした。');
     }
-    fs.writeFileSync(tempPath, nextContent, { flag: 'wx', mode: 0o644 });
+    writeExclusiveTempFile(tempPath, nextContent);
     tempCreated = true;
     const tempStat = fs.lstatSync(tempPath);
     tempIdentity = { dev: tempStat.dev, ino: tempStat.ino };
@@ -851,6 +851,27 @@ function conflictError(destination) {
   const conflict = new Error(`導入先が同時に作成されました: ${destination}`);
   conflict.code = 'EEXIST';
   return conflict;
+}
+
+// 'wx' で一時ファイルを作る。作成後の書き込みが失敗した場合（ENOSPC など）は、
+// 自分が作った一時ファイルだけを消してから例外を投げる。呼び出し側の後片付けは
+// 書き込み成功後の一時ファイルを前提にしているため、ここで消さないと残骸になる。
+// EEXIST は既存ファイル（自分が作ったものではない）なので消さない。
+function writeExclusiveTempFile(tempPath, content) {
+  try {
+    fs.writeFileSync(tempPath, content, { flag: 'wx', mode: 0o644 });
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') {
+          error.message += ` / 一時ファイルを削除できません: ${tempPath} (${cleanupError.message})`;
+        }
+      }
+    }
+    throw error;
+  }
 }
 
 function placeFileWithoutOverwrite(tempPath, destination) {
@@ -1063,7 +1084,7 @@ function applyTemplate(resourcePack, options = {}) {
         parent,
         `.invui-${path.basename(entry.destination)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
       );
-      fs.writeFileSync(tempPath, entry.templateContent, { flag: 'wx', mode: 0o644 });
+      writeExclusiveTempFile(tempPath, entry.templateContent);
       staged.push({ ...entry, tempPath });
     }
 
@@ -1315,7 +1336,7 @@ function generateResourcePack(outputRoot) {
       const destination = path.join(outputRoot, file.relativePath);
       createMissingDirectories(path.dirname(destination), createdDirectories);
       const tempPath = `${destination}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-      fs.writeFileSync(tempPath, file.content, { flag: 'wx', mode: 0o644 });
+      writeExclusiveTempFile(tempPath, file.content);
       stagedTemps.push(tempPath);
       const identity = placeFileWithoutOverwrite(tempPath, destination);
       // 配置に成功した時点で記録する。直後の temp 削除が失敗しても、

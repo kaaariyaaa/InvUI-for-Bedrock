@@ -153,6 +153,28 @@ function withFixture(callback) {
   }
 }
 
+// 最初に一致した一時ファイルへ書き込み、作成直後（部分書き込みの状態）に失敗させる。
+// ディスク不足などで writeFileSync が「ファイルは作ったが書けなかった」場合を再現する。
+function withPartialTempWriteFailure(matcher, callback) {
+  const originalWriteFile = fs.writeFileSync;
+  let injected = false;
+  fs.writeFileSync = (target, data, ...args) => {
+    if (!injected && typeof target === 'string' && target.endsWith('.tmp') && matcher(target)) {
+      injected = true;
+      originalWriteFile(target, 'partial write', { flag: 'wx', mode: 0o644 });
+      const error = new Error('simulated ENOSPC');
+      error.code = 'ENOSPC';
+      throw error;
+    }
+    return originalWriteFile(target, data, ...args);
+  };
+  try {
+    return { value: callback(), injected };
+  } finally {
+    fs.writeFileSync = originalWriteFile;
+  }
+}
+
 test('--help は beta・未検証・明示インストールの注意を表示して終了する', () => {
   const result = runCli(['--help']);
   assert.equal(result.status, 0);
@@ -1007,6 +1029,64 @@ test(
       fs.writeFileSync = originalWriteFile;
       fs.rmSync(root, { recursive: true, force: true });
     }
+  },
+);
+
+test('generate-resource-pack は一時ファイルの書き込み途中に失敗しても残骸を残さない', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
+  try {
+    const output = path.join(root, 'pack');
+    const { value: result, injected } = withPartialTempWriteFailure(
+      (target) => target.startsWith(output),
+      () => generateResourcePack(output),
+    );
+
+    assert.equal(injected, true, '一時ファイル書き込み中の失敗を注入できた');
+    assert.equal(result.status, 'failed');
+    assert.match(result.error, /simulated ENOSPC/);
+    // 部分書き込みの一時ファイルが残ると出力先ディレクトリも削除できず、
+    // 同じコマンドの再実行が「出力先が既に存在します」で失敗する。
+    assert.equal(fs.existsSync(output), false);
+    assert.deepEqual(fs.readdirSync(root), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  'テンプレート配置と _ui_defs 追記は一時ファイルの書き込み途中に失敗しても残骸を残さない',
+  () => {
+    withFixture(({ resourcePack }) => {
+      const before = snapshot(resourcePack);
+      const staged = withPartialTempWriteFailure(
+        (target) => path.basename(target).startsWith('.invui-'),
+        () => applyTemplate(resourcePack),
+      );
+      assert.equal(staged.injected, true, 'テンプレート配置中の失敗を注入できた');
+      assert.equal(staged.value.status, 'failed');
+      assert.match(staged.value.error, /simulated ENOSPC/);
+      // 部分書き込みの一時ファイルが残ると ui/ も空にならず、利用者のパックへ残骸が残る。
+      assert.deepEqual(snapshot(resourcePack), before);
+      assert.deepEqual(fs.readdirSync(path.join(resourcePack, 'ui')).sort(), [
+        '_ui_defs.json',
+        'chest_screen.json',
+      ]);
+
+      const beforeRegister = snapshot(resourcePack);
+      const registered = withPartialTempWriteFailure(
+        (target) => path.basename(target).startsWith('._ui_defs.json'),
+        () => applyTemplate(resourcePack, { registerUiDefs: true }),
+      );
+      assert.equal(registered.injected, true, '_ui_defs.json 追記中の失敗を注入できた');
+      assert.equal(registered.value.status, 'failed');
+      assert.match(registered.value.error, /simulated ENOSPC/);
+      assert.deepEqual(snapshot(resourcePack), beforeRegister);
+      // 追記用の一時ファイルもバックアップも残さない。
+      assert.deepEqual(fs.readdirSync(path.join(resourcePack, 'ui')).sort(), [
+        '_ui_defs.json',
+        'chest_screen.json',
+      ]);
+    });
   },
 );
 
