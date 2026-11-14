@@ -2661,6 +2661,83 @@ test("shrinking a keyed GuiLink child clamps its nested page state", async () =>
   window.close();
 });
 
+test("opening a shared window with a smaller content range does not rewind the other viewer", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const big = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("big", 6),
+  });
+  const small = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("small", 2),
+  });
+  const first = sharedWindow(big, manager, adapter, "open-rewind");
+  const second = sharedWindow(small, manager, adapter, "open-rewind");
+
+  await first.open();
+  const firstContainer = adapter.containers[0];
+  first.setState({ page: 2 });
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+
+  // The second window only renders its own clamped page. Writing that clamp
+  // back would move the first viewer, which still has three pages, to page 0.
+  await second.open();
+  await tick();
+  assert.equal(second.getState().page, 2);
+  assert.equal(adapter.containers[1].items[0].typeId, "minecraft:small_0");
+  assert.equal(first.getState().page, 2);
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+  first.close();
+  second.close();
+});
+
+test("selecting a tab whose content shrank while hidden revalidates its nested page", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const child = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("hiddenpage", 4),
+  });
+  const gui = Gui.tab({
+    tabs: [
+      child,
+      Gui.normal({ structure: ["y"], ingredients: { y: Item.simple(() => stack("minecraft:other")) } }),
+    ],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ tab: 1, tabs: { 0: { page: 1 } } });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:other");
+
+  // Only the active tab is resolved, so the hidden tab's page stays as stored
+  // until the player selects it and sees the clamped value.
+  child.setContent(contentItems("hiddensmall", 2));
+  await tick();
+  assert.equal(window.getState().tabs[0].page, 1);
+
+  window.setState({ tab: 0 });
+  await tick();
+  assert.equal(window.getState().tabs[0].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:hiddensmall_0");
+
+  child.setContent(contentItems("hiddengrown", 4));
+  await tick();
+  assert.equal(window.getState().tabs[0].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:hiddengrown_0");
+  window.close();
+});
+
 test("a structural GUI change fails closed and never persists the old schema", async () => {
   const store = memoryStore();
   const adapter = new InMemoryTestAdapter();

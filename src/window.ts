@@ -96,6 +96,7 @@ import type { Item } from "./item.js";
 import { SlotWriteCache } from "./render-cache.js";
 import { StateManager } from "./state.js";
 import type {
+  GuiStateField,
   GuiStatePatch,
   StateHandle,
   StateLifetime,
@@ -1133,9 +1134,10 @@ export class Window {
   /** Set when state or GUI changes while `open()` is still resolving providers. */
   #refreshPending = false;
   /**
-   * Set by a GUI content change: the next resolve writes back clamped
-   * page/line/tab values (design 9.5). A plain `setState()` does not set it, so
-   * an explicitly written value stays stored until content actually changes.
+   * Set by a GUI content change or a tab selection: the next resolve writes
+   * back clamped page/line/tab values (design 9.5). A plain `setState()` does
+   * not set it, so an explicitly written value stays stored until content
+   * actually changes or a different tab's stored ranges become visible.
    */
   #revalidateStateRanges = false;
   /**
@@ -1389,7 +1391,9 @@ export class Window {
       this.#stateSchema = handle.schema;
       // Subscribe before the first provider runs: state may change while async
       // providers are still resolving, and the screen must show the new state.
-      this.#stateSubscription = handle.subscribe(() => this.#onStateChanged());
+      this.#stateSubscription = handle.subscribe((_state, changed) =>
+        this.#onStateChanged(changed),
+      );
       // Same for GUI changes: content/ingredient edits, including GuiLink and
       // TabGui children, must be visible on the first rendered pass.
       this.#guiSubscription = this.upperGui.subscribe(() => this.#onGuiChanged());
@@ -1408,10 +1412,11 @@ export class Window {
         return container;
       };
 
-      let layout = this.#resolveCurrentState(handle, true);
-      if (generation !== this.#generation || this.#status !== "opening") {
-        return;
-      }
+      // Opening only resolves the state that is there: writing a clamped
+      // value back here would let a window with a smaller content range rewind
+      // the page/line another viewer of the same shared state is using.
+      // Revalidation is tied to an observed content change instead.
+      let layout = this.upperGui.resolve(this.viewer, handle.get());
       let size = containerSizeOf(layout);
       if (size < 1 || size > 54) {
         throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
@@ -1430,10 +1435,8 @@ export class Window {
         // Any state or GUI change after this point makes the pass stale;
         // re-resolve and render again until the rendered inputs are current.
         this.#refreshPending = false;
-        layout = this.#resolveCurrentState(handle, true);
-        if (generation !== this.#generation || this.#status !== "opening") {
-          return;
-        }
+        layout = this.#resolveCurrentState(handle, this.#revalidateStateRanges);
+        this.#revalidateStateRanges = false;
         size = containerSizeOf(layout);
         if (size < 1 || size > 54) {
           throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
@@ -1796,7 +1799,8 @@ export class Window {
    * value the layout clamped (design 9.5). Without the write-back the managed
    * state keeps an out-of-range value after content shrinks, and growing the
    * content again would restore that old page/line/tab instead of the one on
-   * screen. Revalidation runs after a content change and on open; a direct
+   * screen. Revalidation runs after a content change and when another tab's
+   * stored state becomes visible; `open()` only resolves, and a direct
    * `setState()` is stored as written.
    */
   #resolveCurrentState(handle: StateHandle, revalidateRanges: boolean): ResolvedGuiLayout {
@@ -1886,6 +1890,7 @@ export class Window {
           this.#report(error, "resize");
           return;
         }
+        this.#revalidateStateRanges = false;
         if (
           generation !== this.#generation ||
           this.#status !== "open" ||
@@ -2324,7 +2329,15 @@ export class Window {
   }
 
   /** State changed: invalidate in-flight renders and re-evaluate the GUI. */
-  #onStateChanged(): void {
+  #onStateChanged(changed: readonly GuiStateField[]): void {
+    // Content changes are only resolved for the active tab, so a branch that
+    // was hidden while its content shrank still stores an out-of-range page or
+    // line. Selecting that tab is the first time the clamped value is shown:
+    // revalidate it on the refresh that shows it, so shrinking and growing
+    // content cannot resurrect a value the player already saw clamped.
+    if (changed.includes("tab")) {
+      this.#revalidateStateRanges = true;
+    }
     this.#scheduleRefresh();
   }
 
