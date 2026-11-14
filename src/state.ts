@@ -120,7 +120,10 @@ export interface StateManagerOptions {
    * Defaults to none: a version/schema mismatch fails closed with
    * {@link StateConflictError}, exactly as before. A match is applied only to
    * `persistent` registrations, and only to a record whose identity and
-   * lifetime already match. The decoded legacy record (any shape) is passed
+   * lifetime already match. A record without `lifetime`/`schema` is the design
+   * 9.6 shape and is read as persistent and schema-less, so declaring
+   * `fromSchema: null` migrates it even when its stored version is already
+   * current. The decoded legacy record (any shape) is passed
    * to the callback; the returned GUI state is validated and the migrated
    * record is written only after both succeed, so a throwing or invalid
    * callback leaves the stored record untouched. The callback runs under the
@@ -784,6 +787,25 @@ function storageKeyOf(identity: string): string {
   return `invui:gui-state:${identity}`;
 }
 
+/**
+ * Stored lifetime, defaulting to `persistent` when the field is absent. Design
+ * 9.6 predates the field, so a record in exactly that documented shape has no
+ * `lifetime` even though it can only describe a persisted state. Reading it as
+ * anything else would make the documented shape unloadable.
+ */
+function storedLifetimeOf(record: Record<string, unknown>): unknown {
+  return hasOwn(record, "lifetime") ? record.lifetime : "persistent";
+}
+
+/**
+ * Stored schema, defaulting to `null` (schema-less) when the field is absent,
+ * matching {@link StateMigrationOptions.fromSchema}'s meaning for design 9.6
+ * records.
+ */
+function storedSchemaOf(record: Record<string, unknown>): unknown {
+  return hasOwn(record, "schema") ? record.schema : null;
+}
+
 function describeIdentity(
   scope: StateScope,
   ownerId: string | undefined,
@@ -1413,7 +1435,7 @@ export class StateManager {
         `Stored state ${source} has version ${String(record.version)}; migration expects ${normalized.fromVersion}`,
       );
     }
-    const storedSchema = hasOwn(record, "schema") ? record.schema : null;
+    const storedSchema = storedSchemaOf(record);
     if (storedSchema !== normalized.fromSchema) {
       throw new StateConflictError(
         "SCHEMA_MISMATCH",
@@ -1430,10 +1452,11 @@ export class StateManager {
         `Stored state under ${storageKeyOf(identity)} describes a different identity than ${source}`,
       );
     }
-    if (record.lifetime !== undefined && record.lifetime !== "persistent") {
+    const storedLifetime = storedLifetimeOf(record);
+    if (storedLifetime !== "persistent") {
       throw new StateConflictError(
         "LIFETIME_MISMATCH",
-        `Stored state ${source} has lifetime "${String(record.lifetime)}"; migration only rewrites persistent records`,
+        `Stored state ${source} has lifetime ${JSON.stringify(storedLifetime)}; migration only rewrites persistent records`,
       );
     }
   }
@@ -1543,10 +1566,10 @@ export class StateManager {
     }
     // The manual `migrate` contract also treats a record without a lifetime
     // as an older persistent record (design 9.6 predates the field).
-    if (parsed.lifetime !== undefined && parsed.lifetime !== "persistent") {
+    if (storedLifetimeOf(parsed) !== "persistent") {
       return null;
     }
-    const storedSchema = hasOwn(parsed, "schema") ? parsed.schema : null;
+    const storedSchema = storedSchemaOf(parsed);
     const migration = this.#migrations.find(
       (candidate) =>
         candidate.identity === identity &&
@@ -1607,20 +1630,27 @@ export class StateManager {
         `Stored state under ${storageKeyOf(identity)} describes a different identity`,
       );
     }
-    if (parsed.lifetime !== normalized.lifetime) {
+    // Design 9.6 records have neither `lifetime` nor `schema`. They are read
+    // as persistent and schema-less, the same way `migrate` reads them, so a
+    // declared migration can upgrade a record that happens to carry the
+    // current storage version. Explicitly tagged non-persistent records still
+    // fail closed without being touched.
+    const storedLifetime = storedLifetimeOf(parsed);
+    if (storedLifetime !== normalized.lifetime) {
       throw new StateConflictError(
         "LIFETIME_MISMATCH",
-        `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has lifetime "${String(parsed.lifetime)}", not "${normalized.lifetime}"`,
+        `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has lifetime ${JSON.stringify(storedLifetime)}, not "${normalized.lifetime}"`,
       );
     }
-    if (parsed.schema !== normalized.schema) {
+    const storedSchema = storedSchemaOf(parsed);
+    if (storedSchema !== normalized.schema) {
       const migrated = this.#autoMigrate(normalized, identity, parsed);
       if (migrated !== null) {
         return migrated;
       }
       throw new StateConflictError(
         "SCHEMA_MISMATCH",
-        `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has schema "${String(parsed.schema)}", not "${normalized.schema}"`,
+        `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has schema ${JSON.stringify(storedSchema)}, not "${normalized.schema}"`,
       );
     }
     if (!hasOwn(parsed, "guiState")) {

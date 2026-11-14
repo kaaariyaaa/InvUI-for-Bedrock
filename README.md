@@ -149,7 +149,7 @@ states.migrate(
 - コールバックにはデコード済みの旧レコードがそのまま渡されます。戻り値は現在の `GuiState` として検証・複製され、`STATE_STORAGE_VERSION` と指定した schema で上書き保存されます。
 - コールバックまたは検証が失敗した場合、`StateManager` はストアに書き込みません。ストア書き込みの失敗時はロールバックされず、結果はストアの実装に依存します（次項参照）。失敗前に解放済みのメモリ上の entry は破棄されるため、次回の `acquire()` はストアから読み直します。壊れた JSON はコールバックに渡さず `StateCorruptionError` で失敗します。
 - **注入した外部 `StateStore` の失敗時の状態は、その実装の原子性に依存します。** `StateManager` は 1 レコードにつき `setItem()` を 1 回だけ呼び、失敗したときに再試行・ロールバック・部分書き込みの検出を行いません。したがって、`setItem()` が途中で失敗して値を部分的に残すストア実装では、**部分的な書き込みが残る可能性があります**。`BedrockWorldStateStore` は 1 つの動的プロパティへの単一 `setDynamicProperty()` 呼び出しですが、エンジン側で失敗したときに書き込みが残らないかは実機未検証です。
-- 自動移行は、`StateManager` の `migrations` に宣言したものだけを `acquire()` が適用します。宣言は identity・`fromVersion`・`fromSchema`・移行後 `schema` の完全一致が必要で、対象は `persistent` レコードだけです。宣言のない version/schema 不一致は従来どおり `StateConflictError` で拒否します。破損レコード（デコード不能な JSON、不正な `guiState`）の自動退避・復旧は `StateManager` の `quarantineCorrupt: true` を指定した場合だけ `acquire()` が行い、version/schema 不一致は対象外です。
+- 自動移行は、`StateManager` の `migrations` に宣言したものだけを `acquire()` が適用します。宣言は identity・`fromVersion`・`fromSchema`・移行後 `schema` の完全一致が必要で、対象は `persistent` レコードだけです。宣言のない version/schema 不一致は従来どおり `StateConflictError` で拒否します。破損レコード（デコード不能な JSON、不正な `guiState`）の自動退避・復旧は `StateManager` の `quarantineCorrupt: true` を指定した場合だけ `acquire()` が行い、version/schema 不一致は対象外です。`lifetime` / `schema` を持たない設計 9.6 形式のレコードは、`persistent` かつ schema なしとして扱います。現在の `STATE_STORAGE_VERSION` を持つ古い形式のレコードも、`fromVersion: STATE_STORAGE_VERSION` / `fromSchema: null` の宣言があれば自動移行されます（宣言がなければ `SCHEMA_MISMATCH` で失敗し、レコードは変更しません）。
 
 ```ts
 const states = new StateManager(store, {
