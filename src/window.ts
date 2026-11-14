@@ -1772,16 +1772,61 @@ export class Window {
       }
     }
     this.#upperGui = gui;
+    const previousLayout = this.#layout;
     this.#applyLayout(layout);
     // A failed element subscription inside #applyLayout is reported, and the
     // handler may have closed and reopened: do not refresh the new generation.
     if (generation !== this.#generation) {
       return;
     }
-    // A different GUI may have a different content size; revalidate the state
-    // ranges on the refresh that renders it.
-    this.#revalidateStateRanges = true;
-    this.#scheduleRefresh();
+    // A different GUI may have a smaller content range. Write back the clamped
+    // page/line/tab through the normal refresh path (design 8.4 / 9.5) instead
+    // of the in-place slot diff, because that refresh re-resolves and renders
+    // the corrected state.
+    if (layout.statePatch !== undefined) {
+      this.#revalidateStateRanges = true;
+      this.#scheduleRefresh();
+      return;
+    }
+    // The screen and container are kept, so only the slots whose element
+    // changed are new. Rendering every slot would re-run providers for
+    // unchanged items, which design 8.4 does not ask for.
+    if (this.#status === "opening" || previousLayout === undefined) {
+      this.#scheduleRefresh();
+      return;
+    }
+    this.#renderChangedSlots(previousLayout, layout);
+  }
+
+  /**
+   * Draw the slots whose element differs between two layouts of the same
+   * container (design 8.4). Unchanged slots keep their displayed stack and any
+   * in-flight provider result stays valid; #renderSlot bumps the per-slot token
+   * for changed slots so an older result cannot overwrite them.
+   */
+  #renderChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
+    const renders: Array<Promise<void>> = [];
+    const cache = this.#writeCache;
+    for (let slot = 0; slot < next.slots.length; slot += 1) {
+      if (previous.slots[slot] !== next.slots[slot]) {
+        renders.push(this.#renderSlot(slot));
+        continue;
+      }
+      // An unchanged empty slot still needs one attempt if this Window cannot
+      // prove it is already empty: a previous clear may have failed. The cache
+      // is the same proof the full refresh uses.
+      if (
+        next.slots[slot] === null &&
+        (cache === undefined || cache.shouldWrite(physicalSlotOf(next, slot), undefined))
+      ) {
+        renders.push(this.#renderSlot(slot));
+      }
+    }
+    void Promise.all(renders).catch((error) => {
+      if (this.#status === "open") {
+        this.#report(error, "guiChange");
+      }
+    });
   }
 
   /**

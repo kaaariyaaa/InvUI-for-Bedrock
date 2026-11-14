@@ -2175,6 +2175,57 @@ test("a same-size upper GUI swap re-renders and moves subscriptions", async () =
   window.close();
 });
 
+test("a same-size upper GUI swap renders only slots whose element changed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let sharedCalls = 0;
+  const shared = Item.simple(() => {
+    sharedCalls += 1;
+    return stack("minecraft:shared");
+  });
+  const oldItem = Item.simple(() => stack("minecraft:old"));
+  const newItem = Item.simple(() => stack("minecraft:new"));
+  const oldGui = Gui.normal({ structure: ["ab"], ingredients: { a: shared, b: oldItem } });
+  const newGui = Gui.normal({ structure: ["ab"], ingredients: { a: shared, b: newItem } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.deepEqual(
+    [container.items[0].typeId, container.items[1].typeId],
+    ["minecraft:shared", "minecraft:old"],
+  );
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+
+  // The GUI changes only slot 1. The unchanged item in slot 0 must keep its
+  // displayed stack and must not have its provider re-evaluated (design 8.4).
+  sharedCalls = 0;
+  window.setUpperGui(newGui);
+  await tick();
+  assert.deepEqual(writes, [1]);
+  assert.equal(sharedCalls, 0);
+  assert.equal(container.items[0].typeId, "minecraft:shared");
+  assert.equal(container.items[1].typeId, "minecraft:new");
+
+  // The unchanged slot keeps its element subscription, so it still refreshes
+  // on an explicit Item notification.
+  writes.length = 0;
+  shared.notifyWindows();
+  await tick();
+  assert.deepEqual(writes, [0]);
+  window.close();
+});
+
 test("an upper GUI swap that changes the size is refused and reported", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
