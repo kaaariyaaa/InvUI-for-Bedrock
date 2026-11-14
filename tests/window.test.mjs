@@ -3673,6 +3673,62 @@ test("selecting a tab whose content shrank while hidden revalidates its nested p
   window.close();
 });
 
+test("selecting a tab nested under a GuiLink revalidates its hidden page", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const paged = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("nestedpage", 4),
+  });
+  const inner = Gui.tab({
+    tabs: [
+      Gui.normal({ structure: ["z"], ingredients: { z: Item.simple(() => stack("minecraft:zero")) } }),
+      paged,
+    ],
+  });
+  const nestedState = (tab, page) => ({
+    tabs: { 0: { children: { inner: { tab, tabs: { 1: { page } } } } } },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({
+      tabs: [
+        Gui.normal({ structure: ["@."], ingredients: { "@": new GuiLink(inner, { key: "inner" }) } }),
+        Gui.normal({ structure: ["y"], ingredients: { y: Item.simple(() => stack("minecraft:other")) } }),
+      ],
+    }))
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState(nestedState(1, 1));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:nestedpage_2");
+
+  // Hide the paged tab; its stored page is no longer resolved by a refresh.
+  window.setState(nestedState(0, 1));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:zero");
+  paged.setContent(contentItems("nestedsmall", 2));
+  await tick();
+  assert.equal(window.getState().tabs[0].children.inner.tabs[1].page, 1);
+
+  // A nested tab selection changes `children`/`tabs`, not `tab`: showing the
+  // clamp because of it must still revalidate the value into managed state.
+  window.setState(nestedState(1, 1));
+  await tick();
+  assert.equal(window.getState().tabs[0].children.inner.tabs[1].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:nestedsmall_0");
+
+  paged.setContent(contentItems("nestedgrown", 4));
+  await tick();
+  assert.equal(window.getState().tabs[0].children.inner.tabs[1].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:nestedgrown_0");
+  window.close();
+});
+
 test("a structural GUI change fails closed and never persists the old schema", async () => {
   const store = memoryStore();
   const adapter = new InMemoryTestAdapter();

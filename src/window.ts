@@ -2988,7 +2988,14 @@ export class Window {
     // line. Selecting that tab is the first time the clamped value is shown:
     // revalidate it on the refresh that shows it, so shrinking and growing
     // content cannot resurrect a value the player already saw clamped.
-    if (changed.includes("tab")) {
+    // A tab nested in a GuiLink or another tab stores its selection under
+    // `children`/`tabs` instead of `tab`, so those fields select a nested tab
+    // too and must revalidate the branch they reveal.
+    if (
+      changed.includes("tab") ||
+      changed.includes("tabs") ||
+      changed.includes("children")
+    ) {
       this.#revalidateStateRanges = true;
     }
     this.#scheduleSlotRefresh();
