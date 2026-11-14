@@ -39,14 +39,17 @@ resource_pack/
 ## 既定で有効な画面接続
 
 `ui/invui_connect_data_driven.json` は `data_driven_container.desktop_panel` と
-`pocket_panel` の `controls` 先頭へ次の 2 つを `insert_front` で、末尾へ透明ブロッカーを
-`insert_back` で差し込みます。
+`pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で
+差し込みます。透明ブロッカーは、デスクトップではスロット領域の `panel_top_half`
+（`item_grid` と同じ基準）の `controls` 末尾へ、pocket では `pocket_panel` の `controls`
+末尾へ `insert_back` で差し込みます。
 
 - `ui/invui_connect.json` の警告ラベル（「このパネルを使う全画面に適用され得る」ことと、ブロッカーの限界を画面内に表示）
 - `ui/invui.json` の `invui_probe_root`（ラベルと実験的 `button.send` 部品）
 - `invui_connect_probe.grid_blocker`（透明な `button`。ホバー・押下時だけ赤く色づく）
 
-ブロッカーは `desktop_panel` では `offset [7, 10]` / `size [162, "100%-24px"]`、
+ブロッカーはデスクトップでは `panel_top_half` 上で `offset [7, 10]` / `size [162, "100%-24px"]`
+（公式 sample の `item_grid` の `offset [7, 10]` と 18px 行に一致）、
 `pocket_panel` では `anchor_from: top_middle` / `anchor_to: top_left` / `offset [0, 27]` /
 `size ["50%", "100%-27px"]` でコンテナ側グリッド付近を覆います。`button.menu_select`、
 `button.menu_ok`、`button.menu_secondary_select`、`button.controller_select`、

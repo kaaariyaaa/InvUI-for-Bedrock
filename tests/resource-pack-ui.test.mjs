@@ -375,3 +375,72 @@ test("the default connection files do not reference the grid probe", () => {
     assert.ok(!text.includes("button.drop_one"), `${file} must not remap clicks to drop_one by default`);
   }
 });
+
+test("the default desktop blocker is anchored to the sample slot area, not the whole panel", () => {
+  // Pinned sample: Mojang/bedrock-samples v1.26.70.23-preview
+  // (commit 430142679bb7daf3160671f06ab32ea433be1e1d),
+  // resource_pack/ui/data_driven_container_screen.json:
+  // - item_grid: size [162, "default"]; the instance inside panel_top_half sets
+  //   offset [7, 10]; rows are 18px.
+  // - panel_top_half heights for $container_rows_1..6: 42, 60, 78, 96, 114, 132.
+  // - pocket_half_screen: offset [0, 27], size ["50%", "100%-27px"]; the
+  //   container instance on pocket_panel sets anchor_from top_middle.
+  const SAMPLE_ITEM_GRID_OFFSET = [7, 10];
+  const SAMPLE_ITEM_GRID_WIDTH = 162;
+  const SAMPLE_ROW_HEIGHT = 18;
+  const SAMPLE_PANEL_TOP_HALF_HEIGHTS = [42, 60, 78, 96, 114, 132];
+  const SAMPLE_PANEL_TOP_HALF_PADDING = 24;
+
+  const mods = readJson(path.join(uiDir, "invui_connect_data_driven.json"));
+
+  const desktop = mods.desktop_panel.modifications;
+  assert.equal(desktop.length, 1, "desktop_panel must only add the probe; the blocker belongs to panel_top_half");
+  assert.ok(
+    !Object.keys(desktop[0].value[0])[0].includes("grid_blocker"),
+    "the blocker must not be inserted into desktop_panel, whose root is 130..220px tall",
+  );
+
+  const topHalf = mods.panel_top_half.modifications;
+  assert.equal(topHalf.length, 1, "the desktop blocker must live in panel_top_half");
+  const [blockerName, blocker] = Object.entries(topHalf[0].value[0])[0];
+  assert.equal(blockerName.split("@")[1], "invui_connect_probe.grid_blocker");
+  assert.deepEqual(blocker.offset, SAMPLE_ITEM_GRID_OFFSET, "the blocker must share the item grid origin");
+  assert.equal(blocker.size[0], SAMPLE_ITEM_GRID_WIDTH, "the blocker must share the item grid width");
+  assert.equal(blocker.size[1], "100%-24px", "the blocker height must subtract the sample padding");
+
+  for (let rows = 1; rows <= SAMPLE_PANEL_TOP_HALF_HEIGHTS.length; rows += 1) {
+    const panelHeight = SAMPLE_PANEL_TOP_HALF_PADDING + rows * SAMPLE_ROW_HEIGHT;
+    assert.equal(
+      SAMPLE_PANEL_TOP_HALF_HEIGHTS[rows - 1],
+      panelHeight,
+      `sample panel_top_half height for ${rows} row(s) changed`,
+    );
+    // "100%-24px" measured from panel_top_half is exactly rows * 18px, so the
+    // blocker covers the slots and stops before the panel's bottom padding.
+    assert.equal(panelHeight - SAMPLE_PANEL_TOP_HALF_PADDING, rows * SAMPLE_ROW_HEIGHT);
+  }
+
+  const pocketBlocker = mods.pocket_panel.modifications
+    .flatMap((modification) => modification.value)
+    .map((value) => Object.entries(value)[0])
+    .find(([name]) => name.includes("grid_blocker"));
+  assert.ok(pocketBlocker, "missing the pocket blocker");
+  assert.deepEqual(
+    pocketBlocker[1],
+    {
+      anchor_from: "top_middle",
+      anchor_to: "top_left",
+      offset: [0, 27],
+      size: ["50%", "100%-27px"],
+    },
+    "the pocket blocker must match pocket_half_screen",
+  );
+
+  // The prose must name the panel the JSON actually modifies.
+  const readme = readText(packReadmePath);
+  assert.ok(readme.includes("panel_top_half"), "README must name the desktop blocker's parent panel");
+  assert.ok(
+    !readme.includes("ブロッカーは `desktop_panel` では"),
+    "README must not measure the blocker geometry from desktop_panel",
+  );
+});

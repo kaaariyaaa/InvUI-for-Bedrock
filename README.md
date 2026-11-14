@@ -47,7 +47,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 合否チェックリスト（[CHECKLIST.md](tests/manual-bedrock/CHECKLIST.md)） | あり |
 | 利用イメージ（[examples/README.md](examples/README.md)） | 設計スケッチのみ。型検査は可能、実行は対象外 |
 | 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
-| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込み、末尾へ透明ブロッカー（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
+| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込み、透明ブロッカー（`invui_connect_probe.grid_blocker`）はデスクトップでは `panel_top_half`（`item_grid` と同じ基準）、pocket では `pocket_panel` の `controls` 末尾へ `insert_back` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
 | npm 公開 | 未実施 |
 | ライセンス | 未設定 |
 
@@ -471,7 +471,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 ## Resource Pack テンプレート（実験用・未検証）
 
-`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込み、さらに末尾へ透明ブロッカー（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
+`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込みます。透明ブロッカー（`invui_connect_probe.grid_blocker`）は、デスクトップではスロット領域の `panel_top_half`（`item_grid` と同じ基準）、pocket では `pocket_panel` の `controls` 末尾へ `insert_back` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
 
 ただし **`VirtualContainer` を識別する仕組みはなく**、接続先のパネルを使う全画面（通常のコンテナや data-driven ブロックの画面を含み得る）に表示され得ます。そのため、他の画面での入力干渉・表示の重なり・アイテム保護の欠如というリスクが残ります。透明ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。VirtualContainer 画面を使っているかは未確定です。**実機未検証であり、接続・表示・入力の遮断・アイテム保護のいずれも保証しません。** 他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。
 

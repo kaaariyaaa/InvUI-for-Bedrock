@@ -252,9 +252,19 @@ for (const file of fs.readdirSync(expUiDir)) {
 }
 
 const readme = fs.readFileSync(README, "utf8");
-for (const phrase of ["使い捨てワールド", "既定で有効", "全画面", "VirtualContainer を特定できない"]) {
+for (const phrase of [
+  "使い捨てワールド",
+  "既定で有効",
+  "全画面",
+  "VirtualContainer を特定できない",
+  "panel_top_half",
+]) {
   assert.ok(readme.includes(phrase), `README must state: ${phrase}`);
 }
+assert.ok(
+  !readme.includes("ブロッカーは `desktop_panel` では"),
+  "README must not measure the desktop blocker from desktop_panel",
+);
 
 // The top-level README is the first place a reader sees this default-on
 // connection; it must repeat every limit rather than call the blocker

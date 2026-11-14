@@ -32,10 +32,13 @@
 `tests/manual-bedrock/data-driven-resource-pack/` の判定プローブと同じ候補パネルに、
 既存の `invui_probe.invui_probe_root`（`ui/invui.json` のラベルと実験的 `button.send` 部品）を
 `insert_front` で差し込みます。加えて、適用範囲が全画面に及び得ることとブロッカーの限界を
-画面内に示す警告ラベルを重ね、**透明ブロッカー**を `insert_back` で差し込みます。
+画面内に示す警告ラベルを重ねます。**透明ブロッカー**は、デスクトップではスロット領域の
+`panel_top_half`（`item_grid` と同じ基準）の `controls` 末尾へ、pocket では `pocket_panel` の
+`controls` 末尾へ `insert_back` で差し込みます。
 
-ブロッカーは `invui_connect_probe.grid_blocker` という透明な `button` で、`desktop_panel` では
-`offset [7, 10]` / `size [162, "100%-24px"]`、`pocket_panel` では `anchor_from: top_middle` /
+ブロッカーは `invui_connect_probe.grid_blocker` という透明な `button` で、デスクトップでは
+`panel_top_half` 上で `offset [7, 10]` / `size [162, "100%-24px"]`（公式 sample の `item_grid` の
+`offset [7, 10]` と 18px 行に一致）、`pocket_panel` では `anchor_from: top_middle` /
 `anchor_to: top_left` / `offset [0, 27]` / `size ["50%", "100%-27px"]` の範囲を覆います。
 ホバー・押下時だけ赤く色づきます。`button.menu_select`、`button.menu_ok`、
 `button.menu_secondary_select`、`button.controller_select`、`button.menu_auto_place`、
