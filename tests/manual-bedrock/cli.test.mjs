@@ -153,25 +153,52 @@ function withFixture(callback) {
   }
 }
 
-// 最初に一致した一時ファイルへ書き込み、作成直後（部分書き込みの状態）に失敗させる。
-// ディスク不足などで writeFileSync が「ファイルは作ったが書けなかった」場合を再現する。
-function withPartialTempWriteFailure(matcher, callback) {
+// 一時ファイルの書き込み（open 成功直後・部分書き込みの状態）に失敗させる。
+// 実装は openSync('wx') で fd を確保してから書くので、fd を追跡して write で失敗させる。
+// fail() は部分書き込みの直前に呼ばれ、別プロセスの割り込みを再現するために使う。
+function withTempWriteFailure(matcher, fail) {
+  const originalOpen = fs.openSync;
   const originalWriteFile = fs.writeFileSync;
+  const watched = new Set();
   let injected = false;
-  fs.writeFileSync = (target, data, ...args) => {
+  fs.openSync = (target, ...args) => {
+    const fd = originalOpen(target, ...args);
     if (!injected && typeof target === 'string' && target.endsWith('.tmp') && matcher(target)) {
+      watched.add(fd);
+    }
+    return fd;
+  };
+  fs.writeFileSync = (target, data, ...args) => {
+    if (!injected && typeof target === 'number' && watched.has(target)) {
       injected = true;
-      originalWriteFile(target, 'partial write', { flag: 'wx', mode: 0o644 });
-      const error = new Error('simulated ENOSPC');
-      error.code = 'ENOSPC';
-      throw error;
+      originalWriteFile(target, 'partial write');
+      return fail();
     }
     return originalWriteFile(target, data, ...args);
   };
+  return {
+    injected: () => injected,
+    restore() {
+      fs.openSync = originalOpen;
+      fs.writeFileSync = originalWriteFile;
+    },
+  };
+}
+
+function simulatedFailure(code) {
+  const error = new Error(`simulated ${code}`);
+  error.code = code;
+  throw error;
+}
+
+// 最初に一致した一時ファイルへ書き込み、作成直後（部分書き込みの状態）に失敗させる。
+// ディスク不足などで write が「ファイルは作ったが書けなかった」場合を再現する。
+function withPartialTempWriteFailure(matcher, callback) {
+  const hook = withTempWriteFailure(matcher, () => simulatedFailure('ENOSPC'));
   try {
-    return { value: callback(), injected };
+    return { value: callback(), injected: hook.injected() };
   } finally {
-    fs.writeFileSync = originalWriteFile;
+    hook.restore();
   }
 }
 
@@ -921,25 +948,20 @@ test(
   () => {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
     const output = path.join(root, 'pack');
-    const originalWriteFile = fs.writeFileSync;
+    // 最後のファイルで失敗させ、それ以前に配置した複数ファイルのロールバックを確認する。
+    const hook = withTempWriteFailure(
+      (target) => target.includes('invui_connect_data_driven.json'),
+      () => simulatedFailure('EIO'),
+    );
     try {
-      fs.writeFileSync = (target, ...args) => {
-        // 最後のファイルで失敗させ、それ以前に配置した複数ファイルのロールバックを確認する。
-        if (typeof target === 'string' && target.includes('invui_connect_data_driven.json')) {
-          const error = new Error('simulated write failure');
-          error.code = 'EIO';
-          throw error;
-        }
-        return originalWriteFile(target, ...args);
-      };
-
       let result;
       try {
         result = generateResourcePack(output);
       } finally {
-        fs.writeFileSync = originalWriteFile;
+        hook.restore();
       }
 
+      assert.equal(hook.injected(), true, '一時ファイル書き込みの失敗を注入できた');
       assert.equal(result.status, 'failed');
       assert.equal(result.uiConnectRegistered, false);
       assert.match(result.error, /失敗/);
@@ -947,7 +969,7 @@ test(
       assert.equal(fs.existsSync(output), false);
       assert.deepEqual(fs.readdirSync(root), []);
     } finally {
-      fs.writeFileSync = originalWriteFile;
+      hook.restore();
       fs.rmSync(root, { recursive: true, force: true });
     }
   },
@@ -1002,31 +1024,28 @@ test(
     const output = path.join(root, 'pack');
     const manifestPath = path.join(output, 'manifest.json');
     const modified = 'another process rewrote this in place\n';
-    const originalWriteFile = fs.writeFileSync;
+    const hook = withTempWriteFailure(
+      (target) => target.includes('_ui_defs.json'),
+      () => {
+        // 別プロセスが同じ inode のまま manifest を書き直した状況（dev/ino は変わらない）。
+        fs.writeFileSync(manifestPath, modified);
+        simulatedFailure('EIO');
+      },
+    );
     try {
-      fs.writeFileSync = (target, ...args) => {
-        if (typeof target === 'string' && target.includes('_ui_defs.json')) {
-          // 別プロセスが同じ inode のまま manifest を書き直した状況（dev/ino は変わらない）。
-          originalWriteFile(manifestPath, modified);
-          const error = new Error('simulated write failure');
-          error.code = 'EIO';
-          throw error;
-        }
-        return originalWriteFile(target, ...args);
-      };
-
       let result;
       try {
         result = generateResourcePack(output);
       } finally {
-        fs.writeFileSync = originalWriteFile;
+        hook.restore();
       }
 
+      assert.equal(hook.injected(), true, '一時ファイル書き込みの失敗を注入できた');
       assert.equal(result.status, 'failed');
       assert.match(result.error, /変更/);
       assert.equal(fs.readFileSync(manifestPath, 'utf8'), modified);
     } finally {
-      fs.writeFileSync = originalWriteFile;
+      hook.restore();
       fs.rmSync(root, { recursive: true, force: true });
     }
   },
@@ -1087,6 +1106,79 @@ test(
         'chest_screen.json',
       ]);
     });
+  },
+);
+
+test(
+  '一時ファイルを開けなかった場合は、その名前の他人のファイルを削除しない',
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
+    const originalOpen = fs.openSync;
+    const foreign = 'another process already owns this name\n';
+    let foreignPath = null;
+    try {
+      // fd 枯渇などで「作れてはいない」が、同名のファイルは別プロセスが置いていた状況。
+      fs.openSync = (target, ...args) => {
+        if (typeof target === 'string' && target.endsWith('.tmp')) {
+          foreignPath = target;
+          fs.writeFileSync(target, foreign);
+          simulatedFailure('EMFILE');
+        }
+        return originalOpen(target, ...args);
+      };
+
+      let result;
+      try {
+        result = generateResourcePack(path.join(root, 'pack'));
+      } finally {
+        fs.openSync = originalOpen;
+      }
+
+      assert.match(result.error, /simulated EMFILE/);
+      assert.ok(foreignPath, '一時ファイルのパスを確認できた');
+      assert.equal(fs.readFileSync(foreignPath, 'utf8'), foreign);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  '一時ファイルの書き込み失敗時に同じ名前へ差し替えられたファイルは削除しない',
+  { skip: process.platform === 'win32' },
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'invui-cli-generate-')));
+    let tempPath = null;
+    const replacement = 'another process replaced this temp file\n';
+    const hook = withTempWriteFailure(
+      (target) => {
+        tempPath = target;
+        return true;
+      },
+      () => {
+        // fd は開いたまま、名前だけ別 inode のファイルへ差し替えられた状況。
+        fs.unlinkSync(tempPath);
+        fs.writeFileSync(tempPath, replacement);
+        simulatedFailure('ENOSPC');
+      },
+    );
+    try {
+      let result;
+      try {
+        result = generateResourcePack(path.join(root, 'pack'));
+      } finally {
+        hook.restore();
+      }
+
+      assert.equal(hook.injected(), true, '一時ファイル書き込みの失敗を注入できた');
+      assert.match(result.error, /simulated ENOSPC/);
+      assert.match(result.error, /削除できません/);
+      assert.equal(fs.readFileSync(tempPath, 'utf8'), replacement);
+    } finally {
+      hook.restore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   },
 );
 
