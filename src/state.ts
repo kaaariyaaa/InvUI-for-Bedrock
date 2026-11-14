@@ -234,6 +234,12 @@ export interface StateHandle {
    * store that partially applied it and then threw may already hold the new
    * record (see {@link StateStore}).
    *
+   * The identity is locked while the store write runs: a store hook that
+   * reentrantly calls `acquire`, `migrate`, `remove`, or `set` for the same
+   * identity gets a `LIVE_STATE` {@link StateConflictError}. Without that lock
+   * the reentrant commit would be overwritten by this one after the store
+   * returned, silently losing it (and leaving memory and the record disagree).
+   *
    * Notification is synchronous. A subscriber may call `set` reentrantly; that
    * newer commit supersedes the notification in progress, so every remaining
    * subscriber receives the newer snapshot instead of finishing on a stale
@@ -907,12 +913,13 @@ export class StateManager {
   readonly #entries = new Map<string, StateEntry>();
   /**
    * Identities whose record is being mutated: a running migration callback, a
-   * running `store.removeItem`, or the load/seed phase of an `acquire` (which
-   * may quarantine a corrupt record). `acquire`, `migrate`, and `remove` reject
-   * these so a reentrant call from inside a callback or a store hook cannot
-   * resurrect a stale entry, register a lease that survives the mutation,
-   * delete a record the mutation is still writing, or open a second live entry
-   * for the identity being recovered.
+   * running `store.removeItem`, the load/seed phase of an `acquire` (which may
+   * quarantine a corrupt record), or the `store.setItem` of a persistent
+   * `set`. `acquire`, `migrate`, `remove`, and `_set` reject these so a
+   * reentrant call from inside a callback or a store hook cannot resurrect a
+   * stale entry, register a lease that survives the mutation, delete a record
+   * the mutation is still writing, or overwrite a reentrant commit after the
+   * store accepted it.
    */
   readonly #mutating = new Set<string>();
 
@@ -972,9 +979,10 @@ export class StateManager {
    * then `initial`.
    *
    * Acquiring an identity whose automatic-migration callback,
-   * {@link migrate} callback, {@link remove} store call, or
-   * `quarantineCorrupt` recovery is running throws a `LIVE_STATE`
-   * {@link StateConflictError}; other identities are unaffected.
+   * {@link migrate} callback, {@link remove} store call, persistent
+   * {@link StateHandle.set} store write, or `quarantineCorrupt` recovery is
+   * running throws a `LIVE_STATE` {@link StateConflictError}; other identities
+   * are unaffected.
    */
   acquire(options: StateAcquireOptions): StateHandle {
     const optionsInput: unknown = options;
@@ -1257,13 +1265,27 @@ export class StateManager {
     if (entry.released) {
       throw new StateReleasedError("State has been released");
     }
+    if (this.#mutating.has(entry.identity)) {
+      throw new StateConflictError(
+        "LIVE_STATE",
+        `State ${describeIdentity(entry.scope, entry.ownerId, entry.key)} is being written to its store; set it after the write settles`,
+      );
+    }
     const validated = cloneState(patch, "patch");
     const merged = mergeState(entry.state, validated);
     if (merged.changed.length === 0) {
       return entry.state;
     }
     if (entry.lifetime === "persistent") {
-      this.#savePersistent(entry.identity, entry, merged.state);
+      // Lock the identity across the write. A store hook can otherwise acquire
+      // the live entry and commit nested state; this commit would then overwrite
+      // that state in memory (and its record) without telling anyone.
+      this.#mutating.add(entry.identity);
+      try {
+        this.#savePersistent(entry.identity, entry, merged.state);
+      } finally {
+        this.#mutating.delete(entry.identity);
+      }
     }
     entry.state = merged.state;
     const generation = (entry.generation += 1);

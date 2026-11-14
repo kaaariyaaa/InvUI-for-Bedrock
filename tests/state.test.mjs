@@ -2722,6 +2722,84 @@ test("remove locks the identity so a reentrant store call cannot resurrect or de
   fresh.release();
 });
 
+test("a persistent set locks its identity against reentrant store calls", () => {
+  const store = new MemoryStore();
+  const manager = new StateManager(store);
+  const identity = {
+    ownerId: "p",
+    key: "write-lock",
+    lifetime: "persistent",
+    schema: "v1",
+  };
+  const handle = manager.acquire({ ...identity, initial: { page: 1 } });
+  const { storageKey } = store.findRecord((entry) => entry.key === "write-lock");
+  const other = manager.acquire({
+    ownerId: "p",
+    key: "write-lock-other",
+    lifetime: "persistent",
+    schema: "v1",
+    initial: { page: 7 },
+  });
+  const attempts = [];
+  const attempt = (label, run) => {
+    try {
+      run();
+      attempts.push([label, "allowed"]);
+    } catch (error) {
+      attempts.push([label, error.code]);
+    }
+  };
+  const setItem = store.setItem.bind(store);
+  let hooked = false;
+
+  // A store hook that commits the same identity while the outer write is in
+  // flight used to have its state silently overwritten afterwards, leaving the
+  // screen and the persisted record on different pages.
+  store.setItem = (key, value) => {
+    if (!hooked && key === storageKey) {
+      hooked = true;
+      attempt("acquire", () => manager.acquire(identity));
+      attempt("set", () => handle.set({ page: 50 }));
+      attempt("remove", () => manager.remove({ ownerId: "p", key: "write-lock" }));
+      attempt("migrate", () =>
+        manager.migrate(
+          {
+            ownerId: "p",
+            key: "write-lock",
+            fromVersion: STATE_STORAGE_VERSION,
+            fromSchema: "v1",
+            schema: "v2",
+          },
+          () => ({ page: 9 }),
+        ),
+      );
+      // The lock is per identity: an unrelated state can still be written.
+      attempt("other", () => other.set({ page: 8 }));
+    }
+    setItem(key, value);
+  };
+
+  handle.set({ page: 2 });
+
+  assert.deepEqual(attempts, [
+    ["acquire", "LIVE_STATE"],
+    ["set", "LIVE_STATE"],
+    ["remove", "LIVE_STATE"],
+    ["migrate", "LIVE_STATE"],
+    ["other", "allowed"],
+  ]);
+  assert.deepEqual(handle.get(), { page: 2 });
+  store.setItem = setItem;
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)).guiState, { page: 2 });
+
+  // The lock is cleared in a finally block, so the identity is usable again.
+  assert.deepEqual(other.get(), { page: 8 });
+  handle.set({ page: 3 });
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)).guiState, { page: 3 });
+  handle.release();
+  other.release();
+});
+
 test("a failing remove store call clears the lock and cannot roll back the deletion", () => {
   const store = new MemoryStore();
   const manager = new StateManager(store);
