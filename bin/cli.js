@@ -209,16 +209,36 @@ function inspectPack(root, area) {
   const header = manifest.header;
   if (!header || typeof header !== 'object') {
     addCheck(checks, area, 'manifest.header', 'error', 'manifest.header がありません');
-  } else if (Array.isArray(header.min_engine_version)) {
-    addCheck(
-      checks,
-      area,
-      'manifest.min_engine_version',
-      'ok',
-      `min_engine_version: ${header.min_engine_version.join('.')}（対応ゲーム版は実機で記録する）`,
-    );
   } else {
-    addCheck(checks, area, 'manifest.min_engine_version', 'warn', 'header.min_engine_version が配列でありません');
+    // min_engine_version は配列（format_version 2 まで）と SemVer 文字列（format_version 3 では必須）の
+    // どちらも有効。配列だけを有効扱いすると、正しい v3 manifest に「配列でありません」と誤案内し、
+    // 利用者が文字列を配列へ書き換えて逆に壊しかねない。
+    const minEngineVersion = header.min_engine_version;
+    let minEngineText = null;
+    if (Array.isArray(minEngineVersion)) {
+      minEngineText = minEngineVersion.join('.');
+    } else if (typeof minEngineVersion === 'string' && minEngineVersion.trim() !== '') {
+      minEngineText = minEngineVersion.trim();
+    }
+    if (minEngineText !== null) {
+      addCheck(
+        checks,
+        area,
+        'manifest.min_engine_version',
+        'ok',
+        `min_engine_version: ${minEngineText}（対応ゲーム版は実機で記録する）`,
+      );
+    } else if (minEngineVersion === undefined) {
+      addCheck(checks, area, 'manifest.min_engine_version', 'warn', 'header.min_engine_version がありません');
+    } else {
+      addCheck(
+        checks,
+        area,
+        'manifest.min_engine_version',
+        'warn',
+        'header.min_engine_version が配列（例: [1, 21, 0]）でも SemVer 文字列（例: "1.26.40"）でもありません',
+      );
+    }
   }
 
   if (area === 'behavior-pack') {

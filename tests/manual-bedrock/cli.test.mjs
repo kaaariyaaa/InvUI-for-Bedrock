@@ -12,6 +12,7 @@
  * - 失敗時に部分適用を残さないこと
  * - 未検証の隔離プローブであり、置くだけでは有効にならないと表示すること
  * - manifest.json のルートがオブジェクトでない場合はクラッシュせず検査エラーにし、導入しないこと
+ * - min_engine_version が配列でも SemVer 文字列（format_version 3）でも正常扱いすること
  * - Resource Pack manifest に type: "resources" のモジュールがない場合は検査エラーにし、導入しないこと
  * - generate-resource-pack が init とは別に、新しい出力先へ同梱5ファイルを生成し、
  *   接続 2 ファイルを _ui_defs.json に登録済みにすること
@@ -377,6 +378,49 @@ test('resources モジュールがない manifest は検査エラーにし、導
       assert.equal(installReport.resourcePackInstall.status, 'blocked', label);
       assert.equal(installReport.resourcePackInstall.files.length, 0, label);
       assert.deepEqual(snapshot(resourcePack), before, `${label}: パックが変更された`);
+    });
+  }
+});
+
+test('SemVer 文字列の min_engine_version を配列と同じく正常として扱う', () => {
+  // format_version 3 の manifest は version / min_engine_version が文字列で、
+  // 配列へ直すと逆に無効になる。配列だけを正常扱いすると誤案内になる。
+  for (const [formatVersion, minEngineVersion] of [
+    [3, '1.26.40'],
+    [2, '1.21.90'],
+  ]) {
+    withFixture(({ behaviorPack, resourcePack }) => {
+      for (const manifestPath of [
+        path.join(behaviorPack, 'manifest.json'),
+        path.join(resourcePack, 'manifest.json'),
+      ]) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        manifest.format_version = formatVersion;
+        manifest.header.min_engine_version = minEngineVersion;
+        writeJson(manifestPath, manifest);
+      }
+
+      const result = runCli([
+        'init',
+        '--behavior-pack',
+        behaviorPack,
+        '--resource-pack',
+        resourcePack,
+        '--json',
+      ]);
+      assert.equal(result.status, 0, `format_version ${formatVersion}: ${result.both}`);
+      const report = JSON.parse(result.stdout);
+      for (const area of ['behavior-pack', 'resource-pack']) {
+        const checks = report.checks.filter(
+          (entry) => entry.area === area && entry.id === 'manifest.min_engine_version',
+        );
+        assert.equal(checks.length, 1, `format_version ${formatVersion}/${area}: ${checks.length}`);
+        assert.equal(checks[0].level, 'ok', `format_version ${formatVersion}/${area}: ${checks[0].message}`);
+        assert.ok(
+          checks[0].message.includes(minEngineVersion),
+          `format_version ${formatVersion}/${area}: ${checks[0].message}`,
+        );
+      }
     });
   }
 });
