@@ -2886,12 +2886,19 @@ export class Window {
         this.#adapter.openContainer(container, this.viewer);
         return;
       } catch (error) {
+        if (!isPreviousScreenClosingError(error)) {
+          throw error;
+        }
         if (
-          !isPreviousScreenClosingError(error) ||
-          attempt >= PREVIOUS_SCREEN_CLOSING_RETRIES ||
           generation !== this.#generation ||
           (this.#status !== "opening" && this.#status !== "open")
         ) {
+          // A close or reopen owns the Window now. The error belongs to the
+          // generation that is gone; throwing it would let `open()`'s failure
+          // path tear down the screen the new generation is opening.
+          return;
+        }
+        if (attempt >= PREVIOUS_SCREEN_CLOSING_RETRIES) {
           throw error;
         }
       }

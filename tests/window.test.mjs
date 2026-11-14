@@ -4924,6 +4924,105 @@ test("a title change retries PreviousScreenClosing before showing the new contai
   window.close("PlayerClosed");
 });
 
+test("a close during a retried open does not tear down the newer reopen", async () => {
+  // openContainer may dispatch a close event synchronously (see open()), and a
+  // close handler may reopen the Window. When that happens while the open call
+  // throws PreviousScreenClosing, the thrown error belongs to the generation
+  // that is gone: open()'s failure path must not tear down the newer screen.
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const openFailures = [];
+  const reopenings = [];
+  let opens = 0;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler(() => {
+      // The first close reopens into the generation whose open is retried, the
+      // second into the generation that must survive that stale error; a third
+      // close is cleanup.
+      if (opens < 2) {
+        opens += 1;
+        reopenings.push(
+          window.open().catch((error) => {
+            openFailures.push(error);
+          }),
+        );
+      }
+    })
+    .build();
+
+  await window.open();
+  const openContainer = adapter.openContainer.bind(adapter);
+  let attempts = 0;
+  adapter.openContainer = (container, viewer) => {
+    attempts += 1;
+    if (attempts === 1) {
+      adapter.emitClose(
+        { container, player: viewer, reason: "ServerClosed" },
+        true,
+      );
+      throw previousScreenClosingError();
+    }
+    openContainer(container, viewer);
+  };
+
+  // The reopen hits the transient error and, in the same call, the client
+  // reports the close of the screen it never showed. The close handler reopens
+  // again; that newer generation must survive the stale error.
+  window.close("PlayerClosed");
+  await tick();
+  await settleRetry(() => window.status === "open");
+  await Promise.all(reopenings);
+
+  assert.equal(attempts, 2);
+  assert.equal(window.status, "open", "the newer reopen survives the stale retry");
+  assert.deepEqual(openFailures, [], "the stale generation does not reject");
+  assert.deepEqual(errors, []);
+  window.close("PlayerClosed");
+});
+
+test("a non-PreviousScreenClosing error during a retry still propagates", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.close("PlayerClosed");
+  let attempts = 0;
+  adapter.openContainer = () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw previousScreenClosingError();
+    }
+    throw new Error("open failed");
+  };
+
+  const opening = window.open();
+  await tick();
+  const retries = scheduledRuns.splice(0);
+  assert.equal(retries.length, 1, "only PreviousScreenClosing is retried");
+  for (const run of retries) {
+    run();
+  }
+  await assert.rejects(opening, /open failed/);
+
+  assert.equal(attempts, 2);
+  assert.equal(window.status, "closed");
+  assert.deepEqual(
+    errors.map(({ context }) => context.operation),
+    ["open"],
+    "the real error is reported once",
+  );
+});
+
 test("changing the title while open regenerates the container without re-running handlers", async () => {
   const adapter = new InMemoryTestAdapter();
   let opened = 0;
