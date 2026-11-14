@@ -698,6 +698,124 @@ test("declared migrations are applied by acquire when the source matches", () =>
   });
 });
 
+test("a current-version design 9.6 record is migrated instead of being read as a lifetime mismatch", () => {
+  const store = new MemoryStore();
+  // Design 9.6 shape at the current storage version: no lifetime/schema.
+  const legacy = {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "legacy-v1",
+    ownerId: "p",
+    guiState: { page: 4, data: { keep: true } },
+  };
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "legacy-v1" },
+    legacy,
+  );
+  const seen = [];
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "legacy-v1",
+        fromVersion: STATE_STORAGE_VERSION,
+        fromSchema: null,
+        schema: "v2",
+        migrate: (old) => {
+          seen.push(old);
+          return { page: old.guiState.page + 1, data: old.guiState.data };
+        },
+      },
+    ],
+  });
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "legacy-v1",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+
+  assert.deepEqual(seen, [legacy], "the schema-less record reaches the migration");
+  assert.deepEqual(handle.get(), { page: 5, data: { keep: true } });
+  handle.release();
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)), {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "legacy-v1",
+    ownerId: "p",
+    lifetime: "persistent",
+    schema: "v2",
+    guiState: { page: 5, data: { keep: true } },
+  });
+});
+
+test("a schema-less current-version record without a migration fails closed and keeps its bytes", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "legacy-v1",
+    ownerId: "p",
+    guiState: { page: 4 },
+  };
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "legacy-v1" },
+    legacy,
+  );
+  const raw = store.getItem(storageKey);
+  const writes = store.setCalls.length;
+  const removals = store.removeCalls.length;
+
+  assert.throws(
+    () =>
+      new StateManager(store).acquire({
+        ownerId: "p",
+        key: "legacy-v1",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    (error) => expectCode(error, "SCHEMA_MISMATCH"),
+    "a missing schema is a schema mismatch, not a lifetime mismatch",
+  );
+  assert.equal(store.getItem(storageKey), raw, "the record is left untouched");
+  assert.equal(store.setCalls.length, writes, "nothing is overwritten");
+  assert.equal(store.removeCalls.length, removals, "nothing is deleted");
+});
+
+test("an explicitly non-persistent record still fails as a lifetime mismatch", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "tagged",
+    ownerId: "p",
+    lifetime: "window",
+    schema: "v2",
+    guiState: { page: 1 },
+  };
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "tagged" },
+    legacy,
+  );
+  const raw = store.getItem(storageKey);
+
+  assert.throws(
+    () =>
+      new StateManager(store).acquire({
+        ownerId: "p",
+        key: "tagged",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    (error) => expectCode(error, "LIFETIME_MISMATCH"),
+  );
+  assert.equal(store.getItem(storageKey), raw, "the record is left untouched");
+});
+
 test("automatic migration needs a matching source and target schema", () => {
   const store = new MemoryStore();
   const legacy = {
