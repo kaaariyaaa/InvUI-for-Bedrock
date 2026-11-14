@@ -286,6 +286,19 @@ test('main.js は観測のみで、復元・クリック実行・JSON UI を含�
   );
 });
 
+test('README と main.js は title 識別・重複 close・event.container 同一性を観測の限界として書く', () => {
+  const readme = fs.readFileSync(path.join(here, 'README.md'), 'utf8');
+  const source = fs.readFileSync(scriptPath, 'utf8');
+
+  assert.match(readme, /同名他パックとの衝突/);
+  assert.match(readme, /二重 close/);
+  assert.match(readme, /同一性は断定せず/);
+  assert.match(readme, /挙動の保証ではありません/);
+  assert.match(source, /same-title collision/);
+  assert.match(source, /duplicate or delayed delivery/);
+  assert.match(source, /neither relied on nor asserted/);
+});
+
 test('README は陽性/陰性の解釈と限界を明示する', () => {
   const readme = fs.readFileSync(path.join(here, 'README.md'), 'utf8');
   assert.match(readme, /使い捨てワールド専用/);

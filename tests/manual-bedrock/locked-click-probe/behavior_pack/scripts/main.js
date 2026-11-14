@@ -329,11 +329,17 @@ function containerTitle(container) {
 /**
  * Resolves an event container to the container this script created.
  *
- * A VirtualContainer exposes no id, and event payloads are not promised to
- * hand back the same object we hold, so reference lookups (`===`, WeakMap
- * keys) miss. `title` is set once at creation, is readonly, and is unique per
- * key here ("Lock probe <size> <mode>"). An unmatched container must not clear
- * anything: another pack's screen closing says nothing about our pending opens.
+ * A VirtualContainer exposes no id, and beta does not promise that
+ * `event.container` is the object returned by `create()`, so object identity
+ * (`===`, WeakMap keys) is neither relied on nor asserted here. `title` is set
+ * once at creation, is readonly, and is unique per key here
+ * ("Lock probe <size> <mode>").
+ *
+ * Observation only, not a guarantee:
+ * - another pack can create a container with the same title, and this lookup
+ *   cannot tell it apart from ours (same-title collision);
+ * - an unmatched container must not clear anything: another pack's screen
+ *   closing says nothing about our pending opens.
  */
 function knownContainer(eventContainer) {
   const title = containerTitle(eventContainer);
@@ -398,10 +404,13 @@ subscribe("virtualContainerClose", () => world.afterEvents.virtualContainerClose
   // Clear the pending open of the container the event names, and only that
   // one: a pending entry is per container, and (with two players, or with one
   // player opening a second screen while the first is unconfirmed) another
-  // container's close says nothing about it. A later open of this same
-  // container cannot be in flight yet — `canOpen` rejects it until this entry
-  // is cleared — so a close that arrives after a newer open of this container
-  // is a duplicate event, not a stale one that should clear the guard.
+  // container's close says nothing about it.
+  //
+  // Observation only, not a guarantee: duplicate or delayed delivery of a
+  // close event is not specified. This clears the pending entry once per
+  // matching close and does not claim to tell a duplicate close from a stale
+  // one. A same-title container from another pack still matches, so it can
+  // clear our entry, and that case is not distinguishable from ours in the log.
   const closedContainer = knownContainer(event.container);
   const closedPlayerId = playerId(event.player);
   const pending = closedContainer ? pendingOpen.get(closedContainer) : undefined;
