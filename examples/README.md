@@ -38,7 +38,7 @@
 | `ClickContext` | `player`、`slot`、`window: unknown` | `window` は `Window` 型ではない |
 | `Window` の設定・状態・`close()` | 実装済み | 画面を開く経路が既定で有効（実機未検証） |
 | `Window.open()` | `async`。既定の実アダプタで `VirtualContainer.open()` を呼ぶ（実機未検証） | スケッチは `await` して `try` / `catch` で受け、未処理 rejection を残さない。実機で表示されるかは未確認 |
-| `WindowBuilder.setLowerGui()` | API 互換のため受け付けるが、下側領域へは描画しない | 下側 GUI を置き換えられる前提で読まない |
+| `WindowBuilder.setLowerGui()` / `Window.setLowerGui()` | API 互換のため受け付けて `Window.lowerGui` に保持するが、下側領域へは描画しない | 下側 GUI を置き換えられる前提で読まない |
 | `InventoryLink` の読み書き・購読 | 実装済み | なし |
 | `InventoryLink.moveTo()` | 常に `InventoryLinkMoveRejectedError` | スケッチには移動処理を置いていない |
 | JSON UI / Resource Pack | パッケージには未検証の隔離テンプレート（`resource_pack/`）を同梱するが、チェスト画面へは未接続。`!invui:` 通知を生成する部品もない | スケッチはこれらを前提にしない。入力抑制・画面識別は動かず、クリック通知も生成されない |

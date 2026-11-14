@@ -1073,7 +1073,7 @@ export class Window {
   readonly viewer: Player;
   #title: string;
   #upperGui: Gui;
-  readonly lowerGui: Gui | undefined;
+  #lowerGui: Gui | undefined;
 
   #status: WindowStatus = "created";
   /** Per-open chat input session id; see `_inputSessionId`. */
@@ -1206,7 +1206,7 @@ export class Window {
     this.viewer = config.viewer;
     this.#title = config.title;
     this.#upperGui = config.upperGui;
-    this.lowerGui = config.lowerGui;
+    this.#lowerGui = config.lowerGui;
     this.#stateScope = config.stateScope;
     this.#stateKey = config.stateKey;
     this.#stateLifetime = config.stateLifetime;
@@ -1370,6 +1370,14 @@ export class Window {
   /** The GUI currently shown in the upper area; replaced by {@link setUpperGui}. */
   get upperGui(): Gui {
     return this.#upperGui;
+  }
+
+  /**
+   * The GUI logically associated with the lower area (design 7.4). It is never
+   * resolved or rendered; see {@link setLowerGui}.
+   */
+  get lowerGui(): Gui | undefined {
+    return this.#lowerGui;
   }
 
   /**
@@ -2002,6 +2010,22 @@ export class Window {
         this.#rollbackGuiSizeSwap(previousGui, previousState);
       }
     }
+  }
+
+  /**
+   * Set the GUI logically associated with the lower area (design 7.4 / 8.4).
+   *
+   * Bedrock does not let the library paint the player's inventory area of the
+   * standard screen, so this is a logical association only: the reference is
+   * replaced (also while open), but the GUI is never resolved, rendered, or
+   * subscribed to, no slot is written, and the container, screen, and state
+   * schema stay as they are.
+   */
+  setLowerGui(gui: Gui): void {
+    if (!gui || typeof gui.resolve !== "function" || typeof gui.subscribe !== "function") {
+      throw new TypeError("InvUI: Window lower GUI must be a Gui.");
+    }
+    this.#lowerGui = gui;
   }
 
   /**
