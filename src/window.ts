@@ -1727,9 +1727,10 @@ export class Window {
    * the previous GUI, screen, and state registration stay as they were, and
    * the conflict is reported (`guiChange`) without writing anything under the
    * new schema, so shared and persisted data cannot be mixed or damaged. A
-   * registration that does change schema starts from the state manager's
-   * initial state: the old values described the previous shape. This means the
-   * swap applies in full only while the identity is not pinned by another
+   * registration that does change schema starts from the previous values as its
+   * initial state, so a size change does not discard the user's page, tab,
+   * selection, or data; the new layout clamps out-of-range values. This means
+   * the swap applies in full only while the identity is not pinned by another
    * registration, which is the default `window` lifetime with no other live
    * user of the same state identity.
    *
@@ -1977,11 +1978,12 @@ export class Window {
    * Returns the current handle when the schema already describes `gui`: a size
    * difference caused only by the selected tab does not reset the state. A
    * different schema is a new registration under the same identity, which the
-   * StateManager accepts or rejects by its schema/lifetime rules. On rejection
-   * the previous registration is restored before the conflict is rethrown, and
-   * no state write reached the new schema. Returns `undefined` when a state
-   * callback closed or reopened the Window while the registration was being
-   * acquired: the new generation owns its own registration then.
+   * StateManager accepts or rejects by its schema/lifetime rules. The previous
+   * values seed an accepted registration so the swap keeps the user's state.
+   * On rejection the previous registration is restored before the conflict is
+   * rethrown, and no state write reached the new schema. Returns `undefined`
+   * when a state callback closed or reopened the Window while the registration
+   * was being acquired: the new generation owns its own registration then.
    */
   #reacquireStateForGui(
     gui: Gui,
@@ -1997,6 +1999,11 @@ export class Window {
     if (nextSchema === previousSchema) {
       return previous;
     }
+    // Carry the user's state into the new shape. A `window`-lifetime entry
+    // dropped by the release would otherwise restart from the initial state;
+    // `initial` is ignored when another registration still holds the identity,
+    // so shared state is not overwritten here.
+    const previousState = previous.get();
 
     // Detach before the release: the old registration's listener must not run
     // against the new GUI while the replacement is being prepared.
@@ -2007,10 +2014,10 @@ export class Window {
     this.#stateHandle = undefined;
     let next: StateHandle;
     try {
-      next = this.#acquireState(gui);
+      next = this.#acquireState(gui, previousState);
     } catch (error) {
       if (generation === this.#generation && this.#status === "open") {
-        this.#restoreStateRegistration();
+        this.#restoreStateRegistration(previousState);
       }
       throw error;
     }
@@ -2038,30 +2045,17 @@ export class Window {
    * refused or failed swap. The re-registration attempt fails before any write
    * for schema/lifetime conflicts, so the stored record and any other
    * registration are untouched; re-acquiring the previous schema returns the
-   * state that survived the release. A window-lifetime entry that only this
-   * Window held was dropped by the release, so that registration starts from
-   * the initial state instead of resurrecting values the release discarded.
-   * If even that re-acquire fails, the Window has no state describing the
-   * screen and fails closed.
-   *
-   * `previousState` is passed only when the release is known to have dropped
-   * this Window's own `window`-lifetime registration (the new schema was
-   * acquired, which proves no other registration held the identity). Then the
-   * values are written back so a failed swap does not reset them. A refused
-   * re-registration may have been sharing the identity with another Window, so
-   * it never writes back a possibly stale snapshot.
+   * state that survived the release. A Window-lifetime entry that only this
+   * Window held was dropped by the release, so `previousState` seeds the new
+   * registration instead of resetting the values; an existing registration
+   * ignores `initial`, so shared state is not overwritten with a stale
+   * snapshot. If even that re-acquire fails, the Window has no state describing
+   * the screen and fails closed.
    */
   #restoreStateRegistration(previousState?: StateSnapshot): void {
     try {
-      const handle = this.#acquireState();
+      const handle = this.#acquireState(undefined, previousState);
       this.#installState(handle);
-      if (previousState !== undefined && handle.get() !== previousState) {
-        try {
-          handle.set(previousState);
-        } catch (error) {
-          this.#report(error, "guiChange");
-        }
-      }
     } catch (error) {
       this.#report(error, "guiChange");
       if (this.#status === "opening" || this.#status === "open") {
@@ -2086,8 +2080,9 @@ export class Window {
     }
     this.#attachGuiSubscription(previousGui, this.#generation);
     this.#upperGui = previousGui;
-    // The successful re-registration proved this Window was the only holder of
-    // the previous identity, so its values can be written back safely.
+    // The previous registration was dropped by the successful re-registration,
+    // so its values seed the restored one; an existing shared registration
+    // ignores them.
     this.#restoreStateRegistration(previousState);
     if (this.#status !== "opening" && this.#status !== "open") {
       return;
@@ -2671,11 +2666,15 @@ export class Window {
     this.#slotRenderTokens.clear();
   }
 
-  #acquireState(gui: Gui = this.upperGui): StateHandle {
+  #acquireState(
+    gui: Gui = this.upperGui,
+    initial?: StateSnapshot,
+  ): StateHandle {
     const common = {
       scope: this.#stateScope,
       lifetime: this.#stateLifetime,
       schema: schemaOf(gui),
+      ...(initial === undefined ? {} : { initial }),
     } as const;
     if (this.#stateScope === "shared") {
       return this.#stateManager.acquire({

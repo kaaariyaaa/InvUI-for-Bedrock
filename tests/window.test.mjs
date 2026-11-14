@@ -2493,8 +2493,8 @@ test("an upper GUI swap with a different size regenerates the container", async 
   assert.deepEqual(opened, ["open"], "an internal regeneration is not a new open");
   assert.deepEqual(closeReasons, [], "an internal regeneration is not a close");
   // A size change always changes the state schema, so the state is
-  // re-registered for the new shape and starts from its initial value.
-  assert.equal(window.getState().selection, undefined);
+  // re-registered for the new shape and keeps the values the user set.
+  assert.equal(window.getState().selection, "before");
 
   // The replaced GUI's structure subscription is gone.
   const writes = replacement.setItem.bind(replacement);
@@ -2509,6 +2509,244 @@ test("an upper GUI swap with a different size regenerates the container", async 
 
   window.close("PlayerClosed");
   assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("a size-changing swap keeps the Window's user state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: {
+      a: Item.simple(() => stack("minecraft:top")),
+      b: Item.simple(() => stack("minecraft:b")),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "before", data: { coins: 3 } });
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+  assert.deepEqual(
+    window.getState(),
+    { selection: "before", data: { coins: 3 } },
+    "the open Window keeps the state its user set across a size change",
+  );
+  window.close("PlayerClosed");
+});
+
+test("a second size-changing swap supersedes the queued one and keeps the state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const oldGui = Gui.normal({ structure: ["a"] });
+  const middle = Gui.normal({ structure: ["a", "b"] });
+  const newest = Gui.normal({ structure: ["a", "b", "c", "d"] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "kept" });
+
+  // Both candidates are queued before the flush, so the first one has been
+  // superseded by the time its turn arrives.
+  window.setUpperGui(middle);
+  window.setUpperGui(newest);
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+  assert.equal(window.upperGui, newest);
+  assert.equal(adapter.containers.length, 2, "only the newest size is created");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.equal(window.container.size, 36);
+  assert.equal(window.getState().selection, "kept");
+  window.close("PlayerClosed");
+});
+
+test("a size-changing swap preserves state when the new registration fails", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const store = memoryStore();
+  const read = store.getItem;
+  let failNextRead = false;
+  store.getItem = (key) => {
+    if (failNextRead) {
+      failNextRead = false;
+      throw new Error("store read failed");
+    }
+    return read(key);
+  };
+  const oldGui = Gui.normal({ structure: ["a"] });
+  const bigger = Gui.normal({ structure: ["a", "b"] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager(store))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "kept" });
+  const container = adapter.containers[0];
+
+  // The release drops this Window's `window`-lifetime registration before the
+  // new schema is acquired. The failed acquire must not discard the values.
+  failNextRead = true;
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(window.container, container);
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].error.message, /store read failed/);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(window.getState().selection, "kept");
+  window.close("PlayerClosed");
+});
+
+test("a close before a queued size-changing swap never shows a replacement", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const oldGui = Gui.normal({ structure: ["a"] });
+  const bigger = Gui.normal({ structure: ["a", "b"] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  window.setUpperGui(bigger);
+  window.close("PlayerClosed");
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.containers.length, 1, "the queued swap is dropped");
+  assert.equal(adapter.opened.length, 1);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("an itemChange on the retiring screen during a size-changing swap closes it", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  let oldContainer;
+  const oldGui = Gui.normal({ structure: ["a"] });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: {
+      a: Item.simple(() => {
+        // The player emptied the still-visible old screen while the replacement
+        // was being rendered.
+        adapter.emitItemChange({ container: oldContainer, player, slot: 0 });
+        return stack("minecraft:new");
+      }),
+      b: Item.simple(() => stack("minecraft:b")),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  oldContainer = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "closed");
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(adapter.opened.length, 1, "the replacement is never shown");
+  assert.equal(adapter.containers.length, 2);
+});
+
+test("a stale async provider from the replaced GUI cannot write to the replacement", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const pending = deferred();
+  let calls = 0;
+  const sharedItem = Item.simple(() =>
+    calls++ === 0 ? pending.promise : stack("minecraft:new"),
+  ).setPlaceholder(stack("minecraft:loading"));
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: sharedItem },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: {
+      a: sharedItem,
+      b: Item.simple(() => stack("minecraft:b")),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const oldContainer = adapter.containers[0];
+  assert.equal(oldContainer.items[0].typeId, "minecraft:loading");
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+  const replacement = adapter.containers[1];
+  assert.equal(replacement.items[0].typeId, "minecraft:new");
+
+  // The old screen's provider resolves after the swap. The same Item occupies
+  // logical slot 0 in both layouts, so only the render epoch/token can reject
+  // the stale result.
+  pending.resolve(stack("minecraft:stale"));
+  await tick();
+  assert.equal(replacement.items[0].typeId, "minecraft:new");
+  assert.deepEqual(errors, []);
+  window.close("PlayerClosed");
 });
 
 test("a failed size-changing swap keeps the old screen and restores its state", async () => {
