@@ -15,6 +15,9 @@
  * event wiring would therefore be a guess. Instead, a caller that has verified
  * the mapping supplies {@link PlayerInventoryChangeSource}; without one,
  * `subscribe()` reports no changes (the GUI still renders on refresh).
+ * {@link createPlayerInventoryChangeSource} connects
+ * `playerInventoryItemChange` only when the caller also supplies that verified
+ * mapping; it forwards notifications and never touches a container.
  */
 
 import type {
@@ -22,6 +25,7 @@ import type {
   EntityInventoryComponent,
   ItemStack,
   Player,
+  PlayerInventoryType,
 } from "@minecraft/server";
 
 import type {
@@ -50,6 +54,40 @@ export interface PlayerInventoryChange {
 export interface PlayerInventoryChangeSource {
   subscribe(listener: (change: PlayerInventoryChange) => void): () => void;
 }
+
+/** The fields of `PlayerInventoryItemChangeAfterEvent` this bridge uses. */
+export interface PlayerInventoryItemChangeEvent {
+  readonly player: Player;
+  readonly inventoryType: PlayerInventoryType;
+  readonly slot: number;
+  readonly beforeItemStack?: ItemStack;
+  readonly itemStack?: ItemStack;
+}
+
+/**
+ * Structural view of `world.afterEvents.playerInventoryItemChange`.
+ *
+ * The beta signal's `subscribe()` returns the callback it was given, not an
+ * unsubscribe function; removal is `unsubscribe(callback)`. Declaring the
+ * return as `unknown` keeps this structurally compatible with the real signal
+ * and makes it impossible to mistake that return value for a teardown. The
+ * bridge always unsubscribes through `unsubscribe(callback)`.
+ */
+export interface PlayerInventoryItemChangeSignal {
+  subscribe(listener: (event: PlayerInventoryItemChangeEvent) => void): unknown;
+  unsubscribe(listener: (event: PlayerInventoryItemChangeEvent) => void): void;
+}
+
+/**
+ * Converts the event's `inventoryType`/`slot` pair to the absolute container
+ * slot used by `PlayerInventory.getItem()`. Bedrock does not document that
+ * relation, so only a caller that verified it on-device may supply one.
+ * Returning `undefined` (or a non-integer) ignores the event.
+ */
+export type PlayerInventorySlotMapper = (
+  inventoryType: PlayerInventoryType,
+  slot: number,
+) => number | undefined;
 
 export interface PlayerInventoryOptions {
   /**
@@ -110,6 +148,110 @@ function readContainer(player: Player): Container {
     throw new Error("InvUI: PlayerInventory requires a valid inventory container.");
   }
   return container;
+}
+
+function readEventPlayerId(player: Player | undefined): string | undefined {
+  let playerId: unknown;
+  try {
+    playerId = player?.id;
+  } catch {
+    playerId = undefined;
+  }
+  return typeof playerId === "string" && playerId.length > 0 ? playerId : undefined;
+}
+
+/**
+ * Opt-in `PlayerInventoryChangeSource` over
+ * `world.afterEvents.playerInventoryItemChange`.
+ *
+ * The caller still owns the untested part: `mapSlot` must translate the
+ * event's `inventoryType`/`slot` pair to the absolute container index, because
+ * Bedrock does not document that mapping. The bridge only forwards
+ * notifications. It never reads from or writes to a container, so it cannot
+ * move, duplicate, or lose items; the `PlayerInventory` it feeds stays
+ * read-only.
+ *
+ * Events are dropped when the player id is unreadable (for example after
+ * leaving), when `mapSlot` throws or returns a non-integer/negative slot, and
+ * when the signal's unsubscribe is not a function. The mapper error is logged.
+ *
+ * The beta signal's `subscribe()` returns the callback, not an unsubscribe
+ * function, so the returned value is never called. Teardown goes through
+ * `signal.unsubscribe(callback)`, and the returned unsubscribe function is
+ * idempotent so a double detach cannot re-run the callback as a fake event.
+ */
+export function createPlayerInventoryChangeSource(
+  signal: PlayerInventoryItemChangeSignal,
+  mapSlot: PlayerInventorySlotMapper,
+): PlayerInventoryChangeSource {
+  if (!signal || typeof signal.subscribe !== "function") {
+    throw new TypeError(
+      "InvUI: player inventory change signal must implement subscribe().",
+    );
+  }
+  if (typeof mapSlot !== "function") {
+    throw new TypeError(
+      "InvUI: player inventory change source requires a slot mapper.",
+    );
+  }
+  return {
+    subscribe(listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError(
+          "InvUI: player inventory change source requires a listener.",
+        );
+      }
+      if (typeof signal.unsubscribe !== "function") {
+        throw new TypeError(
+          "InvUI: player inventory change signal must implement unsubscribe().",
+        );
+      }
+      const callback = (event: PlayerInventoryItemChangeEvent): void => {
+        let playerId: string | undefined;
+        let inventoryType: PlayerInventoryType;
+        let eventSlot: number;
+        try {
+          playerId = readEventPlayerId(event?.player);
+          inventoryType = event.inventoryType;
+          eventSlot = event.slot;
+        } catch {
+          // The event may expose an entity that is no longer valid.
+          return;
+        }
+        if (playerId === undefined) {
+          return;
+        }
+        let slot: number | undefined;
+        try {
+          slot = mapSlot(inventoryType, eventSlot);
+        } catch (error) {
+          console.error("InvUI: player inventory slot mapper failed.", error);
+          return;
+        }
+        if (typeof slot !== "number" || !Number.isInteger(slot) || slot < 0) {
+          return;
+        }
+        let previous: ItemStack | undefined;
+        let current: ItemStack | undefined;
+        try {
+          previous = cloneItem(event.beforeItemStack);
+          current = cloneItem(event.itemStack);
+        } catch {
+          return;
+        }
+        listener({ playerId, slot, previous, current });
+      };
+      signal.subscribe(callback);
+      let subscribed = true;
+      return () => {
+        if (!subscribed) {
+          return;
+        }
+        subscribed = false;
+        signal.unsubscribe(callback);
+      };
+    },
+  };
 }
 
 /**

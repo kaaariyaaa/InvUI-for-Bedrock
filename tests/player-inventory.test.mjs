@@ -26,9 +26,11 @@ registerHooks({
 });
 
 const { InventoryLink, VirtualInventory } = await import("../src/inventory.ts");
-const { PlayerInventory, PlayerInventoryReadOnlyError } = await import(
-  "../src/player-inventory.ts"
-);
+const {
+  createPlayerInventoryChangeSource,
+  PlayerInventory,
+  PlayerInventoryReadOnlyError,
+} = await import("../src/player-inventory.ts");
 
 class FakeStack {
   constructor(typeId, amount = 1) {
@@ -388,4 +390,209 @@ test("PlayerInventory releases a source handed back after the last listener alre
   off = inventory.subscribe(listener);
   assert.equal(source.subscribes, 2);
   assert.equal(source.size, 0, "no listener means no live source subscription");
+});
+
+/** Mirrors the beta signal: subscribe returns the callback, not a teardown. */
+class FakeItemChangeSignal {
+  #listeners = new Set();
+  unsubscribes = 0;
+
+  subscribe(listener) {
+    this.#listeners.add(listener);
+    return listener;
+  }
+
+  unsubscribe(listener) {
+    this.unsubscribes += 1;
+    this.#listeners.delete(listener);
+  }
+
+  emit(event) {
+    for (const listener of [...this.#listeners]) listener(event);
+  }
+
+  get size() {
+    return this.#listeners.size;
+  }
+}
+
+function changeEvent(playerId, inventoryType, slot, before, after) {
+  return {
+    player: { id: playerId },
+    inventoryType,
+    slot,
+    beforeItemStack: before,
+    itemStack: after,
+  };
+}
+
+test("createPlayerInventoryChangeSource validates its arguments", () => {
+  const signal = new FakeItemChangeSignal();
+  assert.throws(() => createPlayerInventoryChangeSource(undefined, () => 0), TypeError);
+  assert.throws(() => createPlayerInventoryChangeSource({}, () => 0), TypeError);
+  assert.throws(() => createPlayerInventoryChangeSource(signal, undefined), TypeError);
+  assert.throws(() => createPlayerInventoryChangeSource(signal, () => 0).subscribe(1), TypeError);
+});
+
+test("createPlayerInventoryChangeSource maps slots and clones event stacks", () => {
+  const signal = new FakeItemChangeSignal();
+  const source = createPlayerInventoryChangeSource(
+    signal,
+    (inventoryType, slot) => (inventoryType === "Hotbar" ? slot : slot + 9),
+  );
+  const received = [];
+  const unsubscribe = source.subscribe((change) => received.push(change));
+
+  const before = stack("minecraft:apple");
+  const after = stack("minecraft:bread");
+  signal.emit(changeEvent("p1", "Hotbar", 2, before, after));
+  signal.emit(changeEvent("p1", "Inventory", 4, undefined, after));
+
+  assert.equal(received.length, 2);
+  assert.equal(received[0].playerId, "p1");
+  assert.equal(received[0].slot, 2);
+  assert.equal(received[0].previous.typeId, "minecraft:apple");
+  assert.equal(received[0].current.typeId, "minecraft:bread");
+  assert.notEqual(received[0].current, after, "event stacks must be cloned");
+  after.amount = 9;
+  assert.equal(received[0].current.amount, 1);
+  assert.equal(received[1].slot, 13);
+  assert.equal(received[1].previous, undefined);
+
+  unsubscribe();
+  assert.equal(signal.size, 0);
+});
+
+test("createPlayerInventoryChangeSource unsubscribes via the signal, not its return value", () => {
+  const signal = new FakeItemChangeSignal();
+  const source = createPlayerInventoryChangeSource(signal, (_type, slot) => slot);
+  const received = [];
+  const unsubscribe = source.subscribe((change) => received.push(change));
+
+  signal.emit(changeEvent("p1", "Hotbar", 0, undefined, stack("minecraft:stone")));
+  assert.equal(received.length, 1);
+
+  unsubscribe();
+  assert.equal(signal.size, 0);
+
+  // The old bug called subscribe()'s return value as a fake event: the
+  // listener stayed subscribed and received a second notification.
+  signal.emit(changeEvent("p1", "Hotbar", 0, undefined, stack("minecraft:stone")));
+  assert.equal(received.length, 1, "unsubscribed callbacks must not run");
+});
+
+test("createPlayerInventoryChangeSource unsubscribe is idempotent", () => {
+  const signal = new FakeItemChangeSignal();
+  const source = createPlayerInventoryChangeSource(signal, (_type, slot) => slot);
+  const unsubscribe = source.subscribe(() => {});
+
+  unsubscribe();
+  unsubscribe();
+  assert.equal(signal.size, 0);
+  assert.equal(signal.unsubscribes, 1, "the signal is asked to unsubscribe once");
+});
+
+test("createPlayerInventoryChangeSource rejects a signal without unsubscribe", () => {
+  const source = createPlayerInventoryChangeSource({ subscribe: () => undefined }, () => 0);
+  assert.throws(() => source.subscribe(() => {}), TypeError);
+});
+
+test("createPlayerInventoryChangeSource drops unreadable players and bad mapper results", () => {
+  const signal = new FakeItemChangeSignal();
+  const source = createPlayerInventoryChangeSource(signal, (_type, slot) => {
+    if (slot === 1) return -1;
+    if (slot === 2) return 1.5;
+    if (slot === 3) return undefined;
+    if (slot === 4) throw new Error("bad mapping");
+    return slot;
+  });
+  const received = [];
+  source.subscribe((change) => received.push(change));
+
+  const logs = withSilencedConsoleError(() => {
+    signal.emit(changeEvent("p1", "Hotbar", 0, undefined, stack("minecraft:stone")));
+    signal.emit(changeEvent("", "Hotbar", 0, undefined, stack("minecraft:stone")));
+    signal.emit(changeEvent("p1", "Hotbar", 1, undefined, stack("minecraft:stone")));
+    signal.emit(changeEvent("p1", "Hotbar", 2, undefined, stack("minecraft:stone")));
+    signal.emit(changeEvent("p1", "Hotbar", 3, undefined, stack("minecraft:stone")));
+    signal.emit(changeEvent("p1", "Hotbar", 4, undefined, stack("minecraft:stone")));
+    const unreadable = {
+      ...changeEvent("p1", "Hotbar", 0, undefined, stack("minecraft:stone")),
+      get player() {
+        throw new Error("entity is gone");
+      },
+    };
+    signal.emit(unreadable);
+  });
+
+  assert.deepEqual(received.map((change) => change.slot), [0]);
+  assert.equal(logs.length, 1);
+});
+
+test("createPlayerInventoryChangeSource forwards through PlayerInventory without writing", () => {
+  const items = new Array(27).fill(undefined);
+  const player = fakePlayer("p1", items);
+  const signal = new FakeItemChangeSignal();
+  const inventory = new PlayerInventory(player, {
+    changes: createPlayerInventoryChangeSource(
+      signal,
+      (inventoryType, slot) => (inventoryType === "Hotbar" ? slot : slot + 9),
+    ),
+  });
+  const received = [];
+  const off = inventory.subscribe((change) => received.push(change));
+
+  const before = stack("minecraft:apple");
+  const after = stack("minecraft:diamond");
+  signal.emit(changeEvent("p1", "Inventory", 3, before, after));
+  signal.emit(changeEvent("p2", "Inventory", 3, before, after));
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].inventory, inventory);
+  assert.equal(received[0].slot, 12);
+  assert.equal(received[0].previous.typeId, "minecraft:apple");
+  assert.equal(received[0].current.typeId, "minecraft:diamond");
+  assert.equal(items[12], undefined, "the adapter must not write the container");
+
+  off();
+  assert.equal(signal.size, 0, "the last listener detaches the signal");
+  signal.emit(changeEvent("p1", "Inventory", 3, before, after));
+  assert.equal(received.length, 1);
+});
+
+test("PlayerInventory keeps displaying when the event signal is malformed", () => {
+  let subscribes = 0;
+  const inventory = new PlayerInventory(fakePlayer("p1", [undefined]), {
+    changes: createPlayerInventoryChangeSource(
+      {
+        subscribe: () => {
+          subscribes += 1;
+          return undefined;
+        },
+      },
+      () => 0,
+    ),
+  });
+  const logs = withSilencedConsoleError(() => {
+    const off = inventory.subscribe(() => {});
+    off();
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(subscribes, 0, "a signal without unsubscribe must not be subscribed");
+});
+
+test("PlayerInventory keeps displaying when subscribing to the signal throws", () => {
+  const signal = new FakeItemChangeSignal();
+  signal.subscribe = () => {
+    throw new Error("restricted execution");
+  };
+  const inventory = new PlayerInventory(fakePlayer("p1", [undefined]), {
+    changes: createPlayerInventoryChangeSource(signal, () => 0),
+  });
+  const logs = withSilencedConsoleError(() => {
+    const off = inventory.subscribe(() => {});
+    off();
+  });
+  assert.equal(logs.length, 1);
+  assert.equal(inventory.getItem(0), undefined);
 });
