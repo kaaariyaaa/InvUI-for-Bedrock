@@ -2175,6 +2175,270 @@ test("a same-size upper GUI swap re-renders and moves subscriptions", async () =
   window.close();
 });
 
+test("a same-size upper GUI swap renders only slots whose element changed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let sharedCalls = 0;
+  const shared = Item.simple(() => {
+    sharedCalls += 1;
+    return stack("minecraft:shared");
+  });
+  const oldItem = Item.simple(() => stack("minecraft:old"));
+  const newItem = Item.simple(() => stack("minecraft:new"));
+  const oldGui = Gui.normal({ structure: ["ab"], ingredients: { a: shared, b: oldItem } });
+  const newGui = Gui.normal({ structure: ["ab"], ingredients: { a: shared, b: newItem } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.deepEqual(
+    [container.items[0].typeId, container.items[1].typeId],
+    ["minecraft:shared", "minecraft:old"],
+  );
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+
+  // The GUI changes only slot 1. The unchanged item in slot 0 must keep its
+  // displayed stack and must not have its provider re-evaluated (design 8.4).
+  sharedCalls = 0;
+  window.setUpperGui(newGui);
+  await tick();
+  assert.deepEqual(writes, [1]);
+  assert.equal(sharedCalls, 0);
+  assert.equal(container.items[0].typeId, "minecraft:shared");
+  assert.equal(container.items[1].typeId, "minecraft:new");
+
+  // The unchanged slot keeps its element subscription, so it still refreshes
+  // on an explicit Item notification.
+  writes.length = 0;
+  shared.notifyWindows();
+  await tick();
+  assert.deepEqual(writes, [0]);
+  window.close();
+});
+
+test("a same-size upper GUI swap keeps an in-flight provider result for an unchanged slot", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = [];
+  let mode = "sync";
+  const shared = Item.simple(() => {
+    if (mode === "pending") {
+      return new Promise((resolve) => pending.push(() => resolve(stack("minecraft:resolved"))));
+    }
+    return stack("minecraft:initial");
+  });
+  const oldGui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: shared, b: Item.simple(() => stack("minecraft:old")) },
+  });
+  const newGui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: shared, b: Item.simple(() => stack("minecraft:new")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  // Start an async render for slot 0. Without a placeholder the slot keeps its
+  // previous display until the promise resolves.
+  mode = "pending";
+  shared.notifyWindows();
+  await tick();
+  assert.equal(pending.length, 1);
+  assert.equal(container.items[0].typeId, "minecraft:initial");
+
+  // The swap does not change slot 0's element, so its in-flight result still
+  // belongs to that slot: discarding it would leave the old display forever.
+  window.setUpperGui(newGui);
+  await tick();
+  pending[0]();
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:resolved");
+  assert.equal(container.items[1].typeId, "minecraft:new");
+  window.close();
+});
+
+test("a same-size upper GUI swap discards an in-flight provider result for a changed slot", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = [];
+  let mode = "sync";
+  const replaced = Item.simple(() => {
+    if (mode === "pending") {
+      return new Promise((resolve) => pending.push(() => resolve(stack("minecraft:stale"))));
+    }
+    return stack("minecraft:initial");
+  });
+  const oldGui = Gui.normal({ structure: ["ab"], ingredients: { a: replaced } });
+  const newGui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: Item.simple(() => stack("minecraft:replacement")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  mode = "pending";
+  replaced.notifyWindows();
+  await tick();
+  assert.equal(pending.length, 1);
+
+  window.setUpperGui(newGui);
+  await tick();
+  pending[0]();
+  await tick();
+  await tick();
+
+  // The element at slot 0 changed, so the pre-swap result must be discarded.
+  assert.equal(container.items[0].typeId, "minecraft:replacement");
+  window.close();
+});
+
+test("a state update and a same-size swap in one timing render the new state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let window;
+  const icon = Item.simple(() => stack(`minecraft:${window.getState().selection ?? "initial"}`));
+  const oldGui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: icon, b: Item.simple(() => stack("minecraft:old")) },
+  });
+  const newGui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: icon, b: Item.simple(() => stack("minecraft:new")) },
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:initial");
+
+  // The state change is what makes the unchanged provider's result different.
+  // The queued full refresh must still re-evaluate it after the slot diff.
+  window.setState({ selection: "after" });
+  window.setUpperGui(newGui);
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:after");
+  assert.equal(container.items[1].typeId, "minecraft:new");
+  window.close();
+});
+
+test("a same-size upper GUI swap retries a failed write for an unchanged slot", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  let label = "first";
+  const item = Item.simple(() => stack(`minecraft:${label}`));
+  const filler = Item.simple(() => stack("minecraft:filler"));
+  // Two distinct Gui objects with identical slots: the swap changes no element.
+  const oldGui = Gui.normal({ structure: ["ab"], ingredients: { a: item, b: filler } });
+  const newGui = Gui.normal({ structure: ["ab"], ingredients: { a: item, b: filler } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  const setItem = container.setItem.bind(container);
+  let failNext = true;
+  container.setItem = (slot, target) => {
+    if (slot === 0 && failNext) {
+      failNext = false;
+      throw new Error("transient");
+    }
+    setItem(slot, target);
+  };
+
+  // The provider change is a changed render whose write fails: the slot keeps
+  // the old stack and the error is reported.
+  label = "second";
+  item.notifyWindows();
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:first");
+  assert.deepEqual(errors.map((entry) => entry.context.operation), ["setItem"]);
+
+  // The swap has no changed element, so only the cache's failed-write record
+  // can make slot 0 retry. Leaving it skipped would keep the stale display.
+  window.setUpperGui(newGui);
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:second");
+  window.close();
+});
+
+test("a same-size upper GUI swap that changes the width fails closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  // Both Structures are one row tall, so the container size (9) matches; only
+  // the width (Structure rows) differs, which the state schema rejects. The
+  // slot diff assumes the logical-to-physical mapping does not change.
+  const oldGui = Gui.normal({
+    structure: ["a.......b"],
+    ingredients: {
+      a: Item.simple(() => stack("minecraft:a")),
+      b: Item.simple(() => stack("minecraft:b")),
+    },
+  });
+  const narrow = Gui.normal({
+    structure: ["c......."],
+    ingredients: { c: Item.simple(() => stack("minecraft:c")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[8].typeId, "minecraft:b");
+
+  window.setUpperGui(narrow);
+  await tick();
+
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.containers.length, 1, "no container is created");
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowStateSchemaChangedError);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+});
+
 test("an upper GUI swap that changes the size is refused and reported", async () => {
   const adapter = new InMemoryTestAdapter();
   const errors = [];
