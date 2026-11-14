@@ -193,6 +193,13 @@ interface WindowBridgeState {
   cycle: number;
   generation: number;
   lastSeenOpen: boolean;
+  /**
+   * Session id of the last snapshot. A sequence belongs to one open session,
+   * so a different id is a new session even when `lastSeenOpen` was already
+   * set (a layout invalidation after a reopen re-arms `lastSeenOpen` before
+   * the first notification of the new open cycle is observed).
+   */
+  lastSessionId: string | undefined;
   lastSequence: number | undefined;
   readonly clicks: WeakMap<InputNotification, boolean>;
   readonly acceptor: InputAcceptor;
@@ -317,9 +324,10 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
       return { open: false, ownerId, sessionId, slotModes: [], generation: state.generation };
     }
 
-    if (!state.lastSeenOpen) {
+    if (!state.lastSeenOpen || state.lastSessionId !== sessionId) {
       // A new open cycle is a new input session: old sequences cannot be replayed.
       state.lastSeenOpen = true;
+      state.lastSessionId = sessionId;
       state.cycle += 1;
       state.generation += 1;
       state.lastSequence = undefined;
@@ -346,6 +354,7 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
       cycle: 0,
       generation: 0,
       lastSeenOpen: false,
+      lastSessionId: undefined as string | undefined,
       lastSequence: undefined as number | undefined,
       clicks: new WeakMap<InputNotification, boolean>(),
       acceptor: undefined as unknown as InputAcceptor,
