@@ -371,6 +371,61 @@ test("a session change resets the sequence even if a layout invalidation re-arme
   assert.deepEqual(clicks, [7, 7]);
 });
 
+test("a click in flight across a session change does not consume the new session's sequence", async () => {
+  let open = true;
+  let sessionId = "session-a";
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started;
+  const didStart = new Promise((resolve) => {
+    started = resolve;
+  });
+  const clicks = [];
+  const window = {
+    id: "window-1",
+    get _inputSessionId() {
+      return sessionId;
+    },
+    viewer: { id: "player-1" },
+    get isOpen() {
+      return open;
+    },
+    async _inputClick(slot) {
+      clicks.push(slot);
+      if (slot === 9) {
+        started();
+        await gate;
+      }
+      return "clicked";
+    },
+  };
+  const { bridge } = makeBridge([window]);
+
+  assert.equal((await bridge.dispatch("!invui:session-a:7:3", "player-1")).clicked, true);
+
+  const inFlight = bridge.dispatch("!invui:session-a:9:9", "player-1");
+  await didStart;
+
+  // The session changes with no close transition for the bridge to see: a
+  // layout invalidation re-arms `lastSeenOpen` while the Window is open.
+  open = false;
+  bridge.invalidate(window);
+  open = true;
+  sessionId = "session-b";
+  bridge.invalidate(window);
+
+  // Queued behind the old click, but its sequence must not be compared with
+  // the previous session's, nor overwritten by the old click's completion.
+  const fresh = bridge.dispatch("!invui:session-b:7:1", "player-1");
+  release();
+
+  assert.equal((await inFlight).clicked, true);
+  assert.equal((await fresh).ok, true, "the completed old click must not write into the new session");
+  assert.deepEqual(clicks, [7, 9, 7]);
+});
+
 test("a click in flight across close/reopen does not consume the new cycle's sequence", async () => {
   let release;
   const gate = new Promise((resolve) => {
