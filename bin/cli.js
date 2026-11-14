@@ -257,6 +257,24 @@ function inspectPack(root, area) {
       'Experimental API の有効化と @minecraft/server の版は manifest だけでは確定できません。ゲーム内で確認し、記録してください',
     );
   } else {
+    // Resource Pack として読み込まれるには type: "resources" のモジュールが必須。
+    // これがないパックへファイルを追加しても Minecraft は読み込まないため、導入前にエラーにする。
+    const modules = Array.isArray(manifest.modules) ? manifest.modules : [];
+    const resourcesModule = modules.find((module) => module && module.type === 'resources');
+    if (resourcesModule) {
+      addCheck(checks, area, 'rp.resources-module', 'ok', 'resources モジュールがあります');
+    } else {
+      addCheck(
+        checks,
+        area,
+        'rp.resources-module',
+        'error',
+        Array.isArray(manifest.modules)
+          ? 'manifest.modules に type: "resources" のモジュールがありません。この状態では Resource Pack として読み込まれないため、導入しても有効になりません'
+          : 'manifest.modules が配列でありません。Resource Pack には type: "resources" のモジュールが必要です',
+      );
+    }
+
     const uiDir = path.join(root, 'ui');
     if (isDirectory(uiDir)) {
       addCheck(checks, area, 'rp.ui', 'ok', 'ui/ ディレクトリがあります');

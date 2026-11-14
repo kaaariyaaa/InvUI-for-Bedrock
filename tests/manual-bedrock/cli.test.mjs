@@ -11,6 +11,7 @@
  * - 既存ファイルを上書きせず、競合時は差分を出して中断すること
  * - 失敗時に部分適用を残さないこと
  * - 未検証の隔離プローブであり、置くだけでは有効にならないと表示すること
+ * - Resource Pack manifest に type: "resources" のモジュールがない場合は検査エラーにし、導入しないこと
  * - generate-resource-pack が init とは別に、新しい出力先へ同梱5ファイルを生成し、
  *   接続 2 ファイルを _ui_defs.json に登録済みにすること
  * - generate-resource-pack が既存パス・シンボリックリンクを拒否し、部分失敗時は自分が作ったものだけを戻すこと
@@ -113,6 +114,13 @@ function makeFixture() {
       version: [1, 0, 0],
       min_engine_version: [1, 21, 0],
     },
+    modules: [
+      {
+        type: 'resources',
+        uuid: '00000000-0000-0000-0000-000000000004',
+        version: [1, 0, 0],
+      },
+    ],
   });
   writeJson(path.join(resourcePack, 'ui', 'chest_screen.json'), { namespace: 'chest' });
   writeJson(path.join(resourcePack, 'ui', '_ui_defs.json'), { ui_defs: [] });
@@ -215,6 +223,53 @@ test('壊れた manifest.json は失敗し、パックは変更しない', () =>
     assert.deepEqual(snapshot(behaviorPack), before.behavior);
     assert.deepEqual(snapshot(resourcePack), before.resource);
   });
+});
+
+test('resources モジュールがない manifest は検査エラーにし、導入もしない', () => {
+  const invalidModules = [
+    ['modules がない', null],
+    [
+      'resources 以外のモジュールだけ',
+      [{ type: 'data', uuid: '00000000-0000-0000-0000-000000000005', version: [1, 0, 0] }],
+    ],
+  ];
+
+  for (const [label, modules] of invalidModules) {
+    withFixture(({ behaviorPack, resourcePack }) => {
+      const manifestPath = path.join(resourcePack, 'manifest.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (modules === null) {
+        delete manifest.modules;
+      } else {
+        manifest.modules = modules;
+      }
+      writeJson(manifestPath, manifest);
+      const before = snapshot(resourcePack);
+
+      const inspect = runCli([
+        'init',
+        '--behavior-pack',
+        behaviorPack,
+        '--resource-pack',
+        resourcePack,
+        '--json',
+      ]);
+      assert.equal(inspect.status, 1, `${label}: ${inspect.both}`);
+      const report = JSON.parse(inspect.stdout);
+      const check = report.checks.find(
+        (entry) => entry.area === 'resource-pack' && entry.id === 'rp.resources-module',
+      );
+      assert.ok(check, `${label}: rp.resources-module の検査がない`);
+      assert.equal(check.level, 'error', `${label}: ${check.message}`);
+
+      const install = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack', '--json']);
+      assert.equal(install.status, 1, `${label}: ${install.both}`);
+      const installReport = JSON.parse(install.stdout);
+      assert.equal(installReport.resourcePackInstall.status, 'blocked', label);
+      assert.equal(installReport.resourcePackInstall.files.length, 0, label);
+      assert.deepEqual(snapshot(resourcePack), before, `${label}: パックが変更された`);
+    });
+  }
 });
 
 test('--json は単体でパースできる JSON を出力する', () => {
