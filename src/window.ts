@@ -580,6 +580,12 @@ export class Window {
   /**
    * Opens the Window. With the real adapter this always throws
    * WindowOpenRejectedError before any Container is created or shown.
+   *
+   * A resolved promise does not guarantee `status === "open"`: a close event or
+   * an explicit `close()` during opening (after the container exists but before
+   * the screen is shown) tears the Window down and `open()` resolves instead of
+   * rejecting. Check `status` (or `isOpen`) after awaiting `open()` before using
+   * the Window, its state, or its container.
    */
   async open(): Promise<void> {
     if (this.#status !== "created" && this.#status !== "closed") {
@@ -859,6 +865,10 @@ export class Window {
    * `requestAdapterClose` is false for a close event: the screen is already
    * closing, and asking again is neither needed nor safe.
    *
+   * `opening` is notified too, even though no screen was requested and no
+   * adapter close is sent: a close during opening still reports its reason
+   * once, and `open()` resolves with the Window already `closed`.
+   *
    * Close handlers run in registration order. One of them may close and reopen
    * the Window, starting a new generation: the notification then belongs to the
    * generation that is gone, so the remaining handlers are skipped and a
@@ -874,6 +884,11 @@ export class Window {
     }
 
     const wasVisible = this.#status === "open" || this.#screenRequested;
+    // An `opening` Window has a container but has not shown a screen yet, so
+    // there is nothing to ask the adapter to close. The reason still has to
+    // reach the close handlers exactly once: `open()` then resolves as closed,
+    // and dropping the reason here would make the close look like a no-op.
+    const notifyCloseHandlers = wasVisible || this.#status === "opening";
     this.#status = "closing";
     const generation = ++this.#generation;
     this.#stopRendering();
@@ -905,7 +920,7 @@ export class Window {
     this.#status = "closed";
 
     // Exactly once: a duplicate or delayed close event sees status `closed`.
-    if (wasVisible) {
+    if (notifyCloseHandlers) {
       for (const handler of [...this.#closeHandlers]) {
         // A handler may close and reopen the Window, starting a new generation.
         // The rest of this notification belongs to the generation that is gone:

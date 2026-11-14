@@ -2235,6 +2235,56 @@ test("a close event dispatched during openContainer resolves open as closed", as
   assert.deepEqual(errors, []);
 });
 
+test("a close event while opening before the screen is requested still notifies once", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const openHandlerCalls = [];
+  const pending = deferred();
+  const gui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => pending.promise) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addOpenHandler(() => openHandlerCalls.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  const opening = window.open();
+  await tick();
+  const container = adapter.containers[0];
+  assert.ok(container, "the container exists before the screen is requested");
+  assert.equal(adapter.opened.length, 0);
+
+  // The screen was never requested, so no adapter close is sent, but the
+  // reason must not be lost on the way to the close handlers.
+  adapter.emitClose({ container, player, reason: "PlayerDied" });
+  pending.resolve(stack("minecraft:late"));
+  await opening;
+
+  // A resolved open() only means it stopped opening; the caller must check
+  // status because the Window closed during opening.
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.equal(window.container, undefined);
+  assert.deepEqual(openHandlerCalls, []);
+  assert.deepEqual(closeReasons, ["PlayerDied"]);
+  assert.equal(adapter.closed.length, 0);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+
+  // Duplicate/delayed delivery after teardown must not notify again.
+  adapter.emitClose({ container, player, reason: "ServerClosed" }, true);
+  assert.deepEqual(closeReasons, ["PlayerDied"]);
+  assert.deepEqual(errors, []);
+});
+
 test("a close event dispatched by closeContainer does not notify the close handler twice", async () => {
   const adapter = new InMemoryTestAdapter();
   adapter.reentrantClose = true;
