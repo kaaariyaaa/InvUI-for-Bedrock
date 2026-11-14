@@ -79,6 +79,7 @@ npx tsc -p tsconfig.examples-check.tmp.json
 - `open()` は Container の作成・描画・open のどこで失敗しても reject し、エラーハンドラーにも報告します。スケッチの `openShop()` は `await window.open()` を `try` / `catch` で囲み、未処理 rejection にはなりません。
 - 画面が開いた状態では、表示専用アイテムをプレイヤーが取り出せます（実機未検証）。取り出した後に `refresh()`（状態更新や購読による再描画）が走ると、同じアイテムが `setItem()` で再び書き込まれるため、複製が起こり得ます。逆にプレイヤーが入れたアイテムが上書きされて消失し得ます。
 - 既定では `window.open()` した Window が `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流します（Node.js テスト済み・実機未検証）。ただし UI 側がその行を生成する実装はなく、行は手入力で偽装でき、入力抑制・アイテム保護もありません。ボタン押下が通知を生むかは未検証で、この経路を安全な機能として扱わないでください。
+- 退出時は、最初の `open()` で購読した `world.afterEvents.playerLeave` が退出したプレイヤーの Window を `PlayerLeft` で close します（Node.js テスト済み・実機未検証）。自動再オープンはしません。死亡・shutdown・スクリプト再読み込み時の後始末は未実装です。
 
 ## 読み方
 

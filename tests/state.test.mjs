@@ -645,6 +645,608 @@ test("explicit migration converts an old record; acquire stays fail-closed", () 
   handle.release();
 });
 
+test("declared migrations are applied by acquire when the source matches", () => {
+  const store = new MemoryStore();
+  // Design 9.6 shape: no lifetime/schema fields.
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "auto",
+    ownerId: "p",
+    guiState: { pageNo: 3, data: { old: true } },
+  };
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "auto" },
+    legacy,
+  );
+  const seen = [];
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "auto",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate: (old) => {
+          seen.push(old);
+          return { page: old.guiState.pageNo, data: old.guiState.data };
+        },
+      },
+    ],
+  });
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "auto",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+
+  assert.deepEqual(seen, [legacy], "the callback receives the decoded old value");
+  assert.deepEqual(handle.get(), { page: 3, data: { old: true } });
+  handle.release();
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)), {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "auto",
+    ownerId: "p",
+    lifetime: "persistent",
+    schema: "v2",
+    guiState: { page: 3, data: { old: true } },
+  });
+});
+
+test("automatic migration needs a matching source and target schema", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "auto-miss",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const raw = JSON.stringify(legacy);
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "auto-miss" },
+    legacy,
+  );
+  const writes = store.setCalls.length;
+
+  const wrongTarget = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "auto-miss",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v3",
+        migrate: () => ({ page: 9 }),
+      },
+    ],
+  });
+  assert.throws(
+    () =>
+      wrongTarget.acquire({
+        ownerId: "p",
+        key: "auto-miss",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    (error) => expectCode(error, "VERSION_MISMATCH"),
+    "a migration to another target schema is not applied",
+  );
+  assert.equal(store.getItem(storageKey), raw);
+  assert.equal(store.setCalls.length, writes);
+});
+
+test("a failing automatic migration leaves the old record in place", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "auto-fail",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const raw = JSON.stringify(legacy);
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "auto-fail" },
+    legacy,
+  );
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "auto-fail",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate: () => {
+          throw new Error("migration boom");
+        },
+      },
+    ],
+  });
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "auto-fail",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    /migration boom/,
+  );
+  assert.equal(store.getItem(storageKey), raw, "the record is not overwritten");
+
+  // The failed acquire must not leave a zero-handle entry behind that could
+  // later write a current-version record over the legacy one.
+  assert.throws(
+    () =>
+      new StateManager(store).acquire({
+        ownerId: "p",
+        key: "auto-fail",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    (error) => expectCode(error, "VERSION_MISMATCH"),
+  );
+  assert.equal(store.getItem(storageKey), raw);
+});
+
+test("invalid or ambiguous declared migrations are rejected at construction", () => {
+  const declaration = {
+    ownerId: "p",
+    key: "dup",
+    fromVersion: 0,
+    fromSchema: null,
+    schema: "v2",
+    migrate: () => ({}),
+  };
+  for (const migrations of [
+    "not-an-array",
+    [{}],
+    [{ ...declaration, migrate: "not a function" }],
+    [declaration, { ...declaration }],
+  ]) {
+    assert.throws(
+      () => new StateManager(new MemoryStore(), { migrations }),
+      StateValidationError,
+      JSON.stringify(migrations),
+    );
+  }
+  assert.doesNotThrow(() => new StateManager(new MemoryStore(), { migrations: [declaration] }));
+});
+
+test("automatic migration rewrites a current-version record with an old schema", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "renamed",
+      lifetime: "persistent",
+      schema: "shop-v1",
+      initial: { page: 1, data: { keep: [1, 2] } },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "renamed");
+  const writes = store.setCalls.length;
+
+  const declaration = {
+    ownerId: "p",
+    key: "renamed",
+    fromVersion: STATE_STORAGE_VERSION,
+    fromSchema: "shop-v1",
+    schema: "shop-v2",
+  };
+  const seen = [];
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ...declaration,
+        migrate: (old) => {
+          seen.push(old);
+          return { page: old.guiState.page + 1, data: old.guiState.data };
+        },
+      },
+    ],
+  });
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "renamed",
+    lifetime: "persistent",
+    schema: "shop-v2",
+  });
+  assert.deepEqual(handle.get(), { page: 2, data: { keep: [1, 2] } });
+  assert.equal(seen.length, 1);
+  assert.equal(store.setCalls.length, writes + 1, "the record is rewritten once");
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)), {
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "renamed",
+    ownerId: "p",
+    lifetime: "persistent",
+    schema: "shop-v2",
+    guiState: { page: 2, data: { keep: [1, 2] } },
+  });
+  assert.deepEqual(store.removeCalls, [], "migration never deletes the record");
+  handle.release();
+
+  // The rewritten record no longer matches the old source, so the callback
+  // cannot be replayed against it.
+  assert.throws(
+    () =>
+      new StateManager(store, {
+        migrations: [{ ...declaration, migrate: (old) => ({ page: old.guiState.page + 1 }) }],
+      }).acquire({
+        ownerId: "p",
+        key: "renamed",
+        lifetime: "persistent",
+        schema: "shop-v1",
+      }),
+    (error) => expectCode(error, "SCHEMA_MISMATCH"),
+  );
+  assert.equal(seen.length, 1);
+});
+
+test("automatic migration checks the stored identity before calling the callback", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "identity",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "identity" },
+    legacy,
+  );
+
+  for (const record of [
+    { ...legacy, key: "other" },
+    { ...legacy, ownerId: "q" },
+    { ...legacy, scope: "shared" },
+  ]) {
+    store.setItem(storageKey, JSON.stringify(record));
+    const raw = store.getItem(storageKey);
+    const writes = store.setCalls.length;
+    let called = false;
+    const manager = new StateManager(store, {
+      migrations: [
+        {
+          ownerId: "p",
+          key: "identity",
+          fromVersion: 0,
+          fromSchema: null,
+          schema: "v2",
+          migrate: () => {
+            called = true;
+            return { page: 9 };
+          },
+        },
+      ],
+    });
+
+    assert.throws(
+      () =>
+        manager.acquire({
+          ownerId: "p",
+          key: "identity",
+          lifetime: "persistent",
+          schema: "v2",
+        }),
+      (error) =>
+        error instanceof StateConflictError &&
+        (error.code === "IDENTITY_MISMATCH" ||
+          error.code === "VERSION_MISMATCH"),
+      JSON.stringify(record),
+    );
+    assert.equal(called, false, "the callback never runs for a foreign identity");
+    assert.equal(store.getItem(storageKey), raw, "the record is preserved");
+    assert.equal(store.setCalls.length, writes, "nothing is written");
+  }
+});
+
+test("an invalid automatic migration result is rejected before writing", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "invalid-result",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const raw = JSON.stringify(legacy);
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "invalid-result" },
+    legacy,
+  );
+  const writes = store.setCalls.length;
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "invalid-result",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate: () => ({ unknownField: 1 }),
+      },
+    ],
+  });
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "invalid-result",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    StateValidationError,
+  );
+  assert.equal(store.getItem(storageKey), raw);
+  assert.equal(store.setCalls.length, writes);
+});
+
+test("an automatic migration write failure leaves the legacy record and can be retried", () => {
+  const store = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "write-fail",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const raw = JSON.stringify(legacy);
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "write-fail" },
+    legacy,
+  );
+
+  const setItem = store.setItem.bind(store);
+  let fail = true;
+  store.setItem = (key, value) => {
+    if (fail && key === storageKey) {
+      fail = false;
+      throw new Error("disk full");
+    }
+    setItem(key, value);
+  };
+  const manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "write-fail",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate: (old) => ({ page: old.guiState.pageNo + 1 }),
+      },
+    ],
+  });
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "write-fail",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    /disk full/,
+  );
+  assert.equal(store.getItem(storageKey), raw, "the legacy record is preserved");
+
+  // The lock was released and no in-memory entry was created, so a retry
+  // reads the legacy record again and migrates it.
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "write-fail",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+  assert.deepEqual(handle.get(), { page: 2 });
+  assert.equal(JSON.parse(store.getItem(storageKey)).schema, "v2");
+  handle.release();
+});
+
+test("an automatic migration locks its identity against reentrant calls and store hooks", () => {
+  const store = new MemoryStore();
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "lock" },
+    {
+      version: 0,
+      scope: "player",
+      key: "lock",
+      ownerId: "p",
+      guiState: { pageNo: 1 },
+    },
+  );
+
+  let manager;
+  const migrate = (old) => {
+    for (const reenter of [
+      () =>
+        manager.acquire({
+          ownerId: "p",
+          key: "lock",
+          lifetime: "persistent",
+          schema: "v2",
+        }),
+      () =>
+        manager.migrate(
+          {
+            ownerId: "p",
+            key: "lock",
+            fromVersion: 0,
+            fromSchema: null,
+            schema: "v3",
+          },
+          () => ({}),
+        ),
+      () => manager.remove({ ownerId: "p", key: "lock" }),
+    ]) {
+      assert.throws(reenter, (error) => expectCode(error, "LIVE_STATE"));
+    }
+    // The lock is per identity: another key can still be acquired.
+    manager
+      .acquire({
+        ownerId: "p",
+        key: "lock-other",
+        lifetime: "persistent",
+        schema: "v2",
+      })
+      .release();
+    return { page: old.guiState.pageNo + 1 };
+  };
+  manager = new StateManager(store, {
+    migrations: [
+      {
+        ownerId: "p",
+        key: "lock",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate,
+      },
+    ],
+  });
+
+  // A store hook running during the migrated write is inside the same lock.
+  const setItem = store.setItem.bind(store);
+  let hookRan = false;
+  store.setItem = (key, value) => {
+    if (key === storageKey) {
+      hookRan = true;
+      assert.throws(
+        () =>
+          manager.acquire({
+            ownerId: "p",
+            key: "lock",
+            lifetime: "persistent",
+            schema: "v2",
+          }),
+        (error) => expectCode(error, "LIVE_STATE"),
+      );
+    }
+    setItem(key, value);
+  };
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "lock",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+  assert.equal(hookRan, true, "the migrated record is written through the store");
+  assert.deepEqual(handle.get(), { page: 2 });
+  store.setItem = setItem;
+  handle.release();
+
+  const reopened = manager.acquire({
+    ownerId: "p",
+    key: "lock",
+    lifetime: "persistent",
+    schema: "v2",
+  });
+  assert.deepEqual(reopened.get(), { page: 2 }, "the lock is released");
+  reopened.release();
+});
+
+test("quarantine recovery and automatic migration stay separate", () => {
+  const store = new MemoryStore();
+  const corrupt = "{not json";
+  const storageKey = seedLegacyRecord(
+    store,
+    { ownerId: "p", key: "corrupt-auto" },
+    {},
+  );
+  store.setItem(storageKey, corrupt);
+
+  const errors = [];
+  let called = false;
+  const manager = new StateManager(store, {
+    quarantineCorrupt: true,
+    onError: (error) => errors.push(error),
+    migrations: [
+      {
+        ownerId: "p",
+        key: "corrupt-auto",
+        fromVersion: 0,
+        fromSchema: null,
+        schema: "v2",
+        migrate: () => {
+          called = true;
+          return { page: 1 };
+        },
+      },
+    ],
+  });
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "corrupt-auto",
+    lifetime: "persistent",
+    schema: "v2",
+    initial: { page: 4 },
+  });
+  assert.deepEqual(handle.get(), { page: 4 }, "recovery starts from initial");
+  assert.equal(called, false, "corrupt data is never handed to the migration");
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0] instanceof StateCorruptionError);
+  assert.equal(store.getItem(`${storageKey}:quarantine`), corrupt);
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 4);
+  handle.release();
+
+  // A version/schema mismatch is not corruption: it fails closed and must not
+  // create a backup or delete the record.
+  const mismatchStore = new MemoryStore();
+  const legacy = {
+    version: 0,
+    scope: "player",
+    key: "mismatch-auto",
+    ownerId: "p",
+    guiState: { pageNo: 1 },
+  };
+  const raw = JSON.stringify(legacy);
+  const mismatchKey = seedLegacyRecord(
+    mismatchStore,
+    { ownerId: "p", key: "mismatch-auto" },
+    legacy,
+  );
+  const removes = mismatchStore.removeCalls.length;
+  const mismatchErrors = [];
+  const mismatchManager = new StateManager(mismatchStore, {
+    quarantineCorrupt: true,
+    onError: (error) => mismatchErrors.push(error),
+  });
+  assert.throws(
+    () =>
+      mismatchManager.acquire({
+        ownerId: "p",
+        key: "mismatch-auto",
+        lifetime: "persistent",
+        schema: "v2",
+      }),
+    (error) => expectCode(error, "VERSION_MISMATCH"),
+  );
+  assert.equal(mismatchStore.getItem(mismatchKey), raw);
+  assert.equal(mismatchStore.getItem(`${mismatchKey}:quarantine`), null);
+  assert.deepEqual(mismatchErrors, []);
+  assert.equal(mismatchStore.removeCalls.length, removes);
+});
+
 test("migrating a released persistent state refreshes it; shared records omit ownerId", () => {
   const store = new MemoryStore();
   const manager = new StateManager(store);

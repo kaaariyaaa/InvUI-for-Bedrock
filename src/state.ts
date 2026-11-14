@@ -110,6 +110,27 @@ export interface StateManagerOptions {
    * behind.
    */
   quarantineCorrupt?: boolean;
+  /**
+   * Declarative migrations that {@link StateManager.acquire} applies
+   * automatically to a persisted record whose stored `version`/`schema`
+   * exactly matches a declared source and whose declared target `schema`
+   * equals the schema being acquired. This is the automatic counterpart to
+   * the explicit {@link StateManager.migrate} call.
+   *
+   * Defaults to none: a version/schema mismatch fails closed with
+   * {@link StateConflictError}, exactly as before. A match is applied only to
+   * `persistent` registrations, and only to a record whose identity and
+   * lifetime already match. The decoded legacy record (any shape) is passed
+   * to the callback; the returned GUI state is validated and the migrated
+   * record is written only after both succeed, so a throwing or invalid
+   * callback leaves the stored record untouched. The callback runs under the
+   * same identity lock as `migrate`: a reentrant `acquire`/`migrate`/`remove`
+   * for the identity fails with `LIVE_STATE`.
+   *
+   * At most one migration may be declared per identity and source
+   * version/schema; a duplicate is rejected at construction.
+   */
+  migrations?: readonly StateAutoMigration[];
 }
 
 export interface StateAcquireOptions {
@@ -155,6 +176,15 @@ export interface StateMigrationOptions {
  * returns the GUI state for the current storage version.
  */
 export type StateMigration = (legacy: unknown) => GuiState;
+
+/**
+ * A migration declared in {@link StateManagerOptions.migrations} that
+ * `acquire` applies automatically. The source `fromVersion`/`fromSchema` and
+ * target `schema` use the same meaning as {@link StateManager.migrate}.
+ */
+export interface StateAutoMigration extends StateMigrationOptions {
+  migrate: StateMigration;
+}
 
 /**
  * Identity of the persisted record {@link StateManager.remove} deletes.
@@ -337,9 +367,10 @@ const MIGRATION_KEYS = new Set([
   "schema",
 ]);
 const REMOVE_KEYS = new Set(["scope", "key", "ownerId"]);
-const MANAGER_KEYS = new Set(["onError", "quarantineCorrupt"]);
+const MANAGER_KEYS = new Set(["onError", "quarantineCorrupt", "migrations"]);
 const EMPTY_STATE: StateSnapshot = Object.freeze({});
 const EMPTY_CHANGED: readonly GuiStateField[] = Object.freeze([]);
+const EMPTY_MIGRATIONS: readonly NormalizedAutoMigration[] = Object.freeze([]);
 /**
  * Upper bound for the `...:quarantine` slot search. A store whose `getItem`
  * reports every slot as occupied must make `acquire` fail closed instead of
@@ -637,6 +668,12 @@ interface NormalizedMigrationOptions extends NormalizedIdentityOptions {
   schema: string;
 }
 
+/** A validated declaration from {@link StateManagerOptions.migrations}. */
+interface NormalizedAutoMigration extends NormalizedMigrationOptions {
+  identity: string;
+  migrate: StateMigration;
+}
+
 function normalizeRemoveOptions(input: unknown): NormalizedIdentityOptions {
   if (!isPlainObject(input)) {
     throw new StateValidationError("remove options must be a plain object");
@@ -685,6 +722,52 @@ function normalizeMigrationOptions(
     );
   }
   return { ...identity, fromVersion, fromSchema, schema };
+}
+
+function normalizeAutoMigrations(
+  input: unknown,
+): readonly NormalizedAutoMigration[] {
+  if (input === undefined) {
+    return EMPTY_MIGRATIONS;
+  }
+  if (!Array.isArray(input)) {
+    throw new StateValidationError("migrations must be an array");
+  }
+  const seen = new Set<string>();
+  const migrations: NormalizedAutoMigration[] = [];
+  for (const declaration of input) {
+    if (!isPlainObject(declaration)) {
+      throw new StateValidationError("each migration must be a plain object");
+    }
+    const migrate = declaration.migrate;
+    if (typeof migrate !== "function") {
+      throw new StateValidationError("migration migrate must be a function");
+    }
+    const { migrate: _ignored, ...options } = declaration;
+    const normalized = normalizeMigrationOptions(options);
+    const identity = identityOf(
+      normalized.scope,
+      normalized.ownerId,
+      normalized.key,
+    );
+    const source = JSON.stringify([
+      identity,
+      normalized.fromVersion,
+      normalized.fromSchema,
+    ]);
+    if (seen.has(source)) {
+      throw new StateValidationError(
+        `duplicate automatic migration for ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} from version ${normalized.fromVersion} schema ${JSON.stringify(normalized.fromSchema)}`,
+      );
+    }
+    seen.add(source);
+    migrations.push({
+      ...normalized,
+      identity,
+      migrate: migrate as StateMigration,
+    });
+  }
+  return Object.freeze(migrations);
 }
 
 function identityOf(
@@ -798,6 +881,7 @@ export class StateManager {
   readonly #store: StateStore | undefined;
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #quarantineCorrupt: boolean;
+  readonly #migrations: readonly NormalizedAutoMigration[];
   readonly #entries = new Map<string, StateEntry>();
   /**
    * Identities whose record is being mutated: a running migration callback, a
@@ -856,14 +940,18 @@ export class StateManager {
     this.#store = store ?? undefined;
     this.#onError = options.onError;
     this.#quarantineCorrupt = options.quarantineCorrupt === true;
+    this.#migrations = normalizeAutoMigrations(options.migrations);
   }
 
   /**
    * Registers a Window's interest in a state identity and returns its lease.
-   * The state starts from the live value, then persisted data, then `initial`.
+   * The state starts from the live value, then persisted data (applying a
+   * declared {@link StateManagerOptions.migrations} match when one exists),
+   * then `initial`.
    *
-   * Acquiring an identity whose {@link migrate} callback, {@link remove} store
-   * call, or `quarantineCorrupt` recovery is running throws a `LIVE_STATE`
+   * Acquiring an identity whose automatic-migration callback,
+   * {@link migrate} callback, {@link remove} store call, or
+   * `quarantineCorrupt` recovery is running throws a `LIVE_STATE`
    * {@link StateConflictError}; other identities are unaffected.
    */
   acquire(options: StateAcquireOptions): StateHandle {
@@ -1429,6 +1517,63 @@ export class StateManager {
     return { raw, parsed };
   }
 
+  /**
+   * Apply a declared automatic migration to an otherwise rejected record.
+   * The caller holds the identity lock. Returns `null` when no declared
+   * migration matches, so the normal fail-closed path reports the mismatch.
+   *
+   * The record is rewritten only after the callback result passes state
+   * validation; a throwing or invalid callback leaves the old record in place.
+   */
+  #autoMigrate(
+    normalized: NormalizedAcquireOptions,
+    identity: string,
+    parsed: Record<string, unknown>,
+  ): StateSnapshot | null {
+    const store = this.#store;
+    if (store === undefined || normalized.lifetime !== "persistent") {
+      return null;
+    }
+    if (
+      parsed.scope !== normalized.scope ||
+      parsed.key !== normalized.key ||
+      (parsed.ownerId ?? undefined) !== normalized.ownerId
+    ) {
+      return null;
+    }
+    // The manual `migrate` contract also treats a record without a lifetime
+    // as an older persistent record (design 9.6 predates the field).
+    if (parsed.lifetime !== undefined && parsed.lifetime !== "persistent") {
+      return null;
+    }
+    const storedSchema = hasOwn(parsed, "schema") ? parsed.schema : null;
+    const migration = this.#migrations.find(
+      (candidate) =>
+        candidate.identity === identity &&
+        candidate.fromVersion === parsed.version &&
+        candidate.fromSchema === storedSchema &&
+        candidate.schema === normalized.schema,
+    );
+    if (migration === undefined) {
+      return null;
+    }
+
+    const guiState = cloneState(migration.migrate(parsed), "migrated.guiState");
+    const record: StoredGuiState = {
+      version: STATE_STORAGE_VERSION,
+      scope: normalized.scope,
+      key: normalized.key,
+      ...(normalized.ownerId === undefined
+        ? {}
+        : { ownerId: normalized.ownerId }),
+      lifetime: "persistent",
+      schema: normalized.schema,
+      guiState,
+    };
+    store.setItem(storageKeyOf(identity), JSON.stringify(record));
+    return guiState;
+  }
+
   #loadPersistent(
     normalized: NormalizedAcquireOptions,
     identity: string,
@@ -1443,6 +1588,10 @@ export class StateManager {
     const parsed = stored.parsed;
 
     if (parsed.version !== STATE_STORAGE_VERSION) {
+      const migrated = this.#autoMigrate(normalized, identity, parsed);
+      if (migrated !== null) {
+        return migrated;
+      }
       throw new StateConflictError(
         "VERSION_MISMATCH",
         `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has version ${String(parsed.version)}; expected ${STATE_STORAGE_VERSION}`,
@@ -1465,6 +1614,10 @@ export class StateManager {
       );
     }
     if (parsed.schema !== normalized.schema) {
+      const migrated = this.#autoMigrate(normalized, identity, parsed);
+      if (migrated !== null) {
+        return migrated;
+      }
       throw new StateConflictError(
         "SCHEMA_MISMATCH",
         `Stored state ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} has schema "${String(parsed.schema)}", not "${normalized.schema}"`,
