@@ -749,6 +749,30 @@ function isInventoryLinkElement(
 }
 
 /**
+ * True when a Window state change cannot alter what this element displays.
+ *
+ * An InventoryLink reads its Inventory, which state changes do not touch (the
+ * Inventory notifies its own changes). An Item proves the rest through its
+ * provider source: only a fixed ItemStack or an ItemBuilder is known not to
+ * receive the Window or its state. Every opaque provider is re-evaluated, so a
+ * provider that reads `Window.getState()` is never skipped (design 11.4).
+ */
+function isProvablyStateIndependent(element: SlotElement): boolean {
+  if (isInventoryLinkElement(element)) {
+    return true;
+  }
+  // Slot elements are duck-typed at runtime (Gui accepts any object and
+  // Window calls resolve on it), so an element can look like an Item
+  // without being one. Only an Item that proves state independence is skipped;
+  // anything else stays opaque and is re-evaluated, as before design 11.4.
+  return (
+    isItemElement(element) &&
+    typeof element.isStateIndependent === "function" &&
+    element.isStateIndependent()
+  );
+}
+
+/**
  * Stable serialization of the GUI shape that state compatibility depends on:
  * kind, rows as an array (so a "/" inside a row cannot collide), scroll
  * settings, and the recursively referenced tab/link GUIs (link state keys
@@ -1155,6 +1179,13 @@ export class Window {
   /** A state/GUI notification is waiting for the batched refresh microtask. */
   #fullRefreshQueued = false;
   /**
+   * A state notification is waiting for the batched slot-diff refresh (design
+   * 11.4). Unlike #fullRefreshQueued it re-evaluates only slots that may have
+   * changed: the element mapping changed, or the element is not provably
+   * independent of the Window state.
+   */
+  #slotRefreshQueued = false;
+  /**
    * Slots whose Item/Inventory notification waits for the batched render
    * (design 11.2 step 3). The slot's render token is already bumped when it is
    * queued, so a provider result started before the notification is discarded
@@ -1497,6 +1528,7 @@ export class Window {
     // covers notifications that arrived before the call. Dropping their queued
     // counterpart keeps it from invalidating this pass's in-flight results.
     this.#fullRefreshQueued = false;
+    this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     await this.#refresh();
   }
@@ -1905,6 +1937,116 @@ export class Window {
         this.#report(error, "refresh");
       }
     }
+  }
+
+  /**
+   * Apply a state-change refresh as a slot diff (design 11.4): resolve the new
+   * layout, move subscriptions, then render only the slots whose element changed
+   * or whose element cannot be proven independent of the new state. Slots that
+   * were notified by an Item/Inventory in the same timing are rendered too,
+   * because this path replaces the notification-only flush.
+   *
+   * Falls back to a full render when the layout's shape changed (a different
+   * width remaps physical slots and may leave stale columns) or the container
+   * must be regenerated.
+   */
+  async #refreshSlots(notified: ReadonlySet<number>): Promise<void> {
+    if (
+      this.#renderingHalted ||
+      this.#status !== "open" ||
+      !this.#container ||
+      !this.#stateHandle
+    ) {
+      return;
+    }
+    const generation = this.#generation;
+    const revalidateRanges = this.#revalidateStateRanges;
+    let layout: ResolvedGuiLayout;
+    try {
+      layout = this.#resolveCurrentState(this.#stateHandle, revalidateRanges);
+    } catch (error) {
+      this.#report(error, "resolve");
+      return;
+    }
+    if (revalidateRanges) {
+      this.#revalidateStateRanges = false;
+    }
+    if (generation !== this.#generation || this.#status !== "open") {
+      return;
+    }
+    const current = this.#layout;
+    if (current && containerSizeOf(layout) !== this.#container.size) {
+      await this.#resizeTo();
+      return;
+    }
+    this.#applyLayout(layout);
+    // A state write-back while resolving may have closed or reopened the Window.
+    if (generation !== this.#generation || this.#status !== "open") {
+      return;
+    }
+    if (
+      !current ||
+      current.width !== layout.width ||
+      current.height !== layout.height
+    ) {
+      try {
+        await this.#renderAll(generation);
+      } catch (error) {
+        if (generation === this.#generation) {
+          this.#report(error, "refresh");
+        }
+      }
+      return;
+    }
+    try {
+      await this.#renderLayoutDiff(current, layout, notified);
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.#report(error, "refresh");
+      }
+    }
+  }
+
+  /**
+   * Render the slots that differ between the rendered layout and `next`.
+   *
+   * A slot is skipped only when all of these hold: its element reference is
+   * unchanged, no Item/Inventory notification queued it, its last write did not
+   * fail, and the element is provably independent of the Window state. A
+   * skipped element therefore has the same viewer and the same provider source,
+   * so its display cannot differ. Empty slots keep the write-cache proof used by
+   * the full render.
+   */
+  async #renderLayoutDiff(
+    previous: ResolvedGuiLayout,
+    next: ResolvedGuiLayout,
+    notified: ReadonlySet<number>,
+  ): Promise<void> {
+    const cache = this.#writeCache;
+    const renders: Array<Promise<void>> = [];
+    for (let slot = 0; slot < next.slots.length; slot += 1) {
+      const element = next.slots[slot];
+      if (notified.has(slot) || previous.slots[slot] !== element) {
+        renders.push(this.#renderSlot(slot));
+        continue;
+      }
+      const physicalSlot = physicalSlotOf(next, slot);
+      if (element === null) {
+        if (cache === undefined || cache.shouldWrite(physicalSlot, undefined)) {
+          renders.push(this.#renderSlot(slot));
+        }
+        continue;
+      }
+      if (cache !== undefined && cache.needsRetry(physicalSlot)) {
+        renders.push(this.#renderSlot(slot));
+        continue;
+      }
+      if (isProvablyStateIndependent(element)) {
+        continue;
+      }
+      renders.push(this.#renderSlot(slot));
+    }
+    await Promise.all(renders);
   }
 
   /**
@@ -2369,6 +2511,7 @@ export class Window {
     this.#refreshPending = false;
     this.#revalidateStateRanges = false;
     this.#fullRefreshQueued = false;
+    this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
   }
@@ -2392,7 +2535,13 @@ export class Window {
     });
   }
 
-  /** State changed: invalidate in-flight renders and re-evaluate the GUI. */
+  /**
+   * State changed: invalidate in-flight renders and re-evaluate the GUI. The
+   * refresh diffs the resolved layout against the rendered one (design 11.4):
+   * a slot is skipped only when its element is provably independent of the
+   * Window state (see `isProvablyStateIndependent`). Anything else — including
+   * an opaque Item provider that can read `Window.getState()` — is re-evaluated.
+   */
   #onStateChanged(changed: readonly GuiStateField[]): void {
     // Content changes are only resolved for the active tab, so a branch that
     // was hidden while its content shrank still stores an out-of-range page or
@@ -2402,7 +2551,7 @@ export class Window {
     if (changed.includes("tab")) {
       this.#revalidateStateRanges = true;
     }
-    this.#scheduleRefresh();
+    this.#scheduleSlotRefresh();
   }
 
   /**
@@ -2492,6 +2641,29 @@ export class Window {
     this.#queueRefreshFlush();
   }
 
+  /**
+   * Queue a state-change refresh that resolves the new layout and renders only
+   * the slots it cannot prove unchanged (design 11.4). `open()` still performs
+   * a full pass; a GUI change queues the full refresh above.
+   */
+  #scheduleSlotRefresh(): void {
+    if (this.#renderingHalted) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    // A provider call started before the state change may have read the old
+    // state, so its result must not land in any slot.
+    this.#renderEpoch += 1;
+    if (this.#status === "opening") {
+      this.#refreshPending = true;
+      return;
+    }
+    this.#slotRefreshQueued = true;
+    this.#queueRefreshFlush();
+  }
+
   #queueRefreshFlush(): void {
     if (this.#flushQueued) {
       return;
@@ -2528,14 +2700,17 @@ export class Window {
    * Run the state/GUI refresh and the per-slot notifications collected since
    * the last flush. Multiple notifications in one timing are evaluated once
    * (design 11.2 step 3 / 11.5). A full refresh covers every queued slot; a
-   * close or reopen before the microtask drops the work: the new generation
-   * either renders in `open()` or has already prepared its own notifications.
+   * state diff also renders the notified slots. A close or reopen before the
+   * microtask drops the work: the new generation either renders in `open()` or
+   * has already prepared its own notifications.
    */
   #runRefreshFlush(): void {
     const slots = this.#pendingSlotRenders;
     this.#pendingSlotRenders = new Set();
     const fullRefresh = this.#fullRefreshQueued;
     this.#fullRefreshQueued = false;
+    const slotRefresh = this.#slotRefreshQueued;
+    this.#slotRefreshQueued = false;
     if (this.#renderingHalted) {
       return;
     }
@@ -2544,6 +2719,13 @@ export class Window {
         return;
       }
       void this.#refresh();
+      return;
+    }
+    if (slotRefresh) {
+      if (this.#status !== "open") {
+        return;
+      }
+      void this.#refreshSlots(slots);
       return;
     }
     if (this.#status !== "opening" && this.#status !== "open") {
@@ -2670,6 +2852,13 @@ export class Window {
             pending = resolution.pending;
           }
         }
+      } else if (isInventoryLinkElement(element)) {
+        // Resolve synchronously: a state diff may skip this slot because the
+        // link cannot observe Window state, so its write must land before the
+        // diff yields. An async read could be invalidated by a following state
+        // change, and the next diff would then see the slot as already
+        // rendered and never write the link (design 11.4).
+        stack = element.getItem();
       } else {
         awaited = true;
         stack = await this.#resolveElement(element);
@@ -2680,7 +2869,11 @@ export class Window {
       // slot/layout change is stale: reporting it would hand the previous
       // screen's error to the handler of the new generation, which may close the
       // new screen.
-      if (!awaited || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+      // A synchronous InventoryLink read never suspends, but a reentrant
+      // notification it caused can still have replaced this slot, so it is
+      // reported only while the slot is current (the old async read path).
+      const canBeStale = awaited || isInventoryLinkElement(element);
+      if (!canBeStale || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
         this.#report(error, "itemProvider", slot);
       }
       return;
@@ -2903,6 +3096,7 @@ export class Window {
     this.#screenRequested = false;
     this.#refreshPending = false;
     this.#fullRefreshQueued = false;
+    this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
   }
