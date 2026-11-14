@@ -1869,3 +1869,65 @@ test(
     });
   },
 );
+
+test(
+  '--register-ui-defs は復元直前に他プロセスが同じ inode へ書いた内容を消さない',
+  { skip: process.platform === 'win32' },
+  () => {
+    withFixture(({ resourcePack }) => {
+      const uiDir = path.join(resourcePack, 'ui');
+      const uiDefsPath = path.join(uiDir, '_ui_defs.json');
+      const originalDefs = fs.readFileSync(uiDefsPath, 'utf8');
+      const originalRename = fs.renameSync;
+      const originalOpen = fs.openSync;
+      let appended = null;
+      let userEdit = null;
+      fs.renameSync = (from, to) => {
+        const result = originalRename(from, to);
+        if (to === uiDefsPath) {
+          appended = fs.readFileSync(uiDefsPath, 'utf8');
+          const error = new Error('simulated post-rename failure');
+          error.code = 'EIO';
+          throw error;
+        }
+        return result;
+      };
+      fs.openSync = (target, flags, ...args) => {
+        // 追記の landed 判定が済んだ後、復元が fd を開く直前に別プロセスが
+        // 同じ inode へ in-place で書き込んだ状況を再現する。
+        if (
+          userEdit === null &&
+          appended !== null &&
+          target === uiDefsPath &&
+          typeof flags === 'number' &&
+          (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) !== 0
+        ) {
+          userEdit = appended.replace(
+            '"ui/invui.json"',
+            '"ui/invui.json",\n  "ui/other_mod_screen.json"',
+          );
+          fs.writeFileSync(uiDefsPath, userEdit);
+        }
+        return originalOpen(target, flags, ...args);
+      };
+
+      let result;
+      try {
+        result = applyTemplate(resourcePack, { registerUiDefs: true });
+      } finally {
+        fs.renameSync = originalRename;
+        fs.openSync = originalOpen;
+      }
+
+      assert.equal(result.status, 'failed');
+      assert.match(result.error, /simulated post-rename failure/);
+      assert.ok(userEdit, '復元直前の別プロセスの変更を再現できた');
+      assert.deepEqual(fs.readFileSync(uiDefsPath, 'utf8'), userEdit, '他プロセスの変更を上書きしない');
+      assert.match(result.error, /書き戻しません/);
+      assert.match(result.error, /退避/);
+      const backups = fs.readdirSync(uiDir).filter((name) => name.includes('.invui-backup.'));
+      assert.equal(backups.length, 1);
+      assert.equal(fs.readFileSync(path.join(uiDir, backups[0]), 'utf8'), originalDefs);
+    });
+  },
+);

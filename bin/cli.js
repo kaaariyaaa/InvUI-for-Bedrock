@@ -740,8 +740,11 @@ function assertUiDefsPath(resourcePack, destination) {
 
 // 追記した自分のファイル（dev/ino が一致）だけを、シンボリックリンクを辿らずに戻す。
 // バックアップは消さない。呼び出し側が復元結果を検証してから片付ける。
-function restoreUiDefsFromBackup(destination, identity, backupPath) {
-  const flags = fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0);
+// 書き戻す直前にも、開いた fd から内容が追記したままか確認する。landed の判定から
+// ここまでに別プロセスが in-place で書き換えていた場合、inode は変わらないため
+// dev/ino だけでは検出できず、truncate するとその変更を消してしまう。
+function restoreUiDefsFromBackup(destination, identity, backupPath, appendedContent) {
+  const flags = fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0);
   let fd;
   try {
     fd = fs.openSync(destination, flags);
@@ -752,12 +755,30 @@ function restoreUiDefsFromBackup(destination, identity, backupPath) {
     throw error;
   }
   try {
-    if (!sameFileIdentity(fs.fstatSync(fd), identity)) {
+    const openedStat = fs.fstatSync(fd);
+    if (!sameFileIdentity(openedStat, identity)) {
       throw new Error('復元先が追記したファイルと確認できないため書き戻しません');
+    }
+    // 位置 0 から読む。fd の位置を進めないよう readSync に明示的な位置を渡す。
+    const currentContent = Buffer.alloc(openedStat.size);
+    let read = 0;
+    while (read < openedStat.size) {
+      const bytes = fs.readSync(fd, currentContent, read, openedStat.size - read, read);
+      if (bytes === 0) {
+        break;
+      }
+      read += bytes;
+    }
+    if (read !== openedStat.size || !currentContent.equals(appendedContent)) {
+      throw new Error('追記後に別プロセスが内容を変更したため書き戻しません');
     }
     const backupContent = fs.readFileSync(backupPath);
     fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, backupContent);
+    // fd の位置に依存せず先頭から書く。
+    let written = 0;
+    while (written < backupContent.length) {
+      written += fs.writeSync(fd, backupContent, written, backupContent.length - written, written);
+    }
     fs.fsyncSync(fd);
   } finally {
     try {
@@ -840,7 +861,7 @@ function registerUiDefs(preflight) {
       if (landed) {
         try {
           assertUiDefsPath(resourcePack, destination);
-          restoreUiDefsFromBackup(destination, tempIdentity, backupPath);
+          restoreUiDefsFromBackup(destination, tempIdentity, backupPath, nextContent);
         } catch (restoreError) {
           restoreNote = `追記を元に戻せませんでした: ${restoreError.message}`;
         }
