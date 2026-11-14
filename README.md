@@ -36,13 +36,13 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | Bedrock 用 `StateStore` | **実装済み（Node.js テスト済み、実機未検証）**。`BedrockWorldStateStore` がワールドの動的プロパティに保存する。非文字列、識別子の長さ超過、UTF-8 換算の値サイズ超過を保存前に拒否する |
 | `InventoryLink` のアイテム移動 | **無効固定**。`moveTo()` は常に `InventoryLinkMoveRejectedError` を投げる |
 | `Window.open()` | **既定で実画面を開く（実機未検証）**。Container を作成し `VirtualContainer.open()` を呼ぶ。失敗は例外・エラーハンドラーで報告するが、実機での表示は未確認 |
-| 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。既定は読み取り専用の静的検査。`--install-resource-pack` を明示した場合だけ `ui/invui.json` を追加する |
+| 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。既定は読み取り専用の静的検査。`--install-resource-pack` を明示した場合だけ `ui/invui.json` と接続用 `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の3ファイルを追加する。既存の `ui/_ui_defs.json` は変更しないため、既存パックでは手動登録するまで接続は有効にならない |
 | CLI の自動テスト（[cli.test.mjs](tests/manual-bedrock/cli.test.mjs)） | 実行可能（`npm test` に含まれる） |
 | 実機テスト手順（[tests/manual-bedrock/README.md](tests/manual-bedrock/README.md)） | あり |
 | 合否チェックリスト（[CHECKLIST.md](tests/manual-bedrock/CHECKLIST.md)） | あり |
 | 利用イメージ（[examples/README.md](examples/README.md)） | 設計スケッチのみ。型検査は可能、実行は対象外 |
 | 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
-| JSON UI テンプレート（`resource_pack/`） | **未検証の隔離プローブのみ**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json` 登録済み）を同梱する。`invui_probe` 名前空間に可視ラベルと実験的な `button.send` 部品を定義するが、どの画面からも参照せず、チェスト画面へ接続していない。CLI の導入対象は `ui/invui.json` だけ |
+| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
 | npm 公開 | 未実施 |
 | ライセンス | 未設定 |
 
@@ -229,7 +229,7 @@ npx esbuild src/main.ts \
 
 ## CLI（配布補助・静的検査＋任意のプローブ導入）
 
-`init` は**既存パックを対象にした検査コマンド**で、既定では Behavior Pack / Resource Pack を変更しません。`--install-resource-pack` を明示した場合だけ、未検証の隔離プローブ `ui/invui.json` を既存 Resource Pack に追加します。`generate-resource-pack` は既存パックを対象にせず、`--output` で指定した**まだ存在しないディレクトリ**へ、同梱テンプレートから独立した実験用 Resource Pack を新規生成します（`init` とは別コマンドで、`init` 用オプションは受け付けません）。いずれもチェスト画面への接続は行いません。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
+`init` は**既存パックを対象にした検査コマンド**で、既定では Behavior Pack / Resource Pack を変更しません。`--install-resource-pack` を明示した場合だけ、未検証のプローブ `ui/invui.json` と接続用 `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の3ファイルを既存 Resource Pack に追加します。既存の `ui/_ui_defs.json` は変更しないため、登録するまで接続は有効になりません。`generate-resource-pack` は既存パックを対象にせず、`--output` で指定した**まだ存在しないディレクトリ**へ、同梱テンプレートから独立した実験用 Resource Pack を新規生成します（`init` とは別コマンドで、`init` 用オプションは受け付けません）。生成物の `ui/_ui_defs.json` は3ファイル登録済みで、接続が既定で有効です。いずれも `chest_screen` は編集しませんが、生成物・登録後のパックは `data_driven_container` のパネルを使う全画面に影響し得ます。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
 
 ```bash
 # 既定: 読み取り専用の静的検査
@@ -251,10 +251,10 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 | 指定 | 内容 |
 |---|---|
 | `init` | 既存の Behavior Pack / Resource Pack を静的に検査し、手動で必要な作業を表示する。既定では書き込まない |
-| `generate-resource-pack --output <dir>` | 既存パックを変更せず、新しい出力先へ `manifest.json`・`ui/_ui_defs.json`・`ui/invui.json` の3ファイルを生成する。UUID（`header` と各 module）は生成のたびに作り直す |
+| `generate-resource-pack --output <dir>` | 既存パックを変更せず、新しい出力先へ `manifest.json`・`ui/_ui_defs.json`・`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の5ファイルを生成する。生成物の `_ui_defs.json` は3ファイル登録済みで接続が既定で有効。UUID（`header` と各 module）は生成のたびに作り直す |
 | `--behavior-pack <dir>` | `init` 用。Behavior Pack のルート。`--install-resource-pack` 指定時は省略可 |
 | `--resource-pack <dir>` | `init` 用。Resource Pack のルート。必須 |
-| `--install-resource-pack` | `init` 用。未検証プローブ `ui/invui.json` を追加する（明示時のみ）。既存ファイルは上書きせず、内容が異なる場合は競合として中断する |
+| `--install-resource-pack` | `init` 用。プローブ `ui/invui.json` と接続用 2 ファイルの計3ファイルを追加する（明示時のみ）。既存ファイルは上書きせず、内容が異なる場合は競合として中断する。既存の `ui/_ui_defs.json` は変更せず、登録するまで接続は有効にならない |
 | `--output <dir>` | `generate-resource-pack` 専用・必須。既存パス、既存パス上のファイル、シンボリックリンク、ファイルシステムのルートは拒否し、上書きしない。`init` に指定すると引数エラー |
 | `--json` | 検査結果と導入結果を JSON として標準出力へ出す |
 | `-h`, `--help` | 使い方を表示する |
@@ -268,10 +268,10 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 - `manifest.json` の存在と JSON としての読み込みを検査する。
 - Behavior Pack の script モジュール、`entry` の有無、`@minecraft/server` への dependency を確認する。
-- Resource Pack の `ui/` ディレクトリと、既存の `chest_screen.json` / `invui.json` / `_ui_defs.json` の有無を報告する。
+- Resource Pack の `ui/` ディレクトリと、既存の `chest_screen.json` / `invui.json` / `invui_connect*.json` / `_ui_defs.json` の有無を報告する。
 - 未検証機能と、手動で確認すべき手順を表示する。
 - `--json` 指定時は、検査結果と導入結果を JSON として標準出力へ出す。
-- `--install-resource-pack` 指定時だけ、`ui/invui.json` を次の安全側の手順で追加する。
+- `--install-resource-pack` 指定時だけ、`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを次の安全側の手順で追加する。既存の `ui/_ui_defs.json` は変更せず、登録状況（登録済み／不足）を報告するだけで、登録するまで接続は有効にならない。
   - 既存ファイルの内容が同梱テンプレートと同一なら「導入済み」と報告し、書き換えない。
   - 内容が異なる場合は競合として中断し、差分を表示して終了コード `1` を返す。
   - 一時ファイルへ書いてから排他的に配置し、失敗時は追加済みファイル・一時ファイル・この CLI が作成した空ディレクトリを削除する**ロールバックを試みる**。
@@ -281,10 +281,11 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 ### CLI が行わないこと
 
-- **既存画面へ JSON UI をマージ・接続しない。** `generate-resource-pack` は未接続のテンプレートから独立したパックを作り、`--install-resource-pack` で追加するのは隔離プローブ 1 ファイルだけです。
-- **`generate-resource-pack` は既存のパックやパスを変更しない。** 出力先が存在する場合は生成自体を行わず、既存のファイル・ディレクトリ・シンボリックリンクに触れません。生成するのは `manifest.json` / `ui/_ui_defs.json` / `ui/invui.json` の3ファイルだけです。
+- **既存 Resource Pack の `ui/_ui_defs.json` を変更せず、接続を自動で有効化しない。** `--install-resource-pack` が追加するのは `ui/invui.json` と接続用 2 ファイルの計3ファイルで、`ui_defs` への登録は手動です（CLI は登録状況を検査して不足を報告します）。`generate-resource-pack` は同梱の `_ui_defs.json`（3ファイル登録済み）を使って接続済みの独立パックを作りますが、`chest_screen` は編集せず、`data_driven_container` のパネルを使う全画面へ影響し得る未検証の接続です。
+- **`generate-resource-pack` は既存のパックやパスを変更しない。** 出力先が存在する場合は生成自体を行わず、既存のファイル・ディレクトリ・シンボリックリンクに触れません。生成するのは `manifest.json` / `ui/_ui_defs.json` / `ui/invui.json` / `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の5ファイルだけです。
 - **既存の `chest_screen.json` を上書きしない。** 競合を検出した場合は報告だけ行います。
 - **既存の `_ui_defs.json` を変更しない。** 導入時の参照追加は手動マージの対象です（`generate-resource-pack` は新しいパック内に自身の `_ui_defs.json` を作ります）。
+- **アイテム保護・入力抑制・画面終了処理を提供しない。** 追加するのは JSON UI の部品だけで、表示アイテムの取り出し、`button.send` の受信、VirtualContainer の識別は実装していません。導入しても安全にはなりません。
 - **既存の `manifest.json` を変更せず、Behavior Pack へも書き込まない。**
 - **バックアップや復元を自動化しない。** UI を手動マージする場合は、利用者がバックアップを取ってください。
 
@@ -312,7 +313,7 @@ CLI の安全側の動作は、次のコマンドで自動確認できます（`
 node --test tests/manual-bedrock/cli.test.mjs
 ```
 
-このテストは、既定ではパックを変更しないこと、`--install-resource-pack` 指定時も `ui/invui.json` 以外を書き換えず既存ファイルを上書きしないこと、壊れた manifest で失敗することなどを確認します。実機の入力・表示・アイテム安全試験の代わりにはなりません。
+このテストは、既定ではパックを変更しないこと、`--install-resource-pack` 指定時も `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル以外を書き換えず既存ファイルを上書きしないこと、`generate-resource-pack` が5ファイルを生成して `_ui_defs.json` に3ファイルを登録すること、壊れた manifest で失敗することなどを確認します。実機の入力・表示・アイテム安全試験の代わりにはなりません。
 
 ### 実機検証が終わるまで正式機能として扱わないもの
 
@@ -322,7 +323,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 | close / itemChange のアダプタ購読 | 既定アダプタが `afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読。Node.js テストで経路を確認済み・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない。`after` なので close・変更を防げない |
 | クリック通知（`button.send` → チャット候補を含む） | `src/input.ts` に純粋パーサと snapshot 検証のみ。公開エントリ非 export・イベント非接続・実機未検証。認証・rate limit・古い画面の入力の扱いは不十分 | 安全に利用不可。有効な機能として案内しない |
 | 表示専用・ボタン用スロットのアイテム保護 | 実装なし・実機未検証。`Item.getMode()` / `setMode()` は分類とハンドラー実行ガードのみ | 安全に利用不可。アイテム移動を許可しない |
-| JSON UI による入力抑制・画面識別 | 未検証の隔離プローブのみ・実機未検証 | チェスト画面へ未接続。通常チェストへの影響も未確認 |
+| JSON UI による入力抑制・画面識別 | `resource_pack/` は既定で `data_driven_container` の desktop/pocket パネルへ接続するが実機未検証。VirtualContainer を識別する仕組み・入力抑制・アイテム保護は未実装 | 同パネルを使う他の data-driven 画面にも表示・入力が干渉し得る。安全に利用不可 |
 | `InventoryLink` のアイテム移動 | 実装なし。`moveTo()` は常に例外 | 複製・消失の可能性を排除できないため無効 |
 | 左・右・Shift・ダブルクリックの区別 | 初期リリース非目標 | 通常クリックのみを設計対象とする |
 
@@ -332,18 +333,20 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 - **既定の実アダプタが実画面を開きます。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` は `world.virtualContainerManager.create()` で `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` は `VirtualContainer.close()` を呼びます。**実機で表示・close が成立するかは未検証**です。`close()` は要求時点で返り、実際の close イベントは別 tick になることがあるため、閉鎖直後の再 `open()` は失敗し得ます。
 - **クリック通知はありません。** Bedrock のイベントからスロットを特定して `Window.handleClick()` を呼ぶ経路（InputBridge / JSON UI / `button.send`）は未接続です。`Item` の `button` 分類はハンドラー実行ガードにすぎず、実機のクリックを届けません。クリックの取りこぼし・遅延入力・意図しないスロットへの適用を保証できません。
-- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。入力抑制も JSON UI もないため、このリスクは既定で有効です。
+- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。入力抑制はなく、`resource_pack/` の JSON UI 接続もアイテム保護ではないため、このリスクは既定で有効です。
 - **itemChange を検出しても保護はされません。** 既定の `minecraftVirtualContainerAdapter` は `subscribeItemChange` を実装して `world.afterEvents.virtualContainerItemChange` を購読しますが、これは Node.js テストで経路を確認しただけで実機未検証です。`after` イベントなので変更後の通知にすぎず、変更を取り消したり変更前のアイテムへ戻したりはできません。アダプタがイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。ただし close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。
-- **実験は使い捨てのテスト用ワールドだけで行ってください。** 進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
+- **実験は使い捨てのテスト用ワールドだけで行ってください。** `resource_pack/` を入れると、`data_driven_container` のパネルを使う全画面に警告ラベルとボタンが重なり得ます（VirtualContainer 限定ではない）。進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
 
 ## Resource Pack テンプレート（実験用・未検証）
 
-`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`manifest.json` と `ui/_ui_defs.json`、`invui_probe` 名前空間（可視ラベルと実験的な `button.send` 部品）を定義する `ui/invui.json` を含みますが、**どの画面からも参照されていません**。そのため画面表示は変わらない想定ですが、**実機未検証であり、表示が変わらないことも、部品が読み込まれることも保証しません**。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。チェスト画面への接続は含みません。
+`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
 
-- `ui/invui.json` は CLI の `--install-resource-pack` が追加する唯一のファイルです。既存の Resource Pack へ追加した場合、`ui/_ui_defs.json` への登録は自動では行われず、必要なら手動でマージします。
+ただし **`VirtualContainer` を識別する仕組みはなく**、接続先のパネルを使う全画面（通常のコンテナや data-driven ブロックの画面を含み得る）に表示され得ます。そのため、他画面での入力干渉・表示の重なり・アイテム保護の欠如というリスクが残ります。**実機未検証であり、接続・表示・入力・アイテム保護のいずれも保証しません。** 他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。
+
+- CLI の `--install-resource-pack` が追加するのは `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルです。既存の Resource Pack へ追加した場合、`ui/_ui_defs.json` への登録は自動では行われず、手動でマージするまで接続は有効になりません（CLI は登録状況を検査して不足を報告します）。`generate-resource-pack` の生成物は `_ui_defs.json` 込みの5ファイルで、接続が既定で有効です。
 - `ui/invui_controls.json` は作成中の追加プローブで、未登録・未接続・CLI 導入対象外です。完成扱いしないでください。
 - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対象ゲーム版は未確定です。
-- このテンプレートは `data_driven_container` 名前空間を変更しません。同名前空間を変更する判定プローブは別ディレクトリにあり、Mojang が変更しないよう求める箇所を検証専用に変更するものです（[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)）。
+- このテンプレートは `data_driven_container` 名前空間の `desktop_panel` / `pocket_panel` を変更します（`data_driven_container_screen.json` 自体は編集しません）。Mojang は同名前空間を変更しないことを期待し、後方互換性を保証していません。検証専用の実験にとどめ、正式機能や配布物の前提にしないでください（[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)）。
 - 既存 Resource Pack との競合を検出・解消する機能はありません。**使い捨てワールドで、バックアップを取ってから**検証してください。詳細は [resource_pack/README.md](resource_pack/README.md) を参照してください。
 
 Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックしたテストで確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・入力抑制・アイテム保護は動きません。
@@ -357,8 +360,8 @@ Resource Pack を使わなくても、コアの型・レイアウト計算・状
 - スクリプト再読み込み時に画面は閉じ、通常の終了イベントに依存した永続化はできない。
 - 状態の共有範囲は `player` / `shared`、保存期間は `window` / `session` / `persistent`。
 - 設計原則は影響を受けたスロットの差分反映だが、**現在の状態更新・明示 `refresh()` は全スロットを再評価する**（要素の更新通知のみ該当スロット）。理由と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照。
-- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける。
-- **Mojang は `data_driven_container_screen.json` と `data_driven_container` 名前空間を変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このため、この JSON / 名前空間の変更や、それに依存する入力・画面接続を前提にしません。[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)は、この変更を「どの画面が使われるか」の観察だけのために意図的に行う検証専用プローブであり、配布物や正式機能の土台にはしないでください。`VirtualContainer` がこの画面を使うか自体も未確認です。
+- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける（`resource_pack/` の既定接続はこの原則の例外で、`data_driven_container` のパネルを使う他画面へ影響し得る。検証専用）。
+- **Mojang は `data_driven_container_screen.json` と `data_driven_container` 名前空間を変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このため、この JSON / 名前空間の変更や、それに依存する入力・画面接続を前提にしません。`resource_pack/` の既定接続は同名前空間の 2 パネルへ差し込む検証専用の例外であり、正式機能の土台にはしません。[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)も、この変更を「どの画面が使われるか」の観察だけのために意図的に行う検証専用プローブです。`VirtualContainer` がこの画面を使うか自体も未確認です。
 - `@bedrock-core/ui` には依存しない。
 
 ## ディレクトリ構成（現時点）
@@ -369,12 +372,16 @@ InvUI-for-Bedrock/
 ├── tsconfig.json
 ├── bin/
 │   └── cli.js                    # 配布補助 CLI（静的検査・任意でプローブ導入）
-├── resource_pack/                # 未検証の隔離テンプレート（チェスト画面へ未接続）
+├── resource_pack/                # 既定で data_driven 接続する未検証テンプレート（chest_screen は未編集）
 │   ├── README.md
 │   ├── manifest.json
+│   ├── experimental/
+│   │   └── connect-data-driven/  # 同じ接続の隔離コピー（単体パックではない）
 │   └── ui/
-│       ├── _ui_defs.json
-│       ├── invui.json            # CLI が導入する唯一のファイル
+│       ├── _ui_defs.json         # ui/invui.json と接続 2 ファイルを登録済み
+│       ├── invui.json            # invui_probe 名前空間（ラベル・実験的 button.send 部品）
+│       ├── invui_connect.json    # 警告ラベル + invui_probe_root のラッパー
+│       ├── invui_connect_data_driven.json  # data_driven_container の desktop/pocket への modifications
 │       └── invui_controls.json   # 作成中・未登録・CLI 対象外
 ├── .github/
 │   └── workflows/ci.yml          # GitHub Actions（build / test / pack）
@@ -418,7 +425,7 @@ InvUI-for-Bedrock/
 └── InvUI_for_Bedrock_Design.md   # 全体設計書
 ```
 
-`LICENSE` はまだありません。`resource_pack/` は未検証の隔離テンプレートで、チェスト画面には接続していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
+`LICENSE` はまだありません。`resource_pack/` は既定で `data_driven_container` のパネルへ接続する未検証テンプレートで、`chest_screen` は編集していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
 
 ## 対応バージョン
 
