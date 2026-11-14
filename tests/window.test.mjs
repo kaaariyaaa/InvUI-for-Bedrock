@@ -1492,6 +1492,98 @@ test("state updates re-evaluate every slot, including unchanged elements", async
   window.close();
 });
 
+test("state notifications in the same timing share one refresh", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const seen = [];
+  let window;
+  const item = Item.simple(() => {
+    seen.push(window.getState().page);
+    return stack("minecraft:item");
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  seen.length = 0;
+
+  // One timing, three notifications: only the final state is rendered (design
+  // 11.2 step 3), not one render per notification.
+  window.setState({ page: 1 });
+  window.setState({ page: 2 });
+  window.setState({ page: 3 });
+  await tick();
+
+  assert.deepEqual(seen, [3]);
+  window.close();
+});
+
+test("an in-flight provider result is discarded when the state notification arrives", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = [];
+  let phase = "initial";
+  const item = Item.simple(() =>
+    phase === "initial"
+      ? stack("minecraft:initial")
+      : new Promise((resolve) => pending.push(resolve)),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  phase = "async";
+  item.notifyWindows();
+  await tick();
+  assert.equal(pending.length, 1);
+
+  // The stale result is resolved before the coalesced refresh microtask runs.
+  // It must already be invalid at notification time, not only once the batched
+  // refresh starts.
+  pending[0](stack("minecraft:stale"));
+  window.setState({ page: 1 });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:initial");
+  assert.equal(pending.length, 2, "the coalesced refresh starts a fresh render");
+
+  pending[1](stack("minecraft:fresh"));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:fresh");
+  window.close();
+});
+
+test("a state change queued in the same timing as close does not render after close", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let calls = 0;
+  const item = Item.simple(() => {
+    calls += 1;
+    return stack("minecraft:item");
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  calls = 0;
+
+  window.setState({ page: 1 });
+  window.close();
+  await tick();
+
+  assert.equal(calls, 0, "the queued refresh belongs to the closed generation");
+});
+
 test("explicit refresh re-evaluates slots whose element did not change", async () => {
   const adapter = new InMemoryTestAdapter();
   let typeId = "minecraft:before";
@@ -3354,4 +3446,303 @@ test("an itemChange from another viewer invalidates the write cache", async () =
   await window.refresh();
   assert.deepEqual(container.writes, [0]);
   window.close();
+});
+
+test("changing the title while open regenerates the container without re-running handlers", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let opened = 0;
+  const closeReasons = [];
+  const errors = [];
+  const item = Item.simple(() => stack("minecraft:item"));
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(gui)
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .addOpenHandler(() => opened++)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+  assert.equal(first.title, "Old title");
+  window.setState({ selection: "kept" });
+
+  await window.setTitle("New title");
+
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "New title");
+  assert.equal(adapter.containers.length, 2, "the title needs a new VirtualContainer");
+  const second = adapter.containers[1];
+  assert.notEqual(second, first);
+  assert.equal(window.container, second);
+  assert.equal(second.title, "New title");
+  assert.equal(second.size, first.size);
+  assert.equal(second.items[0].typeId, "minecraft:item", "the new container is rendered before it is shown");
+
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container),
+    [first],
+    "the previous screen is closed exactly once",
+  );
+  assert.deepEqual(
+    adapter.opened.map((entry) => entry.container),
+    [first, second],
+  );
+  assert.equal(opened, 1, "an internal reopen is not a new open");
+  assert.deepEqual(closeReasons, [], "an internal reopen is not a close");
+  assert.deepEqual(errors, []);
+  assert.equal(window.getState().selection, "kept", "state survives the internal reopen");
+
+  window.setState({ selection: "after" });
+  await tick();
+  assert.equal(second.items[0].typeId, "minecraft:item");
+  window.close("PlayerClosed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.equal(adapter.closed.length, 2);
+});
+
+test("setTitle before open only applies to the next open", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.setTitle("Next title");
+  assert.equal(window.title, "Next title");
+  assert.equal(adapter.containers.length, 0);
+
+  await window.open();
+  assert.equal(adapter.containers[0].title, "Next title");
+  window.close();
+});
+
+test("a failed title regeneration keeps the old container and title", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const createContainer = adapter.createContainer.bind(adapter);
+  let createCalls = 0;
+  adapter.createContainer = (options) => {
+    createCalls += 1;
+    if (createCalls > 1) {
+      throw new Error("create failed");
+    }
+    return createContainer(options);
+  };
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  await assert.rejects(window.setTitle("New title"), /create failed/);
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "Old title");
+  assert.equal(window.container, first);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(adapter.closed.length, 0);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "titleChange");
+  window.close();
+});
+
+test("setTitle while opening is rejected instead of showing a stale title", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let resolveProvider;
+  const item = Item.simple(
+    () => new Promise((resolve) => { resolveProvider = resolve; }),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  const opening = window.open();
+  await tick();
+  assert.equal(window.status, "opening");
+  await assert.rejects(window.setTitle("New title"), /while opening/);
+
+  resolveProvider(stack("minecraft:item"));
+  await opening;
+
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "Old title");
+  assert.equal(adapter.containers[0].title, "Old title");
+  window.close();
+});
+
+test("overlapping title changes are serialized and never leak the old screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  const one = window.setTitle("One");
+  const two = window.setTitle("Two");
+  await Promise.all([one, two]);
+
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "Two");
+  assert.deepEqual(
+    adapter.containers.map((container) => container.title),
+    ["Old", "One", "Two"],
+  );
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container.title),
+    ["Old", "One"],
+    "each regenerated screen is closed before the next one replaces it",
+  );
+  assert.deepEqual(
+    adapter.opened.map((entry) => entry.container.title),
+    ["Old", "One", "Two"],
+  );
+  assert.equal(window.container, adapter.containers[2]);
+  assert.notEqual(window.container, first);
+  window.close();
+});
+
+test("an itemChange on the old screen during a title regeneration fails closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const item = Item.simple(() =>
+    async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:item"),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  // The replacement is still rendering, so the old screen is still the one the
+  // player can touch; `window.container` already points at the replacement.
+  async = true;
+  const changing = window.setTitle("New title");
+  await tick();
+  assert.equal(pending.length, 1);
+  assert.equal(window.container, adapter.containers[1]);
+
+  adapter.emitItemChange({ container: first, player, slot: 0 });
+
+  assert.equal(window.status, "closed");
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.equal(errors[0].context.operation, "itemChange");
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container),
+    [first],
+    "the still-shown old screen is closed",
+  );
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first]);
+
+  pending[0](stack("minecraft:item"));
+  await changing;
+  assert.equal(window.status, "closed");
+  window.close();
+});
+
+test("a close event from the old screen during a title regeneration closes the Window", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const item = Item.simple(() =>
+    async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:item"),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  async = true;
+  const changing = window.setTitle("New title");
+  await tick();
+
+  adapter.emitClose({ container: first, player, reason: "PlayerClosed" });
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"], "the player's close is not lost");
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(
+    adapter.opened.map((entry) => entry.container),
+    [first],
+    "the replacement screen is never shown after the player closed the old one",
+  );
+
+  pending[0](stack("minecraft:item"));
+  await changing;
+  assert.equal(window.status, "closed");
+});
+
+test("closing during a title regeneration closes the shown old screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const item = Item.simple(() =>
+    async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:item"),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  async = true;
+  const changing = window.setTitle("New title");
+  await tick();
+  assert.equal(window.container, adapter.containers[1]);
+
+  window.close("PlayerClosed");
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container),
+    [first],
+    "the visible old screen is closed, not the replacement that was never shown",
+  );
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first]);
+
+  pending[0](stack("minecraft:item"));
+  await changing;
+  assert.equal(window.status, "closed");
 });

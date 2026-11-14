@@ -566,7 +566,7 @@ let nextWindowId = 1;
 export class Window {
   readonly id = `window-${nextWindowId++}`;
   readonly viewer: Player;
-  readonly title: string;
+  #title: string;
   #upperGui: Gui;
   readonly lowerGui: Gui | undefined;
 
@@ -581,6 +581,16 @@ export class Window {
   #errorHandler: WindowErrorHandler | undefined;
 
   #container: VirtualContainer | undefined;
+  /**
+   * Previous container of an in-progress title regeneration. Its screen is
+   * still shown while the replacement is rendered, so close/itemChange events
+   * for it still belong to this Window: filtering them out by identity would
+   * both miss the player's action and leave the old screen open when the
+   * regeneration is interrupted.
+   */
+  #retiringContainer: VirtualContainer | undefined;
+  /** Container the Window itself asked the adapter to close (title regeneration). */
+  #expectedCloseContainer: VirtualContainer | undefined;
   #layout: ResolvedGuiLayout | undefined;
   /**
    * Skips only clearing a physical slot this container last cleared (design
@@ -628,11 +638,17 @@ export class Window {
   #renderEpoch = 0;
   /** Set when state or GUI changes while `open()` is still resolving providers. */
   #refreshPending = false;
+  /** Serializes async title changes so two regenerations cannot overlap. */
+  #titleQueue: Promise<void> = Promise.resolve();
+  /** A state/GUI notification is waiting for the batched refresh microtask. */
+  #fullRefreshQueued = false;
+  /** One microtask serves every notification delivered in the same timing. */
+  #flushQueued = false;
   #generation = 0;
 
   constructor(config: WindowConfig) {
     this.viewer = config.viewer;
-    this.title = config.title;
+    this.#title = config.title;
     this.#upperGui = config.upperGui;
     this.lowerGui = config.lowerGui;
     this.#stateScope = config.stateScope;
@@ -659,6 +675,11 @@ export class Window {
 
   get container(): VirtualContainer | undefined {
     return this.#container;
+  }
+
+  /** Title applied to the container; changed by {@link setTitle}. */
+  get title(): string {
+    return this.#title;
   }
 
   /** The GUI currently shown in the upper area; replaced by {@link setUpperGui}. */
@@ -790,7 +811,166 @@ export class Window {
    * (`#writeCache`).
    */
   async refresh(): Promise<void> {
+    // This pass re-evaluates every slot from the current state, so it already
+    // covers notifications that arrived before the call. Dropping their queued
+    // counterpart keeps it from invalidating this pass's in-flight results.
+    this.#fullRefreshQueued = false;
     await this.#refresh();
+  }
+
+  /**
+   * Change the title of the Window (design 8.4 / 20).
+   *
+   * `VirtualContainer.title` cannot change after creation, so an open Window is
+   * regenerated: the new container is created and rendered first, then the old
+   * screen is closed and the new one is shown. The state handle, GUI and
+   * element subscriptions are kept, and neither the open nor the close handlers
+   * run again for this internal reopen.
+   *
+   * A closed Window only stores the title for the next `open()`. Changing it
+   * while `open()` is still running is rejected: the container may already
+   * exist with the previous title. Failures are reported through the error
+   * handler (`operation: "titleChange"`); if the old screen had to be closed
+   * already, the Window fails closed instead of leaving an unknown screen.
+   */
+  async setTitle(title: string): Promise<void> {
+    if (typeof title !== "string") {
+      throw new TypeError("InvUI: Window title must be a string.");
+    }
+    if (this.#status === "opening") {
+      throw new Error(
+        `InvUI: Window ${this.id} cannot change its title while opening; await open() first.`,
+      );
+    }
+    // Two overlapping regenerations would each close a container the other is
+    // still using, so run them in call order. Equality is checked when the turn
+    // arrives, after any earlier change, so "B" then "A" settles on "A".
+    const run = this.#titleQueue.then(() => this.#applyTitle(title));
+    this.#titleQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
+  }
+
+  async #applyTitle(title: string): Promise<void> {
+    if (title === this.#title) {
+      return;
+    }
+    if (this.#status === "opening") {
+      throw new Error(
+        `InvUI: Window ${this.id} cannot change its title while opening; await open() first.`,
+      );
+    }
+    if (
+      this.#status !== "open" ||
+      this.#renderingHalted ||
+      !this.#container ||
+      !this.#layout ||
+      !this.#stateHandle
+    ) {
+      this.#title = title;
+      return;
+    }
+    await this.#reopenWithTitle(title);
+  }
+
+  /**
+   * Regenerate the container with a new title while the Window stays logically
+   * open. The caller (`setTitle`) has checked status, layout, and state handle.
+   */
+  async #reopenWithTitle(title: string): Promise<void> {
+    const generation = this.#generation;
+    const previousTitle = this.#title;
+    const previousContainer = this.#container as VirtualContainer;
+    const previousCache = this.#writeCache;
+    const size = previousContainer.size;
+    const options: VirtualContainerOptions =
+      title.length === 0 ? { size } : { size, title };
+
+    let nextContainer: VirtualContainer;
+    try {
+      nextContainer = this.#adapter.createContainer(options);
+    } catch (error) {
+      this.#report(error, "titleChange");
+      throw error;
+    }
+
+    // Invalidate renders that were started against the previous container
+    // before swapping. The new cache starts empty: no slot of this container
+    // has been written yet.
+    this.#renderEpoch += 1;
+    this.#container = nextContainer;
+    // The old screen stays visible until it is closed below. Its events are
+    // handled as this Window's events until then (see #onContainerClose).
+    this.#retiringContainer = previousContainer;
+    this.#writeCache = new SlotWriteCache();
+    this.#title = title;
+
+    try {
+      await this.#renderAll(generation);
+    } catch (error) {
+      // #renderAll normally reports per-slot failures instead of throwing. If
+      // it does throw, the old screen is still showing: restore it and report
+      // the title change as not applied.
+      this.#container = previousContainer;
+      this.#retiringContainer = undefined;
+      this.#writeCache = previousCache;
+      this.#title = previousTitle;
+      this.#report(error, "titleChange");
+      this.#scheduleRefresh();
+      throw error;
+    }
+
+    // A close or reopen during the render owns the Window now.
+    if (
+      generation !== this.#generation ||
+      this.#status !== "open" ||
+      this.#container !== nextContainer
+    ) {
+      return;
+    }
+
+    // The regeneration owns the old screen until here. Mark the close as our
+    // own so its after-event is not mistaken for the player closing it.
+    this.#retiringContainer = undefined;
+    this.#expectedCloseContainer = previousContainer;
+    try {
+      this.#adapter.closeContainer(previousContainer, this.viewer);
+    } catch (error) {
+      // The old screen may or may not have closed. Do not open a second screen
+      // on an unknown state: report, retry closing the old screen, and fail
+      // closed. The requested title stays for the next open().
+      this.#report(error, "titleChange");
+      if (generation === this.#generation && this.#status === "open") {
+        this.#retiringContainer = previousContainer;
+        this.#performClose("ServerClosed", true);
+      }
+      return;
+    } finally {
+      this.#expectedCloseContainer = undefined;
+    }
+
+    if (
+      generation !== this.#generation ||
+      this.#status !== "open" ||
+      this.#container !== nextContainer
+    ) {
+      return;
+    }
+
+    try {
+      this.#adapter.openContainer(nextContainer, this.viewer);
+    } catch (error) {
+      // The old screen is already closed, so the Window cannot stay open with
+      // an unknown container. `openContainer` may also have dispatched a close
+      // event synchronously; #performClose is idempotent.
+      this.#report(error, "titleChange");
+      if (generation === this.#generation && this.#status === "open") {
+        this.#performClose("ServerClosed", false);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1084,15 +1264,21 @@ export class Window {
       return;
     }
 
-    if (requestAdapterClose && wasVisible && this.#container) {
-      try {
-        this.#adapter.closeContainer(this.#container, this.viewer);
-      } catch (error) {
-        this.#report(error, "close");
-        // Same hazard as above: a failed closeContainer is reported, and a
-        // handler that closes and reopens must keep the new generation.
-        if (generation !== this.#generation) {
-          return;
+    if (requestAdapterClose && wasVisible) {
+      // During a title regeneration the old screen is the visible one; the
+      // replacement exists but was never shown. Closing it keeps an interrupted
+      // regeneration from leaving the old screen on the player's display.
+      const visibleContainer = this.#retiringContainer ?? this.#container;
+      if (visibleContainer) {
+        try {
+          this.#adapter.closeContainer(visibleContainer, this.viewer);
+        } catch (error) {
+          this.#report(error, "close");
+          // Same hazard as above: a failed closeContainer is reported, and a
+          // handler that closes and reopens must keep the new generation.
+          if (generation !== this.#generation) {
+            return;
+          }
         }
       }
     }
@@ -1124,6 +1310,14 @@ export class Window {
     }
   }
 
+  /**
+   * True for the container currently shown/replacing and for the previous one
+   * whose screen is still visible during a title regeneration.
+   */
+  #ownsContainer(container: VirtualContainer): boolean {
+    return container === this.#container || container === this.#retiringContainer;
+  }
+
   #onContainerClose(generation: number, event: WindowContainerCloseEvent): void {
     if (generation !== this.#generation) {
       return;
@@ -1131,8 +1325,12 @@ export class Window {
     if (this.#status !== "opening" && this.#status !== "open") {
       return;
     }
-    const container = this.#container;
-    if (!container || event.container !== container) {
+    // The Window asked for this close itself (title regeneration); it must not
+    // be treated as the player closing the Window.
+    if (event.container === this.#expectedCloseContainer) {
+      return;
+    }
+    if (!this.#ownsContainer(event.container)) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -1161,8 +1359,7 @@ export class Window {
     if (this.#status !== "opening" && this.#status !== "open") {
       return;
     }
-    const container = this.#container;
-    if (!container || event.container !== container) {
+    if (!this.#ownsContainer(event.container)) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -1255,6 +1452,7 @@ export class Window {
     this.#renderingHalted = true;
     this.#renderEpoch += 1;
     this.#refreshPending = false;
+    this.#fullRefreshQueued = false;
     this.#slotRenderTokens.clear();
   }
 
@@ -1362,6 +1560,36 @@ export class Window {
     this.#renderEpoch += 1;
     if (this.#status === "opening") {
       this.#refreshPending = true;
+      return;
+    }
+    this.#fullRefreshQueued = true;
+    this.#queueRefreshFlush();
+  }
+
+  #queueRefreshFlush(): void {
+    if (this.#flushQueued) {
+      return;
+    }
+    this.#flushQueued = true;
+    // Promise.then is used instead of queueMicrotask because the Bedrock
+    // script runtime is not guaranteed to expose the latter.
+    void Promise.resolve().then(() => {
+      this.#flushQueued = false;
+      this.#runRefreshFlush();
+    });
+  }
+
+  /**
+   * Run the state/GUI refresh collected since the last flush. A close or a
+   * reopen before the microtask drops the work: the new generation either
+   * renders in `open()` or has already prepared its own notifications.
+   */
+  #runRefreshFlush(): void {
+    if (!this.#fullRefreshQueued) {
+      return;
+    }
+    this.#fullRefreshQueued = false;
+    if (this.#renderingHalted || this.#status !== "open") {
       return;
     }
     void this.#refresh();
@@ -1632,10 +1860,13 @@ export class Window {
     this.#stateHandle = undefined;
     this.#stateSchema = undefined;
     this.#container = undefined;
+    this.#retiringContainer = undefined;
+    this.#expectedCloseContainer = undefined;
     this.#layout = undefined;
     this.#writeCache = undefined;
     this.#screenRequested = false;
     this.#refreshPending = false;
+    this.#fullRefreshQueued = false;
     this.#slotRenderTokens.clear();
   }
 
