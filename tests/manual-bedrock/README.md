@@ -169,7 +169,7 @@ JSON UI の上重ねだけでコンテナ側グリッドの操作を止められ
 
 ### F. ライフサイクルと再読み込み
 
-死亡、ディメンション移動、切断、スクリプト再読み込みを試す。切断（退出）時は `world.afterEvents.playerLeave` による自動 close が `PlayerLeft` で 1 回だけ走り、chat 登録・state ハンドル・GUI/要素の購読が解放され、自動再オープンしないことを確認する（実装済み・Node.js テストのみ、実機未検証）。死亡・shutdown・スクリプト再読み込み時の後始末は未実装のため、それらの経路は引き続き観察項目として扱う。終了イベントの重複、古い入力の実行、`persistent` 状態の復元を確認する。画面の自動再オープンは標準保証としない。
+死亡、ディメンション移動、切断、スクリプト再読み込みを試す。切断（退出）時は `world.afterEvents.playerLeave` による自動 close が `PlayerLeft` で 1 回だけ走り、chat 登録・state ハンドル・GUI/要素の購読が解放され、自動再オープンしないことを確認する（実装済み・Node.js テストのみ、実機未検証）。死亡時は同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で 1 回 close し、同じ経路で後始末することを確認する（実装済み・Node.js テストのみ、実機未検証）。プレイヤー以外の entity の死亡や他プレイヤーの死亡では close しないこと、`entityDie` が届かない環境でも open/close が壊れないことも確認する。shutdown・スクリプト再読み込み時の後始末は未実装のため、それらの経路は引き続き観察項目として扱う。終了イベントの重複、古い入力の実行、`persistent` 状態の復元を確認する。画面の自動再オープンは標準保証としない。
 
 - 対象 ID: `LIFE-01` 〜 `LIFE-05`
 
