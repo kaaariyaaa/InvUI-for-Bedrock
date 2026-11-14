@@ -13,6 +13,8 @@ const itemChangeCallbacks = new Set();
 const chatSendCallbacks = new Set();
 const playerLeaveCallbacks = new Set();
 const entityDieCallbacks = new Set();
+const playerDimensionChangeCallbacks = new Set();
+const playerGameModeChangeCallbacks = new Set();
 const shutdownCallbacks = new Set();
 export const scheduledRuns = [];
 
@@ -29,6 +31,16 @@ export function emitPlayerLeave(playerId) {
 export function emitEntityDie(deadEntity) {
   for (const callback of [...entityDieCallbacks]) {
     callback({ deadEntity });
+  }
+}
+
+export function emitPlayerDimensionChange(player) {
+  for (const callback of [...playerDimensionChangeCallbacks]) callback({ player });
+}
+
+export function emitPlayerGameModeChange(player, toGameMode) {
+  for (const callback of [...playerGameModeChangeCallbacks]) {
+    callback({ player, toGameMode });
   }
 }
 
@@ -133,6 +145,25 @@ export const world = {
         entityDieCallbacks.delete(callback);
       },
     },
+
+    playerDimensionChange: {
+      subscribe(callback) {
+        playerDimensionChangeCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        playerDimensionChangeCallbacks.delete(callback);
+      },
+    },
+    playerGameModeChange: {
+      subscribe(callback) {
+        playerGameModeChangeCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        playerGameModeChangeCallbacks.delete(callback);
+      },
+    },
     playerLeave: {
       subscribe(callback) {
         playerLeaveCallbacks.add(callback);
@@ -173,6 +204,13 @@ const noPlayerLeaveSource = mockSource.replace(
   "",
 );
 const noPlayerLeaveUrl = `data:text/javascript;base64,${Buffer.from(noPlayerLeaveSource).toString("base64")}`;
+// Same double without the dimension-change and game-mode signals, for the
+// per-signal feature-detection test (a `?no-lifecycle-signals` Window module).
+const noLifecycleSource = mockSource.replace(
+  /    playerDimensionChange: \{[\s\S]*?\n    \},\n    playerGameModeChange: \{[\s\S]*?\n    \},\n/,
+  "",
+);
+const noLifecycleUrl = `data:text/javascript;base64,${Buffer.from(noLifecycleSource).toString("base64")}`;
 // Same double without system.beforeEvents.shutdown, for the fail-closed test.
 const noShutdownSource = mockSource.replace(
   /  beforeEvents: \{\n    shutdown: \{[\s\S]*?\n    \},\n  \},\n/,
@@ -201,7 +239,9 @@ registerHooks({
       return {
         url: parentUrl.includes("no-player-leave")
           ? noPlayerLeaveUrl
-          : parentUrl.includes("no-shutdown")
+          : parentUrl.includes("no-lifecycle-signals")
+            ? noLifecycleUrl
+            : parentUrl.includes("no-shutdown")
             ? noShutdownUrl
             : shutdownTag
               ? shutdownMockUrl(shutdownTag)
@@ -257,6 +297,8 @@ const {
   createdContainers,
   emitChatSend,
   emitEntityDie,
+  emitPlayerDimensionChange,
+  emitPlayerGameModeChange,
   emitPlayerLeave,
   emitVirtualContainerClose,
   emitVirtualContainerItemChange,
@@ -1387,7 +1429,13 @@ test("an older async provider result for the same slot is discarded", async () =
 
   phase = "async";
   item.notifyWindows();
+  await tick();
+  assert.equal(pending.length, 1);
+
+  // A second notification in a later timing starts another render; the older
+  // result must not overwrite the newer one.
   item.notifyWindows();
+  await tick();
   assert.equal(pending.length, 2);
 
   pending[1](stack("minecraft:new"));
@@ -2397,6 +2445,7 @@ test("a GUI update discards an in-flight provider result", async () => {
 
   phase = "async";
   icon.notifyWindows();
+  await tick();
   phase = "after";
   gui.setContent([Item.simple(() => stack("minecraft:page_2"))]);
   await tick();
@@ -4741,5 +4790,180 @@ test("a Window opened after the shutdown tests still opens", async () => {
   assert.equal(window.status, "open");
   assert.equal(adapter.opened.length, 1);
   window.close();
+  assert.equal(adapter.closed.length, 1);
+});
+
+test("playerDimensionChange closes only the changing viewer's Window with ServerClosed and releases it", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const otherCloseReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+  const otherWindow = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => otherCloseReasons.push(reason))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+  const container = adapter.containers[0];
+
+  // Another player, a missing event payload, and a player whose id cannot be
+  // read must not close anything.
+  emitPlayerDimensionChange({ id: "p3" });
+  emitPlayerDimensionChange(undefined);
+  emitPlayerDimensionChange({
+    get id() {
+      throw new Error("invalid player");
+    },
+  });
+  assert.equal(window.status, "open");
+  assert.equal(otherWindow.status, "open");
+
+  emitPlayerDimensionChange({ id: player.id });
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  // The player is still valid after the change, so the adapter is also asked
+  // to close as a fallback; the game's own ServerClosed event becomes a no-op.
+  assert.deepEqual(adapter.closed, [{ container, viewer: player }]);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.throws(() => window.getState(), /not open/);
+  const delayed = await sendChat(window, 0, 1);
+  assert.equal(delayed.cancel, true);
+
+  // A repeated change is a no-op; the other viewer is untouched.
+  emitPlayerDimensionChange({ id: player.id });
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(otherWindow.status, "open");
+  assert.deepEqual(otherCloseReasons, []);
+
+  otherWindow.close();
+});
+
+test("playerGameModeChange closes only the viewer that switched to spectator", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const otherCloseReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+  const otherWindow = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => otherCloseReasons.push(reason))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+
+  // Other mode changes, another player's spectator switch, and malformed
+  // events leave the Window open.
+  emitPlayerGameModeChange(player, "Creative");
+  emitPlayerGameModeChange({ id: "p3" }, "Spectator");
+  emitPlayerGameModeChange(undefined, "Spectator");
+  emitPlayerGameModeChange(player, undefined);
+  assert.equal(window.status, "open");
+  assert.equal(otherWindow.status, "open");
+  assert.deepEqual(closeReasons, []);
+
+  emitPlayerGameModeChange(player, "Spectator");
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerSpectating"]);
+  assert.deepEqual(adapter.closed.map(({ viewer }) => viewer), [player]);
+  assert.deepEqual(adapter.closeSubscriptions.map((record) => record.active), [false]);
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.throws(() => window.getState(), /not open/);
+
+  // Duplicate delivery and a late VirtualContainerClose do not notify again.
+  emitPlayerGameModeChange(player, "Spectator");
+  adapter.emitClose(
+    { container: adapter.containers[0], player, reason: "PlayerSpectating" },
+    true,
+  );
+  assert.deepEqual(closeReasons, ["PlayerSpectating"]);
+  assert.equal(otherWindow.status, "open");
+  assert.deepEqual(otherCloseReasons, []);
+
+  otherWindow.close();
+});
+
+test("Windows keep working when the dimension and game-mode signals are absent", async () => {
+  // A separate Window module instance resolves @minecraft/server to a double
+  // without those two signals: each feature detection must latch off
+  // independently instead of breaking open/close or the other signals.
+  const { Window: WindowWithoutLifecycleSignals } = await import(
+    new URL("../src/window.ts?no-lifecycle-signals", import.meta.url).href
+  );
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const window = WindowWithoutLifecycleSignals.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  window.close();
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
   assert.equal(adapter.closed.length, 1);
 });

@@ -169,11 +169,11 @@ JSON UI の上重ねだけでコンテナ側グリッドの操作を止められ
 
 ### F. ライフサイクルと再読み込み
 
-死亡、ディメンション移動、切断、スクリプト再読み込みを試す。切断（退出）時は `world.afterEvents.playerLeave` による自動 close が `PlayerLeft` で 1 回だけ走り、chat 登録・state ハンドル・GUI/要素の購読が解放され、自動再オープンしないことを確認する（実装済み・Node.js テストのみ、実機未検証）。死亡時は同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で 1 回 close し、同じ経路で後始末することを確認する（実装済み・Node.js テストのみ、実機未検証）。プレイヤー以外の entity の死亡や他プレイヤーの死亡では close しないこと、`entityDie` が届かない環境でも open/close が壊れないことも確認する。
+死亡、ディメンション移動、切断、スクリプト再読み込みを試す。切断（退出）時は `world.afterEvents.playerLeave` による自動 close が `PlayerLeft` で 1 回だけ走り、chat 登録・state ハンドル・GUI/要素の購読が解放され、自動再オープンしないことを確認する（実装済み・Node.js テストのみ、実機未検証）。死亡時は同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で 1 回 close し、同じ経路で後始末することを確認する（実装済み・Node.js テストのみ、実機未検証）。ディメンション移動時は同じ `open()` で購読した `world.afterEvents.playerDimensionChange` が対象プレイヤーの Window を `ServerClosed` で 1 回 close し、スペクテイター切替時は `world.afterEvents.playerGameModeChange` が `toGameMode` の `Spectator` だけで `PlayerSpectating` で close することを確認する（どちらも実装済み・Node.js テストのみ、実機未検証。Creative/Survival への変更では close しない）。プレイヤー以外の entity の死亡や他プレイヤーの死亡・ディメンション移動・スペクテイター切替では close しないこと、これらのイベントが届かない環境でも open/close が壊れないことも確認する。
 
 shutdown 時は、最初の `open()` で購読した `system.beforeEvents.shutdown` が `opening` / `open` の全 Window を `ServerClosed` で 1 回だけ close することを確認する（実装済み・Node.js テストのみ、実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばれず、画面とアダプタ購読の破棄はエンジンに任せる。観察できるのは、終了時に close ハンドラーが `ServerClosed` で 1 回だけ呼ばれ、そこで `open()` しても画面が開かず `closed` のままであること、2 回目の shutdown で close ハンドラーが再度呼ばれないこと、shutdown 後に `open()` しても新しい画面が開かないこと。ユーザーの close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）は同じ restricted なコールバック内で実行されるため、close ハンドラーから `VirtualContainer.close()` やイベント `unsubscribe()` を呼ばないこと。shutdown API がない環境では購読を諦め、open/close が壊れないことを確認する。**スクリプト再読み込み時の後始末は未対応**であり、close ハンドラー・状態解放・永続化は保証されないため、再読み込みは shutdown と同じ合格根拠にせず、引き続き観察項目として扱う。終了イベントの重複、古い入力の実行、`persistent` 状態の復元を確認する。画面の自動再オープンは標準保証としない。
 
-- 対象 ID: `LIFE-01` 〜 `LIFE-05`
+- 対象 ID: `LIFE-01` 〜 `LIFE-07`
 
 ### G. 競合確認
 
