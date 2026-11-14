@@ -3,15 +3,20 @@
  * Screen-attribution checks for the manual JSON UI probe packs.
  *
  * The probes insert a static panel marker plus a `$container_title` label.
- * `$container_title` is the screen variable that the candidate panels already
- * render in their own title labels:
- *   bedrock-samples v1.26.70.23-preview
- *   resource_pack/ui/data_driven_container_screen.json (container_label)
- *   resource_pack/ui/chest_screen.json (chest_label)
- * This is not a new binding name; it lets the player see whether the marked
- * panel received the opened VirtualContainer's title (the raw probe fixes it
- * to "InvUI probe <size>"). Title propagation and pack loading are unverified
- * on a real device; these checks only validate the JSON structure.
+ * `$container_title` is never defined in bedrock-samples v1.26.70.23-preview
+ * (all resource_pack/ui files plus _global_variables.json), so the game supplies
+ * it as a screen variable. The title labels that read it already live below the
+ * insertion points, and an ancestor inherits whatever its descendants see:
+ *   data_driven_container_screen.json: container_label, pocket container_header
+ *   chest_screen.json: chest_label
+ *   pocket_containers.json: container_header
+ * The insertion points (desktop_panel, pocket_panel, small/large_chest_panel)
+ * are those labels' ancestors, so the sample is consistent with the marker
+ * seeing the same variable. That is a sample-level inference; receiving the
+ * variable on a device, and the value being the opened VirtualContainer's title,
+ * are unverified. The raw probe fixes the title to "InvUI probe <size>".
+ * Title propagation and pack loading remain unverified; these checks only
+ * validate the JSON structure and the documented limits.
  */
 
 import assert from "node:assert/strict";
@@ -34,6 +39,7 @@ const PROBES = [
       },
     ],
     manifest: "tests/manual-bedrock/data-driven-resource-pack/manifest.json",
+    readme: "tests/manual-bedrock/data-driven-resource-pack/README.md",
   },
   {
     name: "chest probe",
@@ -49,11 +55,12 @@ const PROBES = [
       },
     ],
     manifest: "tests/manual-bedrock/chest-resource-pack/manifest.json",
+    readme: "tests/manual-bedrock/chest-resource-pack/README.md",
   },
 ];
 
 for (const probe of PROBES) {
-  test(`${probe.name}: the title marker reads the evidenced $container_title only`, () => {
+  test(`${probe.name}: the title marker only reads $container_title, not a binding`, () => {
     const defs = readJson(probe.defs);
     const titleMarker = defs.title_marker;
     assert.ok(titleMarker, "missing title_marker");
@@ -72,6 +79,18 @@ for (const probe of PROBES) {
     const json = JSON.stringify(defs);
     assert.ok(!json.includes('"#'), "the probe must not use a hardcoded #binding");
     assert.ok(!json.includes("button_mappings"), "the probe must not define button mappings");
+  });
+
+  test(`${probe.name}: the title marker stays visible and stacked below the static marker`, () => {
+    const defs = readJson(probe.defs);
+    const title = defs.title_marker;
+    assert.equal(title.layer, 100);
+    assert.deepEqual(title.offset, [4, 18], "the documented title offset must not drift");
+    assert.ok(!("localize" in title), "the title marker must show the raw value");
+    assert.ok(!("ignored" in title), "the title marker must stay ungated so pack loading stays visible");
+    for (const name of ["desktop_marker", "pocket_marker"]) {
+      assert.ok(defs[name].offset[1] < title.offset[1], `${name} must not cover the title marker`);
+    }
   });
 
   test(`${probe.name}: every candidate panel gets the marker and the title marker`, () => {
@@ -95,6 +114,21 @@ for (const probe of PROBES) {
           `${file}: ${panel} must keep the static panel marker`,
         );
       }
+    }
+  });
+
+  test(`${probe.name}: the README records the scope evidence, its limits, and the empty-title case`, () => {
+    const readme = fs.readFileSync(path.join(repoRoot, probe.readme), "utf8");
+    for (const phrase of [
+      "定義がなく",
+      "祖先",
+      "仮説",
+      "実機で挿入した control がこの変数を受け取ることは未検証",
+      "MCPE-175115",
+      "静的マーカーが見えていれば",
+      "空/未解決",
+    ]) {
+      assert.ok(readme.includes(phrase), `README must mention ${phrase}`);
     }
   });
 

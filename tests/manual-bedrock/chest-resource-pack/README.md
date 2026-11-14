@@ -22,7 +22,9 @@
 | `ui/invui_probe_pocket.json` | `pocket_containers` | `small_chest_panel`, `large_chest_panel` | `InvUI probe: chest UI (pocket)` + `$container_title` |
 | `ui/invui_probe.json` | `invui_probe` | ラベル定義のみ | — |
 
-`$container_title` は、chest 画面の `chest_label`（`text: "$container_title"`）と `pocket_containers` の `container_header` が既に使っている**画面変数**です。`title_marker` はその値を表示するだけで、新しい binding 名や架空の変数を追加していません。`VirtualContainer` のタイトルがこの変数へ入るかは実機未検証です（下記）。`title_marker` は生の値を表示し、`localize` は付けていません。通常チェストでは翻訳キー（例: `container.chest`）が出る可能性があり、翻訳表示は検証していません。 タイトルで `ignored` ゲートはかけていません。タイトルが解決されない場合にラベルごと消えて、パック読み込みの確認もできなくなるためです。
+`$container_title` は、固定 samples（`v1.26.70.23-preview`）の全 UI ファイルと `_global_variables.json` のどこにも**定義がなく**、chest 画面の `chest_label`（`text: "$container_title"`）と `pocket_containers` の `container_header`（`$header_label` 経由）が**使っている**画面変数です。値はゲーム側が画面スコープへ供給し、既存ラベルはそれを継承して表示しています。差し込み先の `small_chest_panel` / `large_chest_panel` はどちらのラベルよりも**祖先**なので、サンプル上は同じ変数が見えます。ただし実機で挿入した control がこの変数を受け取ることは未検証で、これは固定 samples からの**仮説**です。`VirtualContainer` のタイトルがこの変数へ入るかも実機未検証です（下記）。
+
+`title_marker` は素の `text` 参照だけで、binding・式・`ignored` ゲートを追加していません。`$container_title` を式や文字列比較に使うと 1.20.30 以降解決されない既知の制約がありますが（[MCPE-175115](https://bugs.mojang.com/browse/MCPE/issues/MCPE-175115)、素の表示は対象外）、このマーカーはその制約を踏みません。生の値を表示し `localize` は付けていないため、通常チェストでは翻訳キー（例: `container.chest`）が出る可能性があります。`ignored` ゲートを掛けないのは、タイトルが解決されない場合にラベルごと消えてパック読み込みの確認もできなくなるためです。
 
 `chest_screen.json` ではデスクトップ用の `small_chest_panel` / `large_chest_panel` が `chest.small_chest_screen` / `chest.large_chest_screen` の `$screen_content` に指定され、ポケット用には `pocket_containers.small_chest_panel` / `large_chest_panel` が指定されています。この 2 系統を別ラベルで観察します。
 
@@ -64,7 +66,9 @@ check.mjs                         JSON 構造チェック（実機の代替で�
 | 通常のチェストでラベルが出ない | プローブが効いていない。`VirtualContainer` 側の陰性も判定に使えない |
 | pocket 側だけラベルが出ない | `small_chest_panel` は `panel` から `controls` を継承しているため、継承元配列への `modifications` が効いていない可能性がある |
 
-ラベルはパネル左上に固定オフセットで置くため、UI スケールやレイアウト次第で見切れたり、タイトルや閉じるボタンと重なったりする可能性があります。陰性の場合は、画面サイズ・UI スケール・言語も記録してください。
+ラベルはパネルの左上（画面コンテンツの左上）に固定オフセットで置きます。静的マーカーは `[4, 4]`、`title_marker` は `[4, 18]`、`layer` は 100 で、パネルに clip はありません。デスクトップのタイトルは中央の `root_panel` 内なので重なりません。pocket では上 27px のヘッダー帯に重なり、狭い画面や大きい UI スケールでは静的マーカーが左ヘッダーの `Player` と重なり得ます（静的マーカー側の見え方で、`title_marker` の追加によるものではありません）。見切れ・重なりを判断できるよう、画面サイズ・UI スケール・言語を記録してください。
+
+静的マーカーと `title_marker` は同じ `insert_front` の `value` で入るため、静的マーカーが見えていれば `title_marker` も挿入されています。水色の文字が見えない場合は「挿入失敗」ではなく「`$container_title` が空/未解決」と読み、空・未解決・`$container_title` の literal 表示のどれだったかを実機で記録してください（サンプルからは決められません）。
 
 ## データ駆動画面プローブは別試験
 
