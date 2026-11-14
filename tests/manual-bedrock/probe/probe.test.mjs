@@ -259,6 +259,22 @@ test('open の ticks 指定は server close を予約し、指定 tick 後に cl
   assert.match(output, /ServerClosed/);
 });
 
+test('手で閉じて再 open した後、古い AUTOCLOSE は新しい画面を閉じない', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27 40');
+  assert.equal(probe.timers.length, 1);
+
+  // 画面を手で閉じ、close イベント後に同じ size を開き直す。
+  probe.fireClose({ reason: 'PlayerClosed' });
+  probe.chat('!invui open 27');
+  assert.equal(probe.openCalls(), 2);
+
+  // 予約済みの古いタイマーが発火しても、再 open した新しい画面を閉じない。
+  probe.timers[0].run();
+  assert.equal(probe.closeCalls(), 0, '古いタイマーは close() しない');
+  assert.match(probe.logs.join('\n'), /AUTOCLOSE skip stale size=27/);
+});
+
 test('ticks 無しの open はタイマーを予約しない', () => {
   const probe = loadProbe();
   probe.chat('!invui open 9');

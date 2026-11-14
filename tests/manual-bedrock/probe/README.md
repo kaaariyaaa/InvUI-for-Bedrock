@@ -136,7 +136,7 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 - **`AUTOCLOSE` / `!invui stop` で強制 close する前に、カーソルに持っているアイテムをスロットへ戻す（cursor 退避）。** 表示中の画面をサーバー側から閉じると、カーソル上のアイテムが失われ得る。
 - **STOP はプレイヤーインベントリ側の複製を検知できない。** 会計はコンテナ内の `typeId` / `amount` 合計だけを見る。インベントリと合計個数を目視で突き合わせる。
 - **チャットは画面表示中に入力できない**ため、`!invui close` だけで `ServerClosed` を確認できない。`!invui open 27 40` のように `ticks` を付けると、open から 40 ticks（約 2 秒）後にサーバー側から `close()` される。20 ticks ≒ 1 秒、上限 2400 ticks。これを close reason の確認に使う。
-- `ticks` タイマーは予約後に画面を手で閉じても残る。その場合の `close()` は `requested=0` になり、close イベントは発生しない。
+- `ticks` タイマーは予約後に画面を手で閉じても残る。そのまま同じ size を開き直さなければ、タイマー発火時の `close()` は `requested=0` になり、close イベントは発生しない。**同じ size を開き直すと古いタイマーは無効になり（`AUTOCLOSE skip stale`）、新しい画面を閉じない。**
 - `size` は 1〜54。設計上の確認対象は 9 / 27 / 54。
 - `open()` は非同期。`close()` 直後に再 `open()` すると `PreviousScreenClosing` になることがある。close イベントを待つか、後続 tick で再試行する。
 - `close()` の戻り値は「要求した画面数」であり、完了数ではない。

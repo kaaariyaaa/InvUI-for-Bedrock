@@ -75,6 +75,14 @@ const ledgers = new Map();
  */
 const pendingOpenPlayers = new Map();
 
+/**
+ * コンテナごとの AUTOCLOSE 世代。open が通るたびに進める。
+ * 手で閉じた後に同じ size を再 open できるため、古いタイマーが新しい画面を
+ * 閉じてしまわないよう、予約時の世代と現在の世代を比較する。
+ * @type {Map<import("@minecraft/server").VirtualContainer, number>}
+ */
+const autoCloseGenerations = new Map();
+
 /** 空文字なら継続中。危険検知または手動停止で理由が入り、以降の open / fill を拒否する。 */
 let stopReason = "";
 
@@ -505,6 +513,8 @@ function handleOpen(player, args) {
   pending.add(player);
   try {
     container.open(player);
+    // open が通ったら新しい表示セッション。前回予約の AUTOCLOSE を無効化する。
+    autoCloseGenerations.set(container, (autoCloseGenerations.get(container) || 0) + 1);
     reply(
       player,
       `open() を要求しました (size=${size})。例外なし＝画面表示済みではありません。表示されない場合は UserBusy 等を確認してください。` +
@@ -517,12 +527,20 @@ function handleOpen(player, args) {
   }
 
   if (autoCloseTicks !== undefined) {
+    const autoCloseGeneration = autoCloseGenerations.get(container);
     reply(
       player,
       `AUTOCLOSE 予約: open から ${autoCloseTicks} ticks (約 ${(autoCloseTicks / 20).toFixed(1)} 秒) 後に close() を要求します。` +
-        "手で閉じた場合もタイマーは残るので、その場合は requested=0 になります。",
+        "手で閉じた場合もタイマーは残りますが、同じ size を開き直すと古いタイマーは無効になります。",
     );
     system.runTimeout(() => {
+      if (autoCloseGenerations.get(container) !== autoCloseGeneration) {
+        log(
+          `AUTOCLOSE skip stale size=${size}: 一度閉じて再 open されたため、` +
+            "古いタイマーでは新しい画面を閉じない",
+        );
+        return;
+      }
       try {
         if (!player.isValid) {
           log(`AUTOCLOSE skip size=${size}: player は既に無効`);
