@@ -909,6 +909,126 @@ test("a filtered adapter keeps the retiring container attributable during a rege
   assert.equal(window.status, "closed");
 });
 
+/**
+ * Wrap the event hooks of a filter-capable adapter so a test can see which
+ * container each subscription belongs to and whether it is still active.
+ */
+function trackContainerSubscriptions(adapter) {
+  const records = [];
+  for (const kind of ["subscribeClose", "subscribeItemChange"]) {
+    const subscribe = adapter[kind].bind(adapter);
+    adapter[kind] = (handler, container) => {
+      const record = { kind, container, active: true };
+      const unsubscribe = subscribe(handler, container);
+      records.push(record);
+      return () => {
+        record.active = false;
+        unsubscribe();
+      };
+    };
+  }
+  return records;
+}
+
+test("a filtered adapter releases a regenerated screen's subscriptions", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const subscriptions = trackContainerSubscriptions(adapter);
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("title 0")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const first = window.container;
+  for (let index = 1; index <= 5; index += 1) {
+    await window.setTitle(`title ${index}`);
+  }
+  assert.equal(window.status, "open");
+  const second = window.container;
+  assert.notEqual(second, first);
+
+  // Only the screen that is actually shown keeps a subscription. The closed
+  // screens would otherwise pin their container and engine filter until the
+  // Window closes (a title updated regularly would grow without bound).
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active).map((record) => record.container),
+    [second, second],
+    "one close and one itemChange subscription for the current container only",
+  );
+
+  // The retired screen's events are ignored rather than acting on the Window.
+  emitVirtualContainerClose({
+    container: { size: first.size },
+    filterContainer: first,
+    player,
+    reason: "ServerClosed",
+  });
+  assert.equal(window.status, "open");
+
+  emitVirtualContainerClose({
+    container: { size: second.size },
+    filterContainer: second,
+    player,
+    reason: "PlayerClosed",
+  });
+  assert.equal(window.status, "closed");
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active),
+    [],
+    "closing the Window releases its remaining subscriptions",
+  );
+});
+
+test("a filtered adapter releases a container replaced while opening", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const subscriptions = trackContainerSubscriptions(adapter);
+  let switched = false;
+  let window;
+  const trigger = Item.simple(() => {
+    if (!switched) {
+      // A provider writing state makes the first render pass stale; the next
+      // pass selects a tab whose layout needs a bigger container.
+      switched = true;
+      window.setState({ tab: 1 });
+    }
+    return stack("minecraft:trigger");
+  });
+  const tab0 = Gui.normal({ structure: ["a"], ingredients: { a: trigger } });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:tab1")) },
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(window.container.size, 27);
+  assert.equal(subscriptions.length, 4, "both containers were subscribed");
+  assert.deepEqual(
+    subscriptions.filter((record) => record.active).map((record) => record.container),
+    [window.container, window.container],
+    "the never-shown container's subscriptions were released",
+  );
+  assert.ok(
+    subscriptions
+      .filter((record) => record.container.size === 9)
+      .every((record) => !record.active),
+  );
+  window.close();
+});
+
 test("a throwing Window error handler still logs the original error", async () => {
   const logs = [];
   const original = console.error;

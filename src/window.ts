@@ -1230,6 +1230,14 @@ export class Window {
   >();
   /** Adapter close/itemChange unsubscribe functions, removed on close or failure. */
   #eventUnsubscribers: Array<() => void> = [];
+  /**
+   * Per-container adapter unsubscribers for a filter-capable adapter, keyed by
+   * the container whose events they receive. A container the Window no longer
+   * owns is released immediately (see #releaseContainerEventSubscriptions): its
+   * filter would otherwise keep the container and its engine subscription
+   * alive for the rest of the Window's life.
+   */
+  #containerEventUnsubscribers = new Map<VirtualContainer, Array<() => void>>();
   /** Set once `openContainer` has been called, before the screen may emit events. */
   #screenRequested = false;
   /** Set when an item change through the screen must not be rendered over. */
@@ -1585,11 +1593,16 @@ export class Window {
         if (size !== container.size) {
           // The screen is not shown yet, so the container can be replaced
           // instead of requiring a close/reopen cycle (design 8.4).
+          const replaced = container;
           container = createContainer(size);
           this.#container = container;
           if (!this.#subscribeFilteredContainer(container, generation)) {
             return;
           }
+          // The replaced container was never shown and will never be shown, so
+          // its subscription can never act: do not keep it (or the container it
+          // filters on) alive for the rest of the open.
+          this.#releaseContainerEventSubscriptions(replaced);
         }
         this.#applyLayout(layout);
         await this.#renderAll(generation);
@@ -1826,6 +1839,9 @@ export class Window {
         this.#renderedWidth = previousLayout.width;
         this.#title = previousTitle;
         this.#applyLayout(previousLayout);
+        // The replacement was never shown and the old container is current
+        // again: its subscription must not outlive the failed swap.
+        this.#releaseContainerEventSubscriptions(nextContainer);
         this.#scheduleRefresh();
       }
       if (reportBeforeCloseFailure) {
@@ -1890,6 +1906,14 @@ export class Window {
       }
       throw error;
     }
+
+    // The regeneration completed: the old screen was closed and its
+    // `#retiringContainer` ownership cleared before it was replaced, so its
+    // subscription can no longer act on this Window. Release it now instead of
+    // keeping one engine subscription (and container reference) per replaced
+    // screen for the rest of the Window's life. Released after the open so an
+    // unsubscribe failure reported from here cannot race the screen swap.
+    this.#releaseContainerEventSubscriptions(previousContainer);
   }
 
   /**
@@ -2799,6 +2823,7 @@ export class Window {
     if (restricted) {
       // Drop the local handles without calling them; see above.
       this.#eventUnsubscribers = [];
+      this.#containerEventUnsubscribers.clear();
     } else {
       this.#unsubscribeFromContainerEvents();
       // An unsubscribe failure is reported, and the error handler may have
@@ -3036,9 +3061,14 @@ export class Window {
       this.#disposeEventSubscriptions(unsubscribers);
       return false;
     }
-    // Keep the other containers' subscriptions too: a replaced or retiring
-    // container may still deliver an event until this Window closes.
-    this.#eventUnsubscribers.push(...unsubscribers);
+    // Group by container so a container the Window stops owning can release
+    // exactly its own subscriptions (see #releaseContainerEventSubscriptions).
+    const existing = this.#containerEventUnsubscribers.get(container);
+    if (existing) {
+      existing.push(...unsubscribers);
+    } else {
+      this.#containerEventUnsubscribers.set(container, unsubscribers);
+    }
     return true;
   }
 
@@ -3144,6 +3174,35 @@ export class Window {
   #unsubscribeFromContainerEvents(): void {
     const unsubscribers = this.#eventUnsubscribers;
     this.#eventUnsubscribers = [];
+    const containerUnsubscribers = [
+      ...this.#containerEventUnsubscribers.values(),
+    ];
+    this.#containerEventUnsubscribers.clear();
+    this.#disposeEventSubscriptions(unsubscribers);
+    for (const perContainer of containerUnsubscribers) {
+      this.#disposeEventSubscriptions(perContainer);
+    }
+  }
+
+  /**
+   * Remove the close/itemChange subscriptions of one container the Window no
+   * longer owns: a replacement discarded before it was shown, or the previous
+   * screen of a finished regeneration. The handler ignores such a container's
+   * events anyway (see #ownsContainer), so keeping the subscription would only
+   * pin the container and its engine filter until the Window closes.
+   *
+   * A container that is still shown or still retiring is left alone: its
+   * events still belong to this Window.
+   */
+  #releaseContainerEventSubscriptions(container: VirtualContainer): void {
+    if (container === this.#container || container === this.#retiringContainer) {
+      return;
+    }
+    const unsubscribers = this.#containerEventUnsubscribers.get(container);
+    if (!unsubscribers) {
+      return;
+    }
+    this.#containerEventUnsubscribers.delete(container);
     this.#disposeEventSubscriptions(unsubscribers);
   }
 
@@ -3766,6 +3825,10 @@ export class Window {
     // first keeps the reentrant generation out of this teardown entirely.
     const eventUnsubscribers = restricted ? [] : this.#eventUnsubscribers;
     this.#eventUnsubscribers = [];
+    const containerEventUnsubscribers = restricted
+      ? []
+      : [...this.#containerEventUnsubscribers.values()];
+    this.#containerEventUnsubscribers.clear();
     const stateSubscription = this.#stateSubscription;
     this.#stateSubscription = undefined;
     const guiSubscription = this.#guiSubscription;
@@ -3790,6 +3853,9 @@ export class Window {
     this.#slotRenderTokens.clear();
 
     this.#disposeEventSubscriptions(eventUnsubscribers);
+    for (const perContainer of containerEventUnsubscribers) {
+      this.#disposeEventSubscriptions(perContainer);
+    }
     stateSubscription?.();
     guiSubscription?.();
     for (const { unsubscribe } of elementSubscriptions) {
