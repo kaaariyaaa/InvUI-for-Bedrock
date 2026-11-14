@@ -1982,7 +1982,11 @@ function main(argv) {
 }
 
 // 直接実行されたときだけ動かす。テストからの import で副作用を起こさない。
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// npm の bin はシンボリックリンク経由で起動され、Node はメインモジュールの
+// リンクを解決するため import.meta.url は実体パスになる。一方 process.argv[1]
+// はリンクのパスのまま残るので、両方を実体パスに直してから比較する。
+const scriptPath = process.argv[1] ? fs.realpathSync(process.argv[1]) : undefined;
+if (scriptPath && scriptPath === fs.realpathSync(fileURLToPath(import.meta.url))) {
   process.exitCode = main(process.argv.slice(2));
 }
 
