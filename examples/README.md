@@ -3,7 +3,7 @@
 > [!WARNING]
 > **このディレクトリのコードはビルド・実行の対象外です。**
 >
-> - スケッチ内の API は現行コアに存在しますが、このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）にもテストにも含まれていません。`npm run build` / `npm test` はここをコンパイル・実行しません。型検査の前には `npm run build` でパッケージ本体の `dist` を作ってください（`examples/` をビルドするわけではありません）。
+> - このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）に含まれず、`npm run build` もここをコンパイルしません。ただし `npm test` の `tests/package.test.mjs` が、パックした公開型（`dist/index.d.ts`）に対して `usage-sketch.ts` を型検査します（実行はしません）。スケッチのコメントや記述内容が実装と一致しているかは、この型検査では判定できません。
 > - コア（レイアウト計算・アイテム・状態管理・Window のライフサイクル）は実装済みで Node.js 上でテストされていますが、**実機では一切検証していません**。
 > - **`Window.open()` は既定の実アダプタで実画面を開きます（実機未検証）。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`open()` は `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`close()` は `VirtualContainer.close()` を呼びます。実際に画面が表示されるか、close がいつ完了するかは未確認です。`close()` は要求時点で返るため、閉鎖直後の再 `open()` は失敗し得ます。`open()` は `async` なので、呼び出し側で catch しないと未処理の Promise rejection になります。
 > - **クリック通知を生成する UI も、アイテム保護もありません。** `Window` は最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:<session-id>:<slot>:<sequence>` 行を `handleClick()` へ流します（Node.js テスト済み・実機未検証）。session-id は open ごとに作り直される `Window._inputSessionId`（公開 getter）で、`Window.id` の `window-N` ではありません。ただし `resource_pack/` はこの行を生成せず、行はプレイヤーが手入力できるため偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
@@ -43,7 +43,7 @@
 | `InventoryLink.moveTo()` | 常に `InventoryLinkMoveRejectedError` | スケッチには移動処理を置いていない |
 | JSON UI / Resource Pack | パッケージには未検証の隔離テンプレート（`resource_pack/`）を同梱するが、チェスト画面へは未接続。`!invui:` 通知を生成する部品もない | スケッチはこれらを前提にしない。入力抑制・画面識別は動かず、クリック通知も生成されない |
 
-型レベルでは、このスケッチは現行の `dist` の公開型と矛盾しません。`examples/` は `tsconfig.json` の対象外なので、**先に `npm run build` を実行して `dist`（`dist/index.d.ts` を含む）を作成**し、そのうえでスケッチ専用の一時設定をリポジトリ直下に置いて型検査します。`npm run build` が作るのはパッケージ本体であり、`examples/` をコンパイルするものではありません。
+型レベルでは、`npm test` の package テストがパックした `dist` の宣言に対してスケッチを型検査します。これは API の名前・型が公開面から消えていないことだけを確認するもので、スケッチのコメントや前提が実装と一致していること、ましてや実機で動くことは保証しません。手元で再検査する場合は、**先に `npm run build` を実行して `dist`（`dist/index.d.ts` を含む）を作成**し、そのうえでスケッチ専用の一時設定をリポジトリ直下に置いて型検査します。`npm run build` が作るのはパッケージ本体であり、`examples/` をコンパイルするものではありません。
 
 ```json
 {

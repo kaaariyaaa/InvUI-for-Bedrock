@@ -461,6 +461,46 @@ test("packed package contents and consumer type check", async (t) => {
     );
   });
 
+  // The design sketch is not part of the package, but the public API it
+  // documents must keep compiling against the shipped declarations: a renamed
+  // or retyped export must fail here rather than silently rot in examples/.
+  await t.test("design usage sketch type-checks against the packed declarations", () => {
+    const tsc = path.join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
+    assert.ok(fs.existsSync(tsc), "typescript dev dependency is missing");
+
+    const exampleDir = path.join(consumerDir, "examples");
+    fs.mkdirSync(exampleDir, { recursive: true });
+    fs.copyFileSync(
+      path.join(repoRoot, "examples", "usage-sketch.ts"),
+      path.join(exampleDir, "usage-sketch.ts"),
+    );
+    fs.writeFileSync(path.join(exampleDir, "package.json"), '{"type":"module"}\n');
+    const exampleTsconfig = {
+      compilerOptions: {
+        target: "ES2022",
+        lib: ["ES2022", "DOM"],
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        skipLibCheck: true,
+        types: [],
+      },
+      include: ["usage-sketch.ts"],
+    };
+    fs.writeFileSync(
+      path.join(exampleDir, "tsconfig.json"),
+      `${JSON.stringify(exampleTsconfig, null, 2)}\n`,
+    );
+
+    const result = runOrFail(tsc, ["-p", "tsconfig.json"], { cwd: exampleDir });
+    assert.equal(
+      result.status,
+      0,
+      `usage sketch type check failed (exit ${result.status})\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  });
+
   await t.test("packed ESM imports and runs against a fake @minecraft/server", async () => {
     const mockUrl = `data:text/javascript;base64,${Buffer.from(minecraftServerMockSource).toString("base64")}`;
     registerHooks({
