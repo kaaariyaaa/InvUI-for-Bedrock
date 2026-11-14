@@ -398,7 +398,7 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 - 追記の直前に、`_ui_defs.json` と同じディレクトリへ `<ファイル名>.invui-backup.<pid>.<乱数>.bak` を排他的に作成します。内容は追記前のバイト列そのものです。
 - 一時ファイルへ書いてから rename で置き換えます。バックアップ作成後と rename 直前の2回、別プロセスが `_ui_defs.json` を変更していないかを内容比較で確認し、変わっていれば書き込まずに中断します。
-- 追記に失敗した場合、一時ファイルを削除し、`_ui_defs.json` が元のままならバックアップも削除します。元と異なる場合はバックアップを残し、そのパスをエラーに含めます。
+- 追記に失敗した場合、一時ファイルを削除し、`_ui_defs.json` が元のままならバックアップも削除します。元と異なる場合はバックアップを残し、そのパスをエラーに含めます。追記を元へ戻す直前にも、開いたファイルの内容が追記したままかを fd で再確認し、別プロセスが変更していれば書き戻さずバックアップを残します。
 - 成功時は人間向け出力と `--json` の `resourcePackInstall.restore` に `cp "<バックアップ>" "<_ui_defs.json>"` 形式の復元コマンドを出します。復元すると追記分は消え、**追記後に手で加えた変更も失われます**。
 - `--json` では `resourcePackInstall.status`（`installed` / `already-installed`）、`uiDefs.action`（`registered` / `already-registered` など）、`added`、`missing`、`backup`、`restore` を返します。
 
