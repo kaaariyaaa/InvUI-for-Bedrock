@@ -247,3 +247,235 @@ export function checkInputRateLimit(
   }
   return { ok: true, lastAcceptedAtMs: nowMs };
 }
+
+/**
+ * Test-only input acceptor. It is a pure module object that the caller drives
+ * explicitly: it never subscribes to `world.beforeEvents.chatSend`, never reads
+ * a Player, and never opens/closes a Window. It is intentionally not exported
+ * from `src/index.ts`; the public entry stays free of this bridge until chat
+ * sending from the chest screen is verified in the real game (design 10.4).
+ *
+ * `accept()` queues a candidate click and resolves once that candidate is
+ * either executed or rejected. Execution is serialized: `execute` runs at most
+ * once at a time even when it is asynchronous, and a candidate is re-checked
+ * against a *fresh* snapshot immediately before `execute`, not against the
+ * snapshot observed when it was accepted.
+ *
+ * A passing result is still not authentication: every field except the
+ * acceptor's generation is attacker-controlled or caller-asserted, so a
+ * crafted matching chat line can pass. Treat it as consistency checking only.
+ *
+ * Design gaps left to the caller:
+ * - The acceptor only knows the generation its caller's snapshot reports. The
+ *   caller must bump it whenever the layout/page changes, and must advance
+ *   `lastSequence` when the click is accepted (in `execute` or before it) so
+ *   later candidates see the new sequence.
+ * - No timestamp exists in the message, so the only expiry is the snapshot:
+ *   `open: false` or a missing snapshot rejects.
+ * - The rate-limit policy and the clock are caller-injected; see
+ *   `checkInputRateLimit`.
+ * - `execute` must not await a new `accept()` for the same acceptor. The queue
+ *   is FIFO, so doing that deadlocks, the same rule as the state queue.
+ */
+export interface InputAcceptorSnapshot extends InputWindowSnapshot {
+  /**
+   * Caller-owned page/layout generation. Must be a non-negative safe integer
+   * and must increase when the Window's clickable layout is replaced.
+   */
+  readonly generation: number;
+}
+
+export type InputAcceptorRejectionReason =
+  | InputRejectionReason
+  | InputRateLimitRejectionReason
+  | "snapshot-unavailable"
+  | "stale-generation"
+  | "queue-full"
+  | "executor-failed";
+
+export type InputAcceptorResult =
+  | { readonly ok: true; readonly notification: InputNotification }
+  | { readonly ok: false; readonly reason: InputAcceptorRejectionReason };
+
+export interface InputAcceptorOptions {
+  /** Latest live snapshot, or `null` when no Window exists. Read at accept and again at execution. */
+  readonly snapshot: () => InputAcceptorSnapshot | null;
+  /** Caller clock in ms, sampled only when a candidate reaches execution. */
+  readonly now: () => number;
+  readonly policy: InputRateLimitPolicy;
+  /** Called only after every execution-time check passes. */
+  readonly execute: (notification: InputNotification) => void | Promise<void>;
+  /**
+   * Maximum number of candidates waiting to start. The running candidate is
+   * not counted. Defaults to 32; a candidate beyond the bound is rejected.
+   */
+  readonly maxQueue?: number;
+}
+
+export interface InputAcceptor {
+  /**
+   * Queues one candidate. Never rejects; failures resolve with a reason.
+   * Reading the snapshot here records the candidate's generation; if no valid
+   * snapshot is available the call fails closed immediately.
+   */
+  accept(message: unknown, senderId: string): Promise<InputAcceptorResult>;
+}
+
+interface QueuedInput {
+  readonly message: unknown;
+  readonly senderId: string;
+  readonly generation: number;
+  readonly resolve: (result: InputAcceptorResult) => void;
+}
+
+/** Guards the caller-supplied snapshot so `validateInputNotification` cannot throw. */
+function readAcceptorSnapshot(source: () => InputAcceptorSnapshot | null): InputAcceptorSnapshot | null {
+  try {
+    const value = source();
+    if (value === null || typeof value !== "object") {
+      return null;
+    }
+    if (
+      typeof value.open !== "boolean" ||
+      typeof value.ownerId !== "string" ||
+      typeof value.sessionId !== "string" ||
+      !Array.isArray(value.slotModes) ||
+      !isNonNegativeSafeInteger(value.generation) ||
+      (value.lastSequence !== undefined && !isNonNegativeSafeInteger(value.lastSequence))
+    ) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function readAcceptorNow(source: () => number): number | null {
+  try {
+    const value = source();
+    return isNonNegativeSafeInteger(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Reads the caller-supplied policy once, at construction; invalid policy throws. */
+function readAcceptorPolicy(source: () => unknown): InputRateLimitPolicy {
+  try {
+    const value = source();
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      isNonNegativeSafeInteger((value as InputRateLimitPolicy).minIntervalMs)
+    ) {
+      return value as InputRateLimitPolicy;
+    }
+  } catch {
+    // fall through: a throwing getter is an invalid policy
+  }
+  throw new RangeError("policy.minIntervalMs must be a non-negative safe integer");
+}
+
+/**
+ * Creates the explicitly-driven, test-only acceptor described on
+ * {@link InputAcceptorSnapshot}. Invalid construction options throw
+ * synchronously; runtime failure to read the caller's snapshot/clock or to run
+ * `execute` resolves as a rejection instead of throwing.
+ */
+export function createInputAcceptor(options: InputAcceptorOptions): InputAcceptor {
+  if (options === null || typeof options !== "object") {
+    throw new TypeError("options must be an object");
+  }
+  const maxQueue = options.maxQueue ?? 32;
+  if (!isNonNegativeSafeInteger(maxQueue) || maxQueue < 1) {
+    throw new RangeError("maxQueue must be a positive safe integer");
+  }
+  const policy = readAcceptorPolicy(() => options.policy);
+
+  let queue: QueuedInput[] = [];
+  let running = false;
+  let rateState: InputRateLimitState = {};
+
+  async function settle(item: QueuedInput): Promise<InputAcceptorResult> {
+    const latest = readAcceptorSnapshot(options.snapshot);
+    if (latest === null) {
+      return { ok: false, reason: "snapshot-unavailable" };
+    }
+    if (latest.generation !== item.generation) {
+      return { ok: false, reason: "stale-generation" };
+    }
+
+    let validation: InputValidationResult;
+    try {
+      validation = validateInputNotification(item.message, item.senderId, latest);
+    } catch {
+      return { ok: false, reason: "snapshot-unavailable" };
+    }
+    if (!validation.ok) {
+      return validation;
+    }
+
+    const nowMs = readAcceptorNow(options.now);
+    if (nowMs === null) {
+      return { ok: false, reason: "invalid-input" };
+    }
+    let rate: InputRateLimitResult;
+    try {
+      rate = checkInputRateLimit(rateState, nowMs, policy);
+    } catch {
+      // A caller-supplied policy getter that throws after construction.
+      return { ok: false, reason: "invalid-input" };
+    }
+    if (!rate.ok) {
+      return rate;
+    }
+
+    try {
+      await options.execute(validation.notification);
+    } catch {
+      return { ok: false, reason: "executor-failed" };
+    }
+    rateState = { lastAcceptedAtMs: rate.lastAcceptedAtMs };
+    return { ok: true, notification: validation.notification };
+  }
+
+  async function drain(): Promise<void> {
+    if (running) {
+      return;
+    }
+    running = true;
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()!;
+        let result: InputAcceptorResult;
+        try {
+          result = await settle(item);
+        } catch {
+          // A caller-supplied getter that throws on a later read must not leave
+          // this candidate (or the rest of the queue) unresolved.
+          result = { ok: false, reason: "invalid-input" };
+        }
+        item.resolve(result);
+      }
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    accept(message: unknown, senderId: string): Promise<InputAcceptorResult> {
+      if (queue.length >= maxQueue) {
+        return Promise.resolve({ ok: false, reason: "queue-full" });
+      }
+      const latest = readAcceptorSnapshot(options.snapshot);
+      if (latest === null) {
+        return Promise.resolve({ ok: false, reason: "snapshot-unavailable" });
+      }
+      return new Promise<InputAcceptorResult>((resolve) => {
+        queue.push({ message, senderId, generation: latest.generation, resolve });
+        void drain();
+      });
+    },
+  };
+}
