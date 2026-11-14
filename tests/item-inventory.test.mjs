@@ -132,6 +132,59 @@ test("Item providers receive the viewer", async () => {
   assert.equal(stack.typeId, "Steve");
 });
 
+test("a placeholder stands in only while an async provider is pending", async () => {
+  const pending = new Promise(() => {});
+  const placeholder = new ItemBuilder("minecraft:loading", 1).build();
+  const item = Item.simple(() => pending).setPlaceholder(placeholder);
+
+  const resolution = item.resolveForDisplay({ name: "Steve" });
+  assert.equal(resolution.placeholder, true);
+  assert.equal(resolution.stack.typeId, "minecraft:loading");
+  assert.equal(resolution.pending, pending);
+
+  const fresh = item.getPlaceholder();
+  assert.notEqual(fresh, placeholder, "the placeholder is copied, not shared");
+});
+
+test("a sync provider ignores the placeholder", async () => {
+  const item = Item.builder()
+    .setItemProvider(() => new ItemBuilder("minecraft:done").build())
+    .setPlaceholder(new ItemBuilder("minecraft:loading").build())
+    .build();
+
+  const resolution = item.resolveForDisplay(undefined);
+  assert.equal(resolution.stack.typeId, "minecraft:done");
+  assert.equal(resolution.pending, undefined);
+  assert.equal(resolution.placeholder, false);
+  assert.equal((await item.resolve(undefined)).typeId, "minecraft:done");
+});
+
+test("clearing a placeholder restores the non-placeholder pending behavior", () => {
+  const item = Item.simple(() => new Promise(() => {}))
+    .setPlaceholder(new ItemBuilder("minecraft:loading").build());
+
+  assert.equal(item.resolveForDisplay(undefined).placeholder, true);
+  item.setPlaceholder(undefined);
+  assert.equal(item.getPlaceholder(), undefined);
+  assert.equal(item.resolveForDisplay(undefined).placeholder, false);
+});
+
+test("a placeholder must be a cloneable ItemStack", () => {
+  const item = Item.simple(() => undefined);
+  assert.throws(() => item.setPlaceholder(null), TypeError);
+  assert.throws(() => item.setPlaceholder({}), TypeError);
+  assert.throws(
+    () => Item.builder().setPlaceholder({ typeId: "" }).build(),
+    TypeError,
+  );
+  // A clone-less plain object would be stored by reference and shared.
+  assert.throws(
+    () => item.setPlaceholder({ typeId: "minecraft:stone", amount: 1 }),
+    TypeError,
+  );
+  assert.equal(item.getPlaceholder(), undefined);
+});
+
 test("Item.builder runs click handlers in order and updates on click", async () => {
   const calls = [];
   let notifications = 0;

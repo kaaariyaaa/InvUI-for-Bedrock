@@ -29,6 +29,17 @@ export type ItemProviderSource = ItemProvider | ItemProviderFunction | ItemStack
 export type ItemUpdateListener = () => void;
 
 /**
+ * Result of {@link Item.resolveForDisplay}. `pending` is set only when the
+ * provider is asynchronous; `placeholder` says whether `stack` is the
+ * placeholder shown while that promise is still running.
+ */
+export interface ItemDisplayResolution {
+  readonly stack: ItemStack | undefined;
+  readonly pending: Promise<ItemStack | undefined> | undefined;
+  readonly placeholder: boolean;
+}
+
+/**
  * Internal operation role for an Item (design 7.1). Inventory slots are not an
  * Item mode: they are represented by `InventoryLink`.
  */
@@ -66,6 +77,22 @@ function normalizeProvider(source: ItemProviderSource): ItemProviderFunction {
 function assertTicks(ticks: number): void {
   if (!Number.isInteger(ticks) || ticks <= 0) {
     throw new RangeError(`InvUI: updatePeriodically ticks must be a positive integer (got ${ticks}).`);
+  }
+}
+
+function isThenable(value: unknown): value is PromiseLike<ItemStack | undefined> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as PromiseLike<unknown>).then === "function"
+  );
+}
+
+function assertPlaceholder(stack: ItemStack): void {
+  // Same shape check as isItemStack: a cloneable stack, so a placeholder can
+  // never be shared by reference with the caller.
+  if (!isItemStack(stack)) {
+    throw new TypeError("InvUI: Item placeholder must be an ItemStack.");
   }
 }
 
@@ -136,12 +163,24 @@ export class ItemBuilder implements ItemProvider {
 /** Stage-builder returned by Item.builder(). */
 export class ItemDefinitionBuilder {
   private provider: ItemProviderSource = () => undefined;
+  private placeholder: ItemStack | undefined;
   private clickHandlers: ClickHandler[] = [];
   private updateAfterClick = false;
   private periodTicks: number | undefined;
 
   setItemProvider(source: ItemProviderSource): this {
     this.provider = source;
+    return this;
+  }
+
+  /** Stack shown while an asynchronous provider is still pending. */
+  setPlaceholder(stack: ItemStack | undefined): this {
+    if (stack === undefined) {
+      this.placeholder = undefined;
+      return this;
+    }
+    assertPlaceholder(stack);
+    this.placeholder = cloneItem(stack);
     return this;
   }
 
@@ -166,6 +205,9 @@ export class ItemDefinitionBuilder {
 
   build(): Item {
     const item = new Item(this.provider);
+    if (this.placeholder !== undefined) {
+      item.setPlaceholder(this.placeholder);
+    }
     for (const handler of this.clickHandlers) {
       item.addClickHandler(handler);
     }
@@ -189,6 +231,7 @@ export class Item {
   readonly id: string;
 
   private provider: ItemProviderFunction;
+  private placeholder: ItemStack | undefined;
   private clickHandlers: ClickHandler[] = [];
   private updateListeners = new Set<ItemUpdateListener>();
   private updateAfterClick = false;
@@ -213,6 +256,44 @@ export class Item {
   /** Resolve the display stack for a viewer; providers may be asynchronous. */
   resolve(viewer: Player): Promise<ItemStack | undefined> {
     return Promise.resolve(this.provider(viewer));
+  }
+
+  /**
+   * Resolve without waiting for an asynchronous provider. When the provider is
+   * pending and a placeholder is set, the returned stack is a copy of the
+   * placeholder and `pending` carries the eventual result. Without a
+   * placeholder the caller awaits `pending` as before.
+   */
+  resolveForDisplay(viewer: Player): ItemDisplayResolution {
+    const result = this.provider(viewer);
+    if (!isThenable(result)) {
+      return { stack: result, pending: undefined, placeholder: false };
+    }
+    const pending = Promise.resolve(result);
+    if (this.placeholder === undefined) {
+      return { stack: undefined, pending, placeholder: false };
+    }
+    return { stack: cloneItem(this.placeholder), pending, placeholder: true };
+  }
+
+  /**
+   * Stack shown while an asynchronous provider is pending. A synchronous
+   * provider ignores it. `undefined` clears it.
+   */
+  setPlaceholder(stack: ItemStack | undefined): this {
+    if (stack === undefined) {
+      this.placeholder = undefined;
+      this.notifyWindows();
+      return this;
+    }
+    assertPlaceholder(stack);
+    this.placeholder = cloneItem(stack);
+    this.notifyWindows();
+    return this;
+  }
+
+  getPlaceholder(): ItemStack | undefined {
+    return this.placeholder === undefined ? undefined : cloneItem(this.placeholder);
   }
 
   setItemProvider(source: ItemProviderSource): this {

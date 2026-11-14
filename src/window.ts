@@ -17,6 +17,9 @@ import type {
   ItemStack,
   Player,
   VirtualContainer,
+  VirtualContainerCloseAfterEvent,
+  VirtualContainerCloseReason,
+  VirtualContainerItemChangeAfterEvent,
   VirtualContainerOptions,
 } from "@minecraft/server";
 import { GuiLink, ScrollGui, TabGui } from "./gui.js";
@@ -37,7 +40,8 @@ export type WindowCloseReason =
   | "PlayerDied"
   | "PlayerLeft"
   | "PlayerSpectating"
-  | "ServerClosed";
+  | "ServerClosed"
+  | "UserBusy";
 
 export type WindowStatus = "created" | "opening" | "open" | "closing" | "closed";
 
@@ -194,9 +198,40 @@ export interface WindowContainerAdapter {
 }
 
 /**
- * Real Bedrock adapter. It can create virtual containers (official API) but
- * never shows or closes a screen: that path is blocked until the manual
- * verification in design 10 and 18.2 is complete.
+ * Translate Bedrock's close reason into the Window's. The pinned
+ * @minecraft/server beta mirrors `WindowCloseReason` member for member, but the
+ * two string enums are not assignable to each other, so map explicitly.
+ * An unknown future reason is reported as `ServerClosed`: the Window still
+ * closes and the close handlers get a defined reason.
+ */
+function toWindowCloseReason(reason: VirtualContainerCloseReason): WindowCloseReason {
+  switch (reason as string) {
+    case "PlayerClosed":
+      return "PlayerClosed";
+    case "PlayerDied":
+      return "PlayerDied";
+    case "PlayerLeft":
+      return "PlayerLeft";
+    case "PlayerSpectating":
+      return "PlayerSpectating";
+    case "UserBusy":
+      return "UserBusy";
+    case "ServerClosed":
+      return "ServerClosed";
+    default:
+      return "ServerClosed";
+  }
+}
+
+/**
+ * Real Bedrock adapter. It can create virtual containers and observe the
+ * official close/itemChange after events, but never shows or closes a screen:
+ * that path is blocked until the manual verification in design 10 and 18.2 is
+ * complete.
+ *
+ * The event hooks are detection, not protection. Both game events are `after`
+ * events, so a close or item change has already happened when the handler runs;
+ * subscribing cannot prevent it or restore the previous item.
  */
 export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter {
   readonly canOpenScreens = false;
@@ -211,6 +246,42 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
 
   closeContainer(_container: VirtualContainer, _viewer: Player): void {
     throw new WindowOpenRejectedError();
+  }
+
+  /**
+   * Forwards every player's virtual container close event. The Window filters
+   * by container identity and player, so this stays a single global
+   * subscription per open Window.
+   */
+  subscribeClose(handler: WindowContainerCloseHandler): () => void {
+    const signal = world.afterEvents.virtualContainerClose;
+    const callback = (event: VirtualContainerCloseAfterEvent): void => {
+      handler({
+        container: event.container,
+        player: event.player,
+        reason: toWindowCloseReason(event.reason),
+      });
+    };
+    signal.subscribe(callback);
+    return () => signal.unsubscribe(callback);
+  }
+
+  /**
+   * Forwards every player's virtual container item-change event. This is an
+   * `after` event: the slot was already changed through the screen, so this is
+   * detection only and cannot prevent the move.
+   */
+  subscribeItemChange(handler: WindowContainerItemChangeHandler): () => void {
+    const signal = world.afterEvents.virtualContainerItemChange;
+    const callback = (event: VirtualContainerItemChangeAfterEvent): void => {
+      handler({
+        container: event.container,
+        player: event.player,
+        slot: event.slot,
+      });
+    };
+    signal.subscribe(callback);
+    return () => signal.unsubscribe(callback);
   }
 }
 
@@ -495,7 +566,7 @@ export class Window {
   readonly id = `window-${nextWindowId++}`;
   readonly viewer: Player;
   readonly title: string;
-  readonly upperGui: Gui;
+  #upperGui: Gui;
   readonly lowerGui: Gui | undefined;
 
   #status: WindowStatus = "created";
@@ -549,7 +620,7 @@ export class Window {
   constructor(config: WindowConfig) {
     this.viewer = config.viewer;
     this.title = config.title;
-    this.upperGui = config.upperGui;
+    this.#upperGui = config.upperGui;
     this.lowerGui = config.lowerGui;
     this.#stateScope = config.stateScope;
     this.#stateKey = config.stateKey;
@@ -575,6 +646,11 @@ export class Window {
 
   get container(): VirtualContainer | undefined {
     return this.#container;
+  }
+
+  /** The GUI currently shown in the upper area; replaced by {@link setUpperGui}. */
+  get upperGui(): Gui {
+    return this.#upperGui;
   }
 
   /**
@@ -695,6 +771,91 @@ export class Window {
    */
   async refresh(): Promise<void> {
     await this.#refresh();
+  }
+
+  /**
+   * Replace the upper GUI of an open Window (design 8.4).
+   *
+   * The slot layout is re-evaluated and written again, so the container and the
+   * screen are kept. Only the same container size can be applied in place: a
+   * different size needs a new VirtualContainer, so it is reported and the
+   * current GUI stays in place. A different state schema would leave the
+   * acquired state describing the previous shape, so it fails closed through
+   * the same path as a structural GUI change.
+   */
+  setUpperGui(gui: Gui): void {
+    if (!gui || typeof gui.resolve !== "function" || typeof gui.subscribe !== "function") {
+      throw new TypeError("InvUI: Window upper GUI must be a Gui.");
+    }
+    if (gui === this.#upperGui) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      this.#upperGui = gui;
+      return;
+    }
+    const handle = this.#stateHandle;
+    if (!handle) {
+      return;
+    }
+    const generation = this.#generation;
+    let layout: ResolvedGuiLayout;
+    try {
+      layout = gui.resolve(this.viewer, handle.get());
+    } catch (error) {
+      this.#report(error, "guiChange");
+      return;
+    }
+    // #report runs the caller's error handler, which may close and reopen the
+    // Window: the rest of this swap belongs to the generation that is gone.
+    if (generation !== this.#generation) {
+      return;
+    }
+    if (!this.#container || containerSizeOf(layout) !== this.#container.size) {
+      this.#report(
+        new Error("InvUI: layout size changed; reopen the Window to apply it."),
+        "guiChange",
+      );
+      return;
+    }
+    if (!this.#schemaMatchesGui(gui)) {
+      this.#failStateSchema("guiChange");
+      return;
+    }
+
+    // Detach the old GUI before attaching the new one so a notification from
+    // either cannot refresh against the other GUI's layout.
+    const previousUnsubscribe = this.#guiSubscription;
+    this.#guiSubscription = undefined;
+    if (previousUnsubscribe) {
+      try {
+        previousUnsubscribe();
+      } catch (error) {
+        this.#report(error, "unsubscribe");
+        // The error handler may have closed and reopened the Window.
+        if (generation !== this.#generation) {
+          return;
+        }
+      }
+    }
+    try {
+      this.#guiSubscription = gui.subscribe(() => this.#onGuiChanged());
+    } catch (error) {
+      // The swap stays safe: the new layout is applied below, only push updates
+      // from the new GUI are missing.
+      this.#report(error, "subscribe");
+      if (generation !== this.#generation) {
+        return;
+      }
+    }
+    this.#upperGui = gui;
+    this.#applyLayout(layout);
+    // A failed element subscription inside #applyLayout is reported, and the
+    // handler may have closed and reopened: do not refresh the new generation.
+    if (generation !== this.#generation) {
+      return;
+    }
+    this.#scheduleRefresh();
   }
 
   /**
@@ -1122,12 +1283,17 @@ export class Window {
 
   /** True while the acquired state still describes the current upper GUI. */
   #stateSchemaMatches(): boolean {
+    return this.#schemaMatchesGui(this.#upperGui);
+  }
+
+  /** True while the acquired state still describes `gui`. */
+  #schemaMatchesGui(gui: Gui): boolean {
     const acquired = this.#stateSchema;
     if (acquired === undefined) {
       return true;
     }
     try {
-      return schemaOf(this.upperGui) === acquired;
+      return schemaOf(gui) === acquired;
     } catch {
       // A shape that cannot be described cannot be matched to the state.
       return false;
@@ -1217,33 +1383,137 @@ export class Window {
     const element = layout.slots[slot];
 
     let stack: ItemStack | undefined;
+    let pending: Promise<ItemStack | undefined> | undefined;
+    // Only a provider we suspended on can go stale while we wait; a synchronous
+    // throw is still reported even if the provider invalidated its own pass.
+    let awaited = false;
     try {
-      stack = await this.#resolveElement(element);
+      if (isItemElement(element) && typeof element.resolveForDisplay === "function") {
+        const resolution = element.resolveForDisplay(this.viewer);
+        if (resolution.pending !== undefined && !resolution.placeholder) {
+          // Without a placeholder, an asynchronous provider keeps the previous
+          // behavior: open() and refresh() wait for it.
+          awaited = true;
+          stack = await resolution.pending;
+        } else {
+          stack = resolution.stack;
+          if (resolution.placeholder) {
+            pending = resolution.pending;
+          }
+        }
+      } else {
+        awaited = true;
+        stack = await this.#resolveElement(element);
+      }
     } catch (error) {
       // Keep the previous display item for provider failures (design 14.2).
-      this.#report(error, "itemProvider", slot);
+      // A failure that arrives after a close/reopen, a newer render batch, or a
+      // slot/layout change is stale: reporting it would hand the previous
+      // screen's error to the handler of the new generation, which may close the
+      // new screen.
+      if (!awaited || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+        this.#report(error, "itemProvider", slot);
+      }
       return;
     }
 
-    // The epoch check discards results whose provider call predates a state
-    // change or a newer render batch; the token check discards an older call
-    // for the same slot within the same epoch.
-    const current = this.#layout;
-    if (
-      generation !== this.#generation ||
-      epoch !== this.#renderEpoch ||
-      !this.#container ||
-      !current ||
-      current.slots[slot] !== element ||
-      this.#slotRenderTokens.get(slot) !== token
-    ) {
+    // The final result of a pending provider goes through the same guard as a
+    // synchronous result: a close, a newer render batch, a newer call for this
+    // slot, a layout change, or a render halt discards it.
+    if (pending !== undefined) {
+      // Draw the placeholder before watching: a thenable whose `then` runs
+      // synchronously would otherwise deliver the final result first, and the
+      // placeholder written after it would overwrite that result. Handlers are
+      // still attached in the same tick as the provider call, so a rejection
+      // cannot become unhandled.
+      this.#applySlotStack(generation, epoch, slot, element, token, stack);
+      this.#watchPendingSlot(pending, slot, element, generation, epoch, token);
+      return;
+    }
+    this.#applySlotStack(generation, epoch, slot, element, token, stack);
+  }
+
+  /**
+   * True when a render result still belongs to the current generation, render
+   * batch, layout, slot element, and slot token, and rendering is not halted.
+   */
+  #isCurrentSlot(
+    generation: number,
+    epoch: number,
+    slot: number,
+    element: SlotElement | null | undefined,
+    token: number,
+  ): boolean {
+    const layout = this.#layout;
+    return (
+      !this.#renderingHalted &&
+      generation === this.#generation &&
+      epoch === this.#renderEpoch &&
+      this.#container !== undefined &&
+      layout !== undefined &&
+      layout.slots[slot] === element &&
+      this.#slotRenderTokens.get(slot) === token
+    );
+  }
+
+  /** Write a slot result only if its render is still current, then report setItem failures. */
+  #applySlotStack(
+    generation: number,
+    epoch: number,
+    slot: number,
+    element: SlotElement | null | undefined,
+    token: number,
+    stack: ItemStack | undefined,
+  ): void {
+    if (!this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+      return;
+    }
+    const layout = this.#layout;
+    const container = this.#container;
+    if (!layout || !container) {
       return;
     }
     try {
-      this.#container.setItem(physicalSlotOf(current, slot), stack);
+      container.setItem(physicalSlotOf(layout, slot), stack);
     } catch (error) {
       this.#report(error, "setItem", slot);
     }
+  }
+
+  /**
+   * Attach the final result of an asynchronous provider that is currently
+   * represented by a placeholder. The caller does not await this promise, so
+   * open() is not delayed; the result still passes the slot guards when it
+   * arrives. A rejection is reported through the Window error channel instead
+   * of becoming an unhandled rejection.
+   */
+  #watchPendingSlot(
+    pending: Promise<ItemStack | undefined>,
+    slot: number,
+    element: SlotElement | null | undefined,
+    generation: number,
+    epoch: number,
+    token: number,
+  ): void {
+    void pending
+      .then(
+        (stack) => this.#applySlotStack(generation, epoch, slot, element, token, stack),
+        (error) => {
+          // Keep the previous display item, including the placeholder, and
+          // report the failure like the awaited provider path does. A rejection
+          // for a stale slot is dropped for the same reason as a stale result:
+          // the error handler could close the screen that is now showing.
+          if (!this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+            return;
+          }
+          this.#report(error, "itemProvider", slot);
+        },
+      )
+      .catch((error) => {
+        // The callbacks above already handle provider failures; this only
+        // guards the error channel itself from producing an unhandled rejection.
+        console.error("InvUI: pending item provider result failed.", error);
+      });
   }
 
   async #resolveElement(element: SlotElement | null | undefined): Promise<ItemStack | undefined> {

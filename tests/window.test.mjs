@@ -8,6 +8,16 @@ import { fileURLToPath } from "node:url";
 // that the real adapter never creates a container for a rejected open.
 const mockSource = `
 export const createdContainers = [];
+const closeCallbacks = new Set();
+const itemChangeCallbacks = new Set();
+
+export function emitVirtualContainerClose(event) {
+  for (const callback of [...closeCallbacks]) callback(event);
+}
+
+export function emitVirtualContainerItemChange(event) {
+  for (const callback of [...itemChangeCallbacks]) callback(event);
+}
 
 export class ItemStack {
   constructor(typeId, amount = 1) {
@@ -51,6 +61,26 @@ export const world = {
       };
       createdContainers.push(container);
       return container;
+    },
+  },
+  afterEvents: {
+    virtualContainerClose: {
+      subscribe(callback) {
+        closeCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        closeCallbacks.delete(callback);
+      },
+    },
+    virtualContainerItemChange: {
+      subscribe(callback) {
+        itemChangeCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        itemChangeCallbacks.delete(callback);
+      },
     },
   },
 };
@@ -107,7 +137,11 @@ const {
   WindowStateSchemaChangedError,
   minecraftVirtualContainerAdapter,
 } = await load("../src/window");
-const { createdContainers } = await import(mockUrl);
+const {
+  createdContainers,
+  emitVirtualContainerClose,
+  emitVirtualContainerItemChange,
+} = await import(mockUrl);
 
 /**
  * Test-only adapter. Clearly separate from Minecraft: it records calls and
@@ -233,7 +267,9 @@ const player = { id: "p1", name: "Steve" };
 const otherPlayer = { id: "p2", name: "Alex" };
 
 function stack(typeId, amount = 1) {
-  return { typeId, amount };
+  // `clone` keeps the object a valid Base ItemStack: a placeholder must be
+  // cloneable so it can be copied instead of shared by reference.
+  return { typeId, amount, clone: () => stack(typeId, amount) };
 }
 
 function scrollGui(direction) {
@@ -356,6 +392,85 @@ test("real adapter creates containers through VirtualContainerManager.create", (
   const titled = adapter.createContainer({ size: 54, title: "ショップ" });
   assert.equal(titled.size, 54);
   assert.equal(titled.title, "ショップ");
+});
+
+test("real adapter forwards virtual container events and unsubscribes", () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const closeEvents = [];
+  const itemChangeEvents = [];
+  const container = adapter.createContainer({ size: 9 });
+  const viewer = { id: "p3", name: "EventViewer" };
+
+  const unsubscribeClose = adapter.subscribeClose((event) => closeEvents.push(event));
+  const unsubscribeItemChange = adapter.subscribeItemChange((event) =>
+    itemChangeEvents.push(event),
+  );
+
+  emitVirtualContainerClose({ container, player: viewer, reason: "PlayerDied" });
+  emitVirtualContainerClose({ container, player: viewer, reason: "UserBusy" });
+  emitVirtualContainerItemChange({ container, player: viewer, slot: 4 });
+
+  assert.deepEqual(closeEvents, [
+    { container, player: viewer, reason: "PlayerDied" },
+    { container, player: viewer, reason: "UserBusy" },
+  ]);
+  assert.deepEqual(itemChangeEvents, [{ container, player: viewer, slot: 4 }]);
+
+  unsubscribeClose();
+  unsubscribeItemChange();
+  emitVirtualContainerClose({ container, player: viewer, reason: "ServerClosed" });
+  emitVirtualContainerItemChange({ container, player: viewer, slot: 5 });
+  assert.equal(closeEvents.length, 2);
+  assert.equal(itemChangeEvents.length, 1);
+  // Adding hooks must not make the production adapter openable.
+  assert.equal(adapter.canOpenScreens, false);
+});
+
+test("Window consumes the real adapter's event hooks when a test adapter opts in", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  // Keep the real event hooks; replace only the screen calls so the test never
+  // needs a game. This instance stays separate from the production singleton.
+  adapter.canOpenScreens = true;
+  const opened = [];
+  const closed = [];
+  adapter.openContainer = (container, viewer) => {
+    opened.push({ container, viewer });
+  };
+  adapter.closeContainer = (container, viewer) => {
+    closed.push({ container, viewer });
+  };
+
+  const closeReasons = [];
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  assert.equal(opened.length, 1);
+
+  emitVirtualContainerClose({
+    container: window.container,
+    player: otherPlayer,
+    reason: "PlayerClosed",
+  });
+  emitVirtualContainerClose({ container: {}, player, reason: "PlayerClosed" });
+  assert.equal(window.status, "open", "events for another player or container are ignored");
+
+  emitVirtualContainerItemChange({ container: window.container, player, slot: 0 });
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.deepEqual(
+    errors.map(({ context }) => context.operation),
+    ["itemChange"],
+  );
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.equal(errors[0].context.slot, 0);
+  assert.equal(closed.length, 1);
 });
 
 test("test adapter opens, renders GUI slots, and closes once", async () => {
@@ -769,12 +884,229 @@ test("closing during an async provider prevents a stale slot write", async () =>
   assert.equal(container.items[0], undefined);
 });
 
+test("a pending provider with a placeholder renders it without delaying open", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = deferred();
+  const item = Item.simple(() => pending.promise).setPlaceholder(
+    stack("minecraft:loading"),
+  );
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  const opening = window.open();
+  await tick();
+  assert.equal(window.status, "open", "open must not wait for the provider");
+  await opening;
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+
+  pending.resolve(stack("minecraft:loaded"));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:loaded");
+  window.close();
+});
+
+test("a placeholder render discards an older pending provider result", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const requests = [];
+  const item = Item.simple(
+    () =>
+      new Promise((resolve) => {
+        requests.push(resolve);
+      }),
+  ).setPlaceholder(stack("minecraft:loading"));
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+  assert.equal(requests.length, 1);
+
+  // A refresh starts a newer render batch while the first request is pending.
+  await window.refresh();
+  assert.equal(requests.length, 2);
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+
+  requests[0](stack("minecraft:stale"));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+
+  requests[1](stack("minecraft:fresh"));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:fresh");
+  window.close();
+});
+
+test("a pending placeholder provider result after close is not written", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = deferred();
+  const item = Item.simple(() => pending.promise).setPlaceholder(
+    stack("minecraft:loading"),
+  );
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+
+  window.close();
+  pending.resolve(stack("minecraft:late"));
+  await tick();
+
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 1);
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+});
+
+test("a rejected pending placeholder provider is reported, not unhandled", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const pending = deferred();
+  const item = Item.simple(() => pending.promise).setPlaceholder(
+    stack("minecraft:loading"),
+  );
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+
+  const failure = new Error("provider failed");
+  pending.reject(failure);
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:loading");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error, failure);
+  assert.equal(errors[0].context.operation, "itemProvider");
+  assert.equal(errors[0].context.slot, 0);
+  window.close();
+});
+
+test("a stale pending placeholder rejection is not reported to the reopened screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const pending = deferred();
+  let calls = 0;
+  const item = Item.simple(() => {
+    calls += 1;
+    return calls === 1 ? pending.promise : stack("minecraft:loaded");
+  }).setPlaceholder(stack("minecraft:loading"));
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.close();
+  await window.open();
+  const container = adapter.containers[1];
+  assert.equal(container.items[0].typeId, "minecraft:loaded");
+
+  pending.reject(new Error("provider failed"));
+  await tick();
+
+  assert.deepEqual(errors, [], "the closed generation must not report into the new one");
+  assert.equal(window.status, "open");
+  assert.equal(adapter.closed.length, 1);
+  window.close();
+});
+
+test("a stale awaited provider rejection is not reported to the reopened screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const pending = deferred();
+  let calls = 0;
+  const item = Item.simple(() => {
+    calls += 1;
+    if (calls === 1) {
+      return stack("minecraft:initial");
+    }
+    return calls === 2 ? pending.promise : stack("minecraft:reopened");
+  });
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  // No placeholder: the refresh awaits the provider while the window is closed.
+  item.notifyWindows();
+  await tick();
+  window.close();
+  await window.open();
+  const container = adapter.containers[1];
+  assert.equal(container.items[0].typeId, "minecraft:reopened");
+
+  pending.reject(new Error("provider failed"));
+  await tick();
+
+  assert.deepEqual(errors, []);
+  assert.equal(window.status, "open");
+  window.close();
+});
+
+test("a synchronous thenable result is written after the placeholder", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const item = Item.simple(() => stack("minecraft:ignored"));
+  // A custom thenable may call its callback synchronously; the placeholder must
+  // not be written over the result it delivered.
+  item.resolveForDisplay = () => ({
+    stack: stack("minecraft:loading"),
+    placeholder: true,
+    pending: {
+      then(onFulfilled) {
+        onFulfilled(stack("minecraft:loaded"));
+        return Promise.resolve();
+      },
+    },
+  });
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: item } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:loaded");
+  window.close();
+});
+
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => {
+  let reject;
+  const promise = new Promise((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function tick() {
@@ -1420,6 +1752,182 @@ test("upper GUI content changes re-render the open window", async () => {
   assert.equal(window.status, "open");
   assert.equal(container.items[0].typeId, "minecraft:second");
   window.close();
+});
+
+test("a same-size upper GUI swap re-renders and moves subscriptions", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const oldItem = Item.simple(() => stack("minecraft:old"));
+  const newItem = Item.simple(() => stack("minecraft:new"));
+  const oldGui = Gui.normal({ structure: ["a"], ingredients: { a: oldItem } });
+  const newGui = Gui.normal({ structure: ["a"], ingredients: { a: newItem } });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:old");
+
+  const setItem = container.setItem.bind(container);
+  let writes = 0;
+  container.setItem = (slot, item) => {
+    writes += 1;
+    setItem(slot, item);
+  };
+
+  window.setUpperGui(newGui);
+  await tick();
+  assert.equal(window.upperGui, newGui);
+  assert.equal(container.items[0].typeId, "minecraft:new");
+  assert.equal(adapter.containers.length, 1, "the screen must be kept");
+
+  writes = 0;
+  oldItem.notifyWindows();
+  await tick();
+  assert.equal(writes, 0, "the old element subscription must be gone");
+  newItem.notifyWindows();
+  await tick();
+  assert.ok(writes > 0, "the new element must be subscribed");
+
+  writes = 0;
+  oldGui.setIngredient("a", Item.simple(() => stack("minecraft:old_2")));
+  await tick();
+  assert.equal(writes, 0, "the old GUI subscription must be gone");
+  assert.equal(container.items[0].typeId, "minecraft:new");
+
+  newGui.setIngredient("a", Item.simple(() => stack("minecraft:new_2")));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:new_2");
+  window.close();
+});
+
+test("an upper GUI swap that changes the size is refused and reported", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  await tick();
+
+  assert.equal(window.status, "open");
+  assert.equal(window.container, container);
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].error.message, /layout size changed/);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(container.items[0].typeId, "minecraft:old");
+
+  // The refused swap must leave the previous GUI and its subscriptions intact.
+  oldGui.setIngredient("a", Item.simple(() => stack("minecraft:still_old")));
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:still_old");
+  window.close();
+});
+
+test("an upper GUI swap with a different state schema fails closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const paged = Gui.paged({
+    structure: ["."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [Item.simple(() => stack("minecraft:paged"))],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+
+  window.setUpperGui(paged);
+  await tick();
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(adapter.closed.length, 1);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowStateSchemaChangedError);
+  assert.equal(errors[0].context.operation, "guiChange");
+});
+
+test("a refused upper GUI swap whose error handler reopens keeps the new generation", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  let reopened;
+  let reopening = false;
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["a", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "guiChange" || reopening) {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  await reopened;
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].error.message, /layout size changed/);
+  assert.equal(window.status, "open");
+  assert.equal(window.container, adapter.containers[1]);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(window.upperGui, oldGui, "the rejected GUI must not win over the reopen");
+  assert.equal(adapter.containers.length, 2);
+  assert.equal(adapter.opened.length, 2);
+  assert.equal(adapter.closed.length, 1);
+
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
 });
 
 test("GuiLink and TabGui child changes re-render the open window", async () => {
