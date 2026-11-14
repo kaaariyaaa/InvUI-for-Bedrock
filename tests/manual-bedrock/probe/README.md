@@ -17,7 +17,7 @@
 > - **画面を開いたままの `fill` は拒否する。** クライアント表示とサーバー側スロット状態がずれ、その後の移動でアイテムが複製し得るため。閲覧者がいる間は書き込まない。加えて、`open()` を要求した直後でまだ `getViewers()` に反映されていない間（pending）も **fail-closed で拒否する**。`fill` ができるのは画面を閉じて close イベントが届き、pending が解除された後だけ。全員が画面を閉じてから `fill` する。
 > - **pending は close イベントでしか解除されない（実際の制限）。** `UserBusy` や未表示などで close イベントが来ない場合、その size の `open` と `fill` は再読み込みまで拒否され続ける。これは「誤って書き込むより安全側」に倒した結果であり、解除するにはスクリプト再読み込みが必要。`getViewers()` も表示成功を保証しないため、画面が実際に表示されたかは目視でしか判定できない。
 > - **同一 size の共有コンテナを複数画面で同時に開かない。** 表示同期がずれて複製を作り得るため、`open` は既存の閲覧者（`getViewers()`）、表示未確認の `open`（pending）、`getViewers()` の失敗を拒否する。pending は close イベントまで解除されない。`UserBusy` 等で close イベントが来ない場合は再読み込みで解除する。
-> - **サーバー側 close の前に cursor 退避を行う。** `AUTOCLOSE` や `!invui stop` は表示中の画面をサーバー側から閉じるため、カーソルに持っているアイテムは失われ得る（未検証）。プローブはカーソル上のアイテムを検出できず、退避も自動化しない。閉じる前にカーソル上のアイテムをスロットへ戻す。`AUTOCLOSE` の `ticks` は退避の時間を確保できる長さにする（短すぎると退避前に close する）。
+> - **サーバー側 close の前に cursor 退避を行う。** `AUTOCLOSE` や `!invui stop` は表示中の画面をサーバー側から閉じるため、カーソルに持っているアイテムは失われ得る（未検証）。`!invui stop` は画面表示中に本人が実行できない（チャット不可）ので、別プレイヤーに実行してもらうか画面を閉じてから実行する。プローブはカーソル上のアイテムを検出できず、退避も自動化しない。閉じる前にカーソル上のアイテムをスロットへ戻す。`AUTOCLOSE` の `ticks` は退避の時間を確保できる長さにする（短すぎると退避前に close する）。
 > - **`STOP` はインベントリ側の複製を検知できない。** 会計が見るのはコンテナ内の `typeId` と `amount` の合計だけであり、プレイヤーインベントリ側で増えた複製・増加は検出しない。必ずインベントリの合計個数を目視で突き合わせる。
 > - **画面からの操作 (itemChange) は危険ログを出す。** 投入物は画面外へ出る・消えることがあり、複製も未検証。`!invui dump` の `ACCOUNTING` と合計個数を必ず突き合わせる。会計不一致を検知したら自動で STOP し、以降の `open` / `fill` を拒否する。
 > - **VirtualContainer の中身は保存されない。** 再読み込み、ワールド終了、パックの無効化で消える。**貴重品や実際に使うアイテムを預けない**。中身は使い捨ての stick/paper だけにする。
@@ -58,8 +58,11 @@
 | manifest dependency | `2.13.0-beta`（このプローブの固定値） |
 | ワールド | 使い捨て。バックアップ済み |
 | アイテム | プローブが置く stick / paper のみ。価値のあるアイテムを持ち込まない |
+| InvUI コア | 不要。このプローブは `src/` のコアも `setContainerAdapter()` も使わず、`world.virtualContainerManager` を直接呼ぶ |
 
 `manifest.json` の `min_engine_version` は `[1, 26, 70]` の仮置きです。実際のゲーム版に合わせて変更してください。モジュール版とゲーム版の対応は [API-NOTES.md](../API-NOTES.md) の未検証点 1 として記録します。
+
+**`Window.open()` を許可するテスト用アダプタは不要です。** 現行コアの `Window.open()` 既定拒否は InvUI コアの話であり、このプローブはコアを読み込みません。画面は `VirtualContainer.open()` で直接開きます。
 
 ## 3. サーバーでの実行例
 
@@ -102,19 +105,30 @@
 
 `behavior_pack/` を `development_behavior_packs/` または `behavior_packs/` にコピーし、テストワールドの設定で有効化します。以降の操作は同じです。
 
+Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版と分かれています。Preview の development pack は
+
+```text
+%APPDATA%\Minecraft Bedrock Preview\users\shared\games\com.mojang\development_behavior_packs\
+```
+
+に置きます（安定版は `Minecraft Bedrock Preview` ではなく `Minecraft Bedrock`）。古い UWP 版では `%LOCALAPPDATA%\Packages\<Preview のパッケージ>\LocalState\games\com.mojang\development_behavior_packs\` になります。どちらの構成かはゲーム版で確認してください（[GDK Migration on Windows](https://learn.microsoft.com/en-us/minecraft/creator/documents/gdkpcprojectfolder?view=minecraft-bedrock-stable)）。
+
 ### 3.3 チャットコマンド
 
 | コマンド | 動作 | 主な用途 |
 |---|---|---|
 | `!invui help` | コマンド一覧 | 読み込み確認 |
 | `!invui open [size] [ticks]` | コンテナを作成し `open()` を要求（既定 27）。`ticks` 指定時は open からその tick 数後にサーバー側で `close()`。既存閲覧者・表示未確認の open・`getViewers()` 失敗時は拒否 | 表示・close reason（画面操作なしで `ServerClosed`） |
-| `!invui fill` | 直近に開いたコンテナへ stick/paper を `setItem()`。**閲覧者または pending があると拒否** | itemChange の負の確認 |
-| `!invui close` | 対象プレイヤーの画面に `close()` を要求 | `ServerClosed` の確認（画面を閉じている間しか実行できない） |
+| `!invui fill` | **実行者が最後に開いた size** のコンテナへ stick/paper を `setItem()`。**閲覧者または pending があると拒否** | itemChange の負の確認 |
+| `!invui close` | **実行者自身が最後に開いた size** のコンテナで、**実行者本人の画面にだけ** `close(player)` を要求 | `requested=0` の確認（画面表示中はチャット不可のため `ServerClosed` の確認には使えない。他プレイヤーの画面は閉じられない） |
 | `!invui dump` | viewers・スロット内容・`ACCOUNTING`（期待値と実際）を表示 | 状態確認・会計の突き合わせ |
-| `!invui stop` | 停止扱いにし、全コンテナの画面に `close()` を要求。以降の `open` / `fill` を拒否 | 中止・危険検知後の後始末 |
+| `!invui stop` | 停止扱いにし、全コンテナの全閲覧者の画面に `close()` を要求。以降の `open` / `fill` を拒否 | 中止・危険検知後の後始末（画面を開いている本人は実行できない。別プレイヤーに実行してもらうか、画面を閉じてから実行する） |
 
 補足:
 
+- **`!invui close` は size 引数を取らず、実行者が最後に開いた size（`lastSize`）だけを対象にします。** 他プレイヤーの画面は閉じられません。画面表示中はチャットが使えないため、`!invui close` で `ServerClosed` を起こすことはできません（実行できても `requested=0`）。`ServerClosed` の確認には `!invui open [size] [ticks]` の自動 close を使います。
+- **`!invui fill` は size 引数を取らず、実行者が最後に開いた size を対象にします。** 対象コンテナが未作成、または実行者がまだその size を開いていない場合は実行できません。別プレイヤーに fill させる試験では、そのプレイヤーが先に対象 size を開いて閉じ、対象を選んでおく必要があります（[4.4](#44-画面を開いたままの-fill複製リスクの確認)）。
+- **`!invui stop` もチャットコマンドなので、画面を開いている本人は実行できません。** 本人の画面を閉じるための停止は、別プレイヤーに `!invui stop` を実行してもらうか、1 人だけなら画面を手で閉じてから実行します。`stop` は全コンテナの全閲覧者を閉じます。BDS コンソールからプレイヤーのチャットコマンド（`!invui ...`）は実行できません。
 - `!invui fill` は対象スロットを上書きする。価値のあるアイテムを置いた状態では実行しない。
 - **`!invui fill` は閲覧者がいると実行しない（拒否する）。** 画面を開いたまま `setItem()` すると、クライアントの表示とサーバー側のスロット状態がずれて複製を作り得るため。全員が画面を閉じた後に実行する。加えて、`open()` 直後で未表示の pending 中も拒否する。fill ができるのは close イベントで pending が解除された後だけであり、`open` 直後の `fill` は行わない（実行しても拒否される）。
 - **`open` は同一 size の共有コンテナで他プレイヤーが画面を開いていないことを確認してから行う。** 既存の閲覧者・表示未確認の open（pending）・`getViewers()` 失敗は拒否する。pending は close イベントで解除され、`UserBusy` などで close が来ない場合は再読み込みで解除する。
@@ -144,21 +158,25 @@
 
 ### 4.1 基本表示（DISP 相当）
 
+**画面表示中はチャットを開けない**ため、コマンドは画面を閉じて close イベントが届いてから実行する（同じ size の再 `open` も pending として拒否される）。size ごとに「開く → 見る → 閉じる → ログ確認」を繰り返す。
+
 1. 通常チェストでアイテム移動が従来どおり動くことを先に確認する。
-2. `!invui open 9` → 画面の見出しが `InvUI probe 9`、9 スロットが 1 行で表示されるか。
-3. `!invui dump` → `viewers` に自分が入っているか。
-4. `!invui open 27`、`!invui open 54` でも同様に、行数・列数・個数・見た目を確認する。
-5. 画面を閉じ、`CLOSE ... reason=PlayerClosed` がコンソール/チャットに出るか。
+2. `!invui open 9` → 画面の見出しが `InvUI probe 9`、9 スロットが 1 行で表示されるか。あわせて `open` の次 tick にチャット/コンソールへ出る `getViewers()` の結果を記録する。自分がまだ含まれない可能性もある。
+3. 画面を閉じ、`CLOSE ... reason=PlayerClosed` がコンソール/チャットに出るか（close イベントが届くまで同じ size は再 `open` できない）。
+4. `!invui open 27`、`!invui open 54` でも同様に 2〜3 を繰り返し、行数・列数・個数・見た目を確認する。
 
 期待と注意:
 
 - `open()` の直後は表示前の可能性がある。描画完了を保証しない。
 - `getViewers()` は次 tick 時点の参考値。表示成功の判定に単独で使わない。
+- **画面表示中はチャットを開けないため、`!invui dump` で `viewers` を確認できない。** viewer の確認は `open` 直後に出る `getViewers()` の記録と目視で行う。画面を閉じた後に dump すると `viewers=(none)` になる。
 - 画面サイズ・UI スケール・入力方式を記録する。PC の合格をタッチ/コントローラーの合格にしない。
 
 ### 4.2 close reason
 
 画面表示中はチャットを開けないため、`ServerClosed` は `!invui open 27 40` の自動 close で発生させる（`AUTOCLOSE size=27 close() requested=...` の後に `CLOSE ... reason=ServerClosed` を確認する）。**自動 close の前に、カーソルに持っているアイテムをスロットへ戻しておく（cursor 退避）。強制 close 時にカーソル上のアイテムが失われるかを確認する場合は、使い捨ての stick/paper だけで行う。**
+
+`!invui close` は `ServerClosed` の確認には使えない。**size 引数を取らず実行者本人の `lastSize` だけを対象にし、実行者本人の画面だけを閉じる**ため、画面を開いたまま実行も、他人の画面を閉じることもできない。画面を閉じた状態で実行すると対象は `requested=0` になる。
 
 cursor リスクの実際の制限:
 
@@ -171,7 +189,7 @@ cursor リスクの実際の制限:
 |---|---|---|
 | 画面を自分で閉じる | `PlayerClosed` | |
 | `!invui open 27 40`（ticks 後の自動 close） | `ServerClosed` | |
-| `!invui close`（画面を閉じた状態で実行） | 変化なし（`requested=0`） | |
+| `!invui close`（画面を閉じた状態で実行） | 変化なし（`requested=0`）。対象は実行者本人の `lastSize` のみ | |
 | 画面を開いたままディメンション移動 | `ServerClosed` | |
 | 画面を開いたまま死亡 | `PlayerDied` | |
 | 画面を開いたままスペクテイターへ変更 | `PlayerSpectating` | |
@@ -214,9 +232,10 @@ cursor リスクの実際の制限:
 
 レビュー指摘のとおり、修正前のプローブは **画面を開いたまま `fill` できた**。`setItem()` はサーバー側のスロットを直接書き換えるが、開いているクライアントは表示中の内容を保持しているため、その後の移動操作で古い表示と新しいサーバー状態が競合し、アイテムが複製し得る。特に `open()` 直後は `getViewers()` にまだ反映されておらず、閲覧者ガードだけでは表示直前に書き込めてしまう盲点があった。現在は pending でも拒否する。プローブはこの経路を安全に検証できないため、次の扱いにする。
 
-1. `!invui open 27` で画面を開く。
-2. 画面を開いたまま、または open 直後に別プレイヤーから `!invui fill` を試す。別プレイヤーは事前に同じ size を開いて閉じ、対象を選択しておく（このプローブは最後に開いた size を使用する）。→ **`fill を拒否しました: 閲覧中` または `表示を確認できていない open が残っています` が出て `setItem` されないこと**を確認する（後者は viewer がまだ反映されていなくても拒否する fail-closed の確認）。
-3. 画面を閉じ、`CLOSE ... reason=PlayerClosed` が届いた後に `!invui fill` を実行し、`ACCOUNTING` が一致することを確認する。**close イベント前は同じプレイヤーの `fill` も拒否される。**
+1. **別プレイヤー B の事前準備:** B が `!invui open 27` してから画面を閉じ、`CLOSE ... reason=PlayerClosed` が届いたことを確認する。`!invui fill` は size 引数を取らず実行者 B の `lastSize` を使うため、この準備がないと B は対象コンテナを選べない。B の `open` は既存閲覧者・pending として拒否されるので、A が開く前に済ませる。
+2. A が `!invui open 27` で画面を開く。
+3. 画面を開いたまま、または open 直後に B から `!invui fill` を試す。→ **`fill を拒否しました: 閲覧中` または `表示を確認できていない open が残っています` が出て `setItem` されないこと**を確認する（後者は viewer がまだ反映されていなくても拒否する fail-closed の確認）。
+4. A が画面を閉じ、`CLOSE ... reason=PlayerClosed` が届いた後に **B が** `!invui fill` を実行し、`ACCOUNTING` が一致することを確認する。**close イベント前は同じコンテナへの `fill` が pending として拒否される。**
 
 補足:
 
@@ -254,7 +273,7 @@ cursor リスクの実際の制限:
 プローブ側の自動停止:
 
 - 会計不一致を検知すると `!!! STOP 停止条件に該当 !!!` を出し、以降の `open` / `fill` を拒否する（close / dump / help は使える）。画面は自動では閉じない。
-- 手動停止は `!invui stop`。全コンテナへ `close()` を要求し、以降の `open` / `fill` を拒否する。**強制 close の前に cursor 退避（カーソル上のアイテムをスロットへ戻す）を行う。**
+- 手動停止は `!invui stop`。全コンテナの全閲覧者へ `close()` を要求し、以降の `open` / `fill` を拒否する。**画面を開いている本人はチャットを送れないため、本人の画面を閉じるための停止は別プレイヤーに実行してもらう**（1 人だけなら画面を手で閉じてから実行する。BDS コンソールから `!invui` は実行できない）。**強制 close の前に cursor 退避（カーソル上のアイテムをスロットへ戻す）を行う。**
 - **STOP はプレイヤーインベントリ側の複製・増加を検知できない。** 会計はコンテナ内の `typeId` / `amount` 合計だけを見るため、インベントリの合計個数を目視で突き合わせること。
 - 停止状態はスクリプト再読み込みで初期化される。**停止したら原因を記録し、ワールドを破棄またはバックアップから復元する。**
 

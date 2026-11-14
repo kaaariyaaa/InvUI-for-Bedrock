@@ -65,9 +65,9 @@ check.mjs                             JSON 構造チェック（実機の代替�
 ## 手順
 
 1. 使い捨てワールドを複製し、ワールドとパックのバックアップを取る。
-2. **パックを無効にした状態で**、通常チェストのアイテム移動を確認する（基準）。`VirtualContainer` を使う場合は、別途 [`../probe/`](../probe/README.md) の raw probe で `!invui open 27` を実行できる状態にする。**テスト用アダプタや `Window.open()` を直接許可するコードは使わない**（現行コアは既定で拒否）。
-3. このディレクトリを `development_resource_packs/` に置き、ワールドで**このパックだけ**を有効化する。他の Resource Pack（特に `button-send-resource-pack/`、`chest-resource-pack/`、`data-driven-resource-pack/`）と併用しない。Behavior Pack は不要（`VirtualContainer` を開く場合のみ raw probe）。
-4. 使い捨ての棒・紙などをコンテナへ数種類入れておく。**カーソル上を空にし、サバイバルで行う。**
+2. **パックを無効にした状態で**、通常チェストのアイテム移動を確認する（基準）。`VirtualContainer` を使う場合は、別途 [`../probe/`](../probe/README.md) の raw probe を Behavior Pack として導入し、`!invui open 27` を実行できる状態にする。**raw probe は InvUI コアを使わず `VirtualContainer.open()` を直接呼ぶため、テスト用アダプタも `Window.open()` を許可するコードも不要。** アダプタが必要なのは InvUI コアの画面を出す場合だけであり、現行コアの `Window.open()` 既定拒否はこの試験経路には関係しない。
+3. このディレクトリを development resource pack のフォルダに置き、ワールドで**このパックだけ**を有効化する。Windows の Preview では（1.21.120 以降の GDK 版）`%APPDATA%\Minecraft Bedrock Preview\users\shared\games\com.mojang\development_resource_packs\` に置く。安定版は `Minecraft Bedrock Preview` ではなく `Minecraft Bedrock`、古い UWP 版は `%LOCALAPPDATA%\Packages\<Preview のパッケージ>\LocalState\games\com.mojang\development_resource_packs\` になる（[GDK Migration on Windows](https://learn.microsoft.com/en-us/minecraft/creator/documents/gdkpcprojectfolder?view=minecraft-bedrock-stable)）。他の Resource Pack（特に `button-send-resource-pack/`、`chest-resource-pack/`、`data-driven-resource-pack/`）と併用しない。Behavior Pack は不要（`VirtualContainer` を開く場合のみ raw probe）。
+4. 使い捨ての棒・紙などを用意する。通常チェストには手で入れてよい。**`VirtualContainer` の中身は手で入れられないため、raw probe の `!invui fill` で入れる。`fill` は画面を開いていない（開いていたら閉じて `CLOSE` イベントが届いた）状態で実行し、その後に `!invui open 27` で開く。画面を開いたままの `fill` は probe が拒否する。拒否されずに書き込まれた場合は中止する。** カーソル上は空にし、サバイバルで行う。
 5. 通常のチェストを開く。緑ラベルが出るか、末尾が `desktop` か `pocket` かを記録する。ラベルが出なければ、パック未適用・`modifications` 非対応・差し込み先の変更などの可能性があるため、以降の結果を使わない。
 6. コンテナ側グリッド上でポインタを動かし、**赤い色づき**が出るか確認する。出ない場合、ブロッカーがスロットより下・画面外・クリップされている可能性がある。**この場合の陰性は判定不能**として記録する。
 7. 次の操作を 1 つずつ試し、**そのたびにコンテナ内・プレイヤーインベントリ・カーソル上の個数を突き合わせる**。
@@ -78,8 +78,8 @@ check.mjs                             JSON 構造チェック（実機の代替�
    - コンテナ内でスロット間移動、インベントリへドラッグ
    - ドロップ（Q 相当）
    - タッチの長押し・ドラッグ、コントローラーのフォーカス移動＋決定
-8. `VirtualContainer` の画面でも 4〜7 を繰り返す（開ける場合のみ）。画面サイズ・UI スケール・言語・入力方式を記録する。
-9. パックを無効化し、**通常のチェストで移動が従来どおり動くこと**を再確認する。動かなければ即時中止し、ワールドをバックアップから復元する。
+8. `VirtualContainer` の画面でも 5〜7 を読み替えて繰り返す（開ける場合のみ）。**順序は必ず「画面を閉じた状態で `!invui fill` を実行（成功＝閲覧者も pending もいない）→ その後に `!invui open 27`」**。開いた後で fill しない。画面サイズ・UI スケール・言語・入力方式を記録する。
+9. パックを無効化し、**通常のチェストで移動が従来どおり動くこと**を再確認する。**無効化しても戻らない（動かない・アイテムが増減する）場合は即時中止**し、ワールドをバックアップから復元する。
 
 ## 判定
 
@@ -91,7 +91,8 @@ check.mjs                             JSON 構造チェック（実機の代替�
 | 赤い色づきが出るのにアイテムが動く | **ブロッカーでは止められない**（JSON UI の上重ねだけでは不十分）。保護をこの方式で実装しない判断材料になる |
 | 一部の操作だけ止まる | 部分抑制。**保護として扱わない**。操作ごとに記録する |
 | アイテムが増減・複製した | **即時中止**。ワールドを破棄/復元する |
-| 通常チェストの移動が壊れた | このパックの意図した作用。通常プレイに戻すためパックを無効化する。試験中なら記録して継続可 |
+| 通常チェストの移動が壊れた（パック有効中） | このパックの意図した作用。通常プレイに戻すためパックを無効化する。試験中なら記録して継続可 |
+| **パックを無効化しても通常チェストの移動が戻らない** | **即時中止**。ワールドを破棄またはバックアップから復元し、結果を不合格として記録する |
 
 ラベルはグリッドの外（小: `y=66`、大: `y=120`）に置いていますが、UI スケールや言語次第で見切れる可能性があります。赤い色づきは `hover` / `pressed` の画像で、PC ではホバー、タッチでは押下時に見えます。**コントローラーでは赤い色づきが出ない**ため、陽性対照が弱くなります。
 
@@ -154,4 +155,4 @@ node tests/manual-bedrock/protection-resource-pack/check.mjs
 
 ## 片付け
 
-試験後はワールドごと破棄するか、このパックを無効化・削除してください。**通常のチェストで移動が従来どおり動くことを再確認**し、結果を記録します。結果は [CHECKLIST.md](../CHECKLIST.md) の `PROT-*` に転記しますが、**このプローブの結果だけで `PROT-01`〜`PROT-04` を合格にしないでください**（グリッド全体の抑制しか見ておらず、スロット単位の保護・複製防止・InvUI 限定を確認していないため）。
+試験後はワールドごと破棄するか、このパックを無効化・削除してください。**通常のチェストで移動が従来どおり動くことを再確認**し、結果を記録します。**無効化しても移動が戻らない、またはアイテムが増減する場合は中止**し、ワールドをバックアップから復元してください。結果は [CHECKLIST.md](../CHECKLIST.md) の `PROT-*` に転記しますが、**このプローブの結果だけで `PROT-01`〜`PROT-04` を合格にしないでください**（グリッド全体の抑制しか見ておらず、スロット単位の保護・複製防止・InvUI 限定を確認していないため）。
