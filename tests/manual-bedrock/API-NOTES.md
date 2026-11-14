@@ -81,7 +81,7 @@ const container = world.virtualContainerManager.create({
 ### close の非同期性と再オープンの制約
 
 - `close()` は「閉鎖を要求した」時点で返る。実際の `VirtualContainerCloseAfterEvent` は、**クライアントが UI を閉じ、保留中のインベントリ要求が完了した後**に発生する。**別 tick になることがある**。
-- したがって `close()` の直後に同じプレイヤーへ `open()` してはいけない。前の画面が閉じ終わっていない場合、`VirtualContainerOpenError` の `PreviousScreenClosing` になる。**前の `virtualContainerClose` イベントを受け取ってから開く**か、後続 tick で再試行する。
+- したがって `close()` の直後に同じプレイヤーへ `open()` してはいけない。前の画面が閉じ終わっていない場合、`VirtualContainerOpenError` の `PreviousScreenClosing` になる。**前の `virtualContainerClose` イベントを受け取ってから開く**か、後続 tick で再試行する。InvUI の `Window.open()` と内部再生成は、この理由だけ後続 tick で最大 20 回再試行する（他の open エラーは再試行しない）。
 - 1 人のプレイヤーが同時に開けるコンテナ画面は 1 つ。既にインベントリ・チェスト・別の VirtualContainer を開いている場合は `ContainerScreenOpen`。死亡中は `PlayerDead`、読み込み中・ディメンション変更中・ポータル内は `PlayerNotReady`、睡眠中は `PlayerSleeping`、スペクテイターは `PlayerSpectating`。
 - `open()` が例外を投げなかったことは「画面が表示された」ことを意味しない。要求を送れただけであり、端末側が表示を拒否すると `UserBusy` で閉じる。
 - プレイヤーが退出中・無効な場合は `open()` が `InvalidEntityError` を投げる。

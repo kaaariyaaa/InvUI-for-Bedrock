@@ -856,6 +856,46 @@ const PHYSICAL_COLUMNS = 9;
  */
 export const MAX_OPEN_RENDER_PASSES = 100;
 
+/**
+ * `VirtualContainer.close()` only requests closure; the close event arrives
+ * after the client has closed its UI, which may be a later tick. A following
+ * `open()` then throws `VirtualContainerOpenError` with
+ * `PreviousScreenClosing`. The official docs say to open after the close event
+ * or retry on a later tick, so `open()` retries only that reason.
+ *
+ * ponytail: a fixed tick budget, no close-event handshake. The screen should
+ * finish closing well within this; raise it or wait for the close event if a
+ * slow client is reported to exceed it.
+ */
+const PREVIOUS_SCREEN_CLOSING_RETRIES = 20;
+
+function isPreviousScreenClosingError(error: unknown): boolean {
+  try {
+    return (
+      (error as { reason?: unknown } | undefined)?.reason ===
+      "PreviousScreenClosing"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves on the next game tick, or on a microtask without `system.run`. */
+function waitOneTick(): Promise<void> {
+  const gameSystem: typeof server.system | undefined = server.system;
+  if (!gameSystem || typeof gameSystem.run !== "function") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    try {
+      gameSystem.run(resolve);
+    } catch {
+      // A missing scheduler must not turn a retryable open into a failure.
+      resolve();
+    }
+  });
+}
+
 /** True when both layouts render the same element at every logical slot. */
 function sameSlotElements(
   left: readonly (SlotElement | null)[],
@@ -1503,7 +1543,7 @@ export class Window {
       }
 
       this.#screenRequested = true;
-      this.#adapter.openContainer(container, this.viewer);
+      await this.#openContainer(container, generation);
       // A close event may have been dispatched synchronously from
       // openContainer; it already tore the Window down.
       if (generation !== this.#generation || this.#status !== "opening") {
@@ -1729,7 +1769,14 @@ export class Window {
     }
 
     try {
-      this.#adapter.openContainer(nextContainer, this.viewer);
+      await this.#openContainer(nextContainer, generation);
+      if (
+        generation !== this.#generation ||
+        this.#status !== "open" ||
+        this.#container !== nextContainer
+      ) {
+        return;
+      }
     } catch (error) {
       // The old screen is already closed, so the Window cannot stay open with
       // an unknown container. `openContainer` may also have dispatched a close
@@ -2820,6 +2867,42 @@ export class Window {
     }
     this.#eventUnsubscribers = unsubscribers;
     return true;
+  }
+
+  /**
+   * Show `container`, retrying only `PreviousScreenClosing` on later ticks.
+   * `VirtualContainer.close()` returns before the client has finished closing
+   * its screen, so an immediate regeneration or reopen can hit that documented
+   * error even though nothing is wrong with the request. Any other open error
+   * is real and propagates. Returns without opening when a close or reopen
+   * takes the Window over while waiting.
+   */
+  async #openContainer(
+    container: VirtualContainer,
+    generation: number,
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        this.#adapter.openContainer(container, this.viewer);
+        return;
+      } catch (error) {
+        if (
+          !isPreviousScreenClosingError(error) ||
+          attempt >= PREVIOUS_SCREEN_CLOSING_RETRIES ||
+          generation !== this.#generation ||
+          (this.#status !== "opening" && this.#status !== "open")
+        ) {
+          throw error;
+        }
+      }
+      await waitOneTick();
+      if (
+        generation !== this.#generation ||
+        (this.#status !== "opening" && this.#status !== "open")
+      ) {
+        return;
+      }
+    }
   }
 
   #unsubscribeFromContainerEvents(): void {
