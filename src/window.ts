@@ -87,7 +87,7 @@ import type {
   VirtualContainerOptions,
 } from "@minecraft/server";
 import { connectChatSendInput, createChatInputBridge } from "./chat-input-bridge.js";
-import type { ChatInputBridge } from "./chat-input-bridge.js";
+import type { ChatInputBridge, ChatInputClickOutcome } from "./chat-input-bridge.js";
 import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
 import type { InputSlotMode } from "./input.js";
@@ -1967,21 +1967,32 @@ export class Window {
    * while waiting is discarded instead of invoking a stale handler.
    */
   async handleClick(slot: number): Promise<boolean> {
+    return (await this._inputClick(slot)) === "clicked";
+  }
+
+  /**
+   * Internal: routes one click and reports whether a handler was invoked, for
+   * the automatic chat input bridge. `handleClick()` keeps the public boolean
+   * form; the boolean alone cannot tell a discarded click (safe to retry) from
+   * a handler that ran and threw (replaying it would repeat its side effects).
+   */
+  async _inputClick(slot: number): Promise<ChatInputClickOutcome> {
     if (this.#status !== "open" || !this.#layout || !this.#stateHandle) {
-      return false;
+      return "discarded";
     }
     if (!Number.isInteger(slot) || slot < 0 || slot >= this.#layout.slots.length) {
-      return false;
+      return "discarded";
     }
     const layout = this.#layout;
     const element = layout.slots[slot];
     if (!isButtonElement(element)) {
-      return false;
+      return "discarded";
     }
     const generation = this.#generation;
     const handle = this.#stateHandle;
+    let handlerInvoked = false;
     try {
-      return await handle.enqueue(async () => {
+      const clicked = await handle.enqueue(async () => {
         if (
           this.#status !== "open" ||
           this.#stateHandle !== handle ||
@@ -2013,16 +2024,20 @@ export class Window {
         if (!isButtonElement(element)) {
           return false;
         }
+        handlerInvoked = true;
         await element.handleClick({ player: this.viewer, slot, window: this });
         return true;
       });
+      return clicked ? "clicked" : "discarded";
     } catch (error) {
       // A closed/reopened window discards queued clicks silently; a handler or
       // state-update failure while the window is live goes to the error channel.
       if (this.#status === "open" && generation === this.#generation) {
         this.#report(error, "click", slot);
       }
-      return false;
+      // A rejection after the handler was invoked (or after the item's own
+      // click path started) may already have applied side effects.
+      return handlerInvoked ? "failed" : "discarded";
     }
   }
 
