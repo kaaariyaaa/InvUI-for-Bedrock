@@ -35,7 +35,7 @@
 |---|---|---|
 | `Gui` / `Structure` / `Markers` / `GuiLink` | 実装済み。Node.js のテストで確認済み | なし |
 | `Item` / `ItemBuilder` / `Item.simple()` / `Item.builder()` / クリックハンドラー | 実装済み。ハンドラーは登録順に呼ばれる | 自動接続の chatSend 通知から `handleClick()` へ届くが、通知を生成する UI は未実装で、手入力偽装・実機未検証が残る。それ以外は `Window.handleClick(slot)` を直接呼ぶ |
-| `ClickContext` | `player`、`slot`、`window: unknown` | `window` は `Window` 型ではない |
+| `ClickContext` | `player`、`slot`、`window: Window` | なし |
 | `Window` の設定・状態・`close()` | 実装済み | 画面を開く経路が既定で有効（実機未検証） |
 | `Window.open()` | `async`。既定の実アダプタで `VirtualContainer.open()` を呼ぶ（実機未検証） | スケッチは `await` して `try` / `catch` で受け、未処理 rejection を残さない。実機で表示されるかは未確認 |
 | `WindowBuilder.setLowerGui()` / `Window.setLowerGui()` | API 互換のため受け付けて `Window.lowerGui` に保持するが、下側領域へは描画しない | 下側 GUI を置き換えられる前提で読まない |

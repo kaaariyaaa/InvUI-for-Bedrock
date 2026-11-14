@@ -1,6 +1,7 @@
 import { ItemStack } from "@minecraft/server";
 import type { Player } from "@minecraft/server";
 import { minecraftPeriodicScheduler } from "./periodic.js";
+import type { Window } from "./window.js";
 
 /**
  * Context handed to an Item click handler. The Window/EventRouter owns
@@ -9,7 +10,7 @@ import { minecraftPeriodicScheduler } from "./periodic.js";
 export interface ClickContext {
   readonly player: Player;
   readonly slot: number;
-  readonly window: unknown;
+  readonly window: Window;
 }
 
 export type ClickHandler = (context: ClickContext) => void | Promise<void>;

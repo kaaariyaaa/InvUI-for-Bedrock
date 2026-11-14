@@ -172,7 +172,9 @@ const buyButton = Item.builder()
   .addClickHandler(({ player, slot, window }) => {
     void player.id;
     void slot;
-    void window;
+    // The runtime value is the Window; the public type must say so (design 6.2).
+    const clickWindow: Window = window;
+    void clickWindow.id;
   })
   .updateOnClick()
   .build();
