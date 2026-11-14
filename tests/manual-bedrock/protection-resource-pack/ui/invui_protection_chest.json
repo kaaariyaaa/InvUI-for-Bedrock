@@ -1,0 +1,49 @@
+{
+  "namespace": "chest",
+  "small_chest_panel_top_half": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_protection_desktop_marker@invui_protection.desktop_marker": {
+              "offset": [4, 66]
+            }
+          },
+          {
+            "invui_protection_small_grid_blocker@invui_protection.grid_blocker": {
+              "anchor_from": "top_left",
+              "anchor_to": "top_left",
+              "offset": [7, 9],
+              "size": [162, 54]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "large_chest_panel_top_half": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_protection_desktop_marker@invui_protection.desktop_marker": {
+              "offset": [4, 120]
+            }
+          },
+          {
+            "invui_protection_large_grid_blocker@invui_protection.grid_blocker": {
+              "anchor_from": "top_left",
+              "anchor_to": "top_left",
+              "offset": [7, 10],
+              "size": [162, 108]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

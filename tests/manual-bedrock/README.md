@@ -127,6 +127,8 @@
 
 現行コアの画面は、表示アイテムを `setItem()` で置くだけで、入力抑制も JSON UI もない。プレイヤーは表示アイテムを取り出せ、その後に `refresh()`（状態更新・購読）が走ると同じアイテムが再設定されるため、**取り出しと再描画の組み合わせで複製が起こり得る**。この試験では、取り出し後に画面を操作して再描画させる手順も試す。
 
+JSON UI の上重ねだけでコンテナ側グリッドの操作を止められるかを切り分ける実験用 Resource Pack が [`protection-resource-pack/`](protection-resource-pack/README.md) です。**保護の実装ではなく、使い捨てワールド専用で、通常のチェストの操作にも影響し得ます。** 対象はグリッド全体で、スロット単位・InvUI 限定の抑制は検証できません。同梱の `check.mjs` は JSON 構造だけを検査します。
+
 - 対象 ID: `PROT-01` 〜 `PROT-04`
 - **1 つでも持ち出せたら不合格。** クリック通知の試験へ進まない。
 
@@ -213,6 +215,14 @@ node tests/manual-bedrock/button-send-resource-pack/check.mjs
 ```
 
 確認できるのは JSON の整合性（manifest の警告文、`_ui_defs` の参照先、`button.send` だけを発火するボタン、禁止した入力系 control の不在、`chest` / `pocket_containers` への `insert_front`）だけです。表示・押下・通知の受信・通常チェストへの影響は確認しません。
+
+アイテム操作抑制プローブの構造検査は、次のコマンドで実行できます。
+
+```bash
+node tests/manual-bedrock/protection-resource-pack/check.mjs
+```
+
+確認できるのは JSON の整合性（manifest の警告文、ブロッカーがスロット系の入力だけを no-op へ流すこと、禁止した入力系 control の不在、対象パネルへの `insert_back` と座標、`chest_screen.json` を同梱・登録していないこと）だけです。パックの読み込み、描画、入力の遮断、アイテム保護、通常チェストへの影響は確認しません。
 
 ## 9. 未確定のまま残す事項
 

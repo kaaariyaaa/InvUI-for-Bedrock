@@ -1,0 +1,127 @@
+{
+  "namespace": "invui_protection",
+
+  "desktop_marker": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 12,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "PROTECTION PROBE (desktop): red = overlay",
+    "color": [0.3, 1, 0.3, 1],
+    "shadow": true
+  },
+
+  "pocket_marker": {
+    "type": "label",
+    "font_type": "smooth",
+    "layer": 12,
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "offset": [4, 4],
+    "size": ["default", "default"],
+    "text": "PROTECTION PROBE (pocket): red = overlay",
+    "color": [0.3, 1, 0.3, 1],
+    "shadow": true
+  },
+
+  "grid_blocker": {
+    "type": "button",
+    "size": ["100%", "100%"],
+    "layer": 10,
+    "focus_enabled": true,
+    "focus_wrap_enabled": false,
+    "sound_name": "random.click",
+    "sound_volume": 0.4,
+    "sound_pitch": 1.0,
+    "default_control": "default",
+    "hover_control": "hover",
+    "pressed_control": "pressed",
+    "$pressed_button_name": "button.invui_protection_blocked",
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "double_pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "double_pressed"
+      },
+      {
+        "from_button_id": "button.menu_secondary_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.controller_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_auto_place",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.controller_secondary_select",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_inventory_drop",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_inventory_drop_all",
+        "to_button_id": "$pressed_button_name",
+        "mapping_type": "pressed"
+      }
+    ],
+    "controls": [
+      {
+        "default": {
+          "type": "image",
+          "texture": "textures/ui/white_background",
+          "size": ["100%", "100%"],
+          "alpha": 0.0,
+          "layer": 1
+        }
+      },
+      {
+        "hover": {
+          "type": "image",
+          "texture": "textures/ui/white_background",
+          "size": ["100%", "100%"],
+          "color": [1, 0, 0, 1],
+          "alpha": 0.12,
+          "layer": 1
+        }
+      },
+      {
+        "pressed": {
+          "type": "image",
+          "texture": "textures/ui/white_background",
+          "size": ["100%", "100%"],
+          "color": [1, 0, 0, 1],
+          "alpha": 0.28,
+          "layer": 1
+        }
+      }
+    ]
+  }
+}

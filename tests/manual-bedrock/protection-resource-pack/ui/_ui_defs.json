@@ -1,0 +1,7 @@
+{
+  "ui_defs": [
+    "ui/invui_protection.json",
+    "ui/invui_protection_chest.json",
+    "ui/invui_protection_pocket.json"
+  ]
+}

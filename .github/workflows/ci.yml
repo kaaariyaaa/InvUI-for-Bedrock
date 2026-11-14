@@ -29,4 +29,5 @@ jobs:
           node tests/manual-bedrock/button-send-resource-pack/check.mjs
           node tests/manual-bedrock/chest-resource-pack/check.mjs
           node tests/manual-bedrock/data-driven-resource-pack/check.mjs
+          node tests/manual-bedrock/protection-resource-pack/check.mjs
       - run: npm pack --dry-run
