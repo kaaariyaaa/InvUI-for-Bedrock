@@ -1603,6 +1603,14 @@ export class Window {
           // its subscription can never act: do not keep it (or the container it
           // filters on) alive for the rest of the open.
           this.#releaseContainerEventSubscriptions(replaced);
+          // A failed release is reported, and that handler may close and
+          // reopen the Window. The rest of this pass belongs to the generation
+          // that is gone: re-applying its layout and starting its render batch
+          // would invalidate the reopened generation's in-flight renders and
+          // leave its freshly opened screen blank.
+          if (generation !== this.#generation || this.#status !== "opening") {
+            return;
+          }
         }
         this.#applyLayout(layout);
         await this.#renderAll(generation);
@@ -1869,9 +1877,14 @@ export class Window {
       // The old screen may or may not have closed. Do not open a second screen
       // on an unknown state: report, retry closing the old screen, and fail
       // closed. The requested change stays for the next open().
+      if (generation === this.#generation && this.#status === "open") {
+        // Give the visible screen back to this Window before reporting: an
+        // error handler that closes or reopens must target the screen the
+        // player still sees, not the replacement that was never shown.
+        this.#retiringContainer = previousContainer;
+      }
       this.#report(error, operation);
       if (generation === this.#generation && this.#status === "open") {
-        this.#retiringContainer = previousContainer;
         this.#performClose("ServerClosed", true);
       }
       return;

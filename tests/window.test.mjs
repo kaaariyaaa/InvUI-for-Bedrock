@@ -7449,3 +7449,132 @@ test("a reopen during a failed open's subscription teardown survives the old ope
   window.close("PlayerClosed");
   assert.equal(window.status, "closed");
 });
+
+test("an error handler that closes after a failed regeneration close targets the visible screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  adapter.failClose = true;
+  const errors = [];
+  const closeReasons = [];
+  let handled = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (context.operation !== "titleChange" || handled) {
+        return;
+      }
+      handled = true;
+      adapter.failClose = false;
+      window.close("PlayerClosed");
+    })
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const old = window.container;
+  await window.setTitle("new");
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(errors, ["titleChange"]);
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  const closed = adapter.closed.map((entry) => entry.container);
+  assert.equal(closed[0], old, "the failed close request was for the visible screen");
+  assert.equal(closed.at(-1), old, "the handler's close retries the visible screen");
+  assert.equal(
+    closed.includes(adapter.containers[1]),
+    false,
+    "the replacement that was never shown is not the screen to close",
+  );
+});
+
+test("a reopen from a replaced container's unsubscribe failure keeps the reopened render", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const realSubscribeClose = adapter.subscribeClose.bind(adapter);
+  let failRelease = true;
+  adapter.subscribeClose = (handler, container) => {
+    const unsubscribe = realSubscribeClose(handler, container);
+    return () => {
+      if (failRelease && container.size === 9) {
+        failRelease = false;
+        throw new Error("release unsubscribe failed");
+      }
+      unsubscribe();
+    };
+  };
+  const errors = [];
+  const pending = [];
+  let switched = false;
+  let window;
+  let reopened;
+  let reopening = false;
+  const trigger = Item.simple(() => {
+    if (!switched) {
+      switched = true;
+      window.setState({ tab: 1 });
+    }
+    return stack("minecraft:trigger");
+  });
+  const lazy = Item.simple(
+    () => new Promise((resolve) => pending.push(() => resolve(stack("minecraft:tab1")))),
+  );
+  const tab0 = Gui.normal({ structure: ["a"], ingredients: { a: trigger } });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: lazy },
+  });
+  window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateScope("shared")
+    .setStateKey("reopen-release")
+    .setStateLifetime("session")
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (reopening || context.operation !== "unsubscribe") {
+        return;
+      }
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  const opening = window.open();
+  for (let i = 0; i < 20 && pending.length === 0; i += 1) {
+    await tick();
+  }
+  await opening;
+  assert.ok(reopened, "the release failure reopened the Window");
+  assert.equal(window.status, "opening");
+  assert.equal(pending.length, 3, "the reopened generation is rendering its tab");
+
+  for (const resolve of pending) {
+    resolve();
+  }
+  await reopened;
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  // The old generation's abandoned pass must not bump the render epoch or
+  // re-apply its layout: the reopened screen keeps the resolved items.
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, ["unsubscribe"]);
+  assert.equal(window.container.size, 27);
+  assert.deepEqual(
+    [0, 1, 2].map((row) => window.container.items[row * 9]?.typeId),
+    ["minecraft:tab1", "minecraft:tab1", "minecraft:tab1"],
+  );
+  window.close();
+});
