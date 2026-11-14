@@ -1,178 +1,91 @@
 {
   "namespace": "invui_controls_probe",
+
   "invui_controls_probe_root": {
     "type": "panel",
     "size": ["100%", "100%"],
+    "layer": 100,
     "controls": [
       {
-        "probe_panel@invui_controls_probe.invui_controls_probe_panel": {
-          "anchor_from": "center",
-          "anchor_to": "center"
-        }
-      }
-    ]
-  },
-  "invui_controls_probe_panel": {
-    "type": "stack_panel",
-    "orientation": "vertical",
-    "size": [300, "100%c"],
-    "anchor_from": "center",
-    "anchor_to": "center",
-    "controls": [
-      {
-        "title": {
+        "warning": {
           "type": "label",
-          "size": ["100%", "default"],
-          "text": "InvUI controls probe",
-          "color": [1.0, 1.0, 1.0],
+          "font_type": "smooth",
+          "layer": 103,
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 36],
+          "size": ["default", "default"],
+          "text": "InvUI STATIC CHAT PROBE: manual typing only. No automatic payload. Unverified.",
+          "color": [1, 0.6, 0.2, 1],
+          "shadow": true
+        }
+      },
+      {
+        "instructions": {
+          "type": "label",
+          "font_type": "smooth",
+          "layer": 103,
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 52],
+          "size": ["default", "default"],
+          "text": "First Window example (adjust slot): !invui:window-1:0:1",
+          "color": [0.7, 0.7, 0.7, 1],
           "shadow": false
         }
       },
       {
-        "title_padding": {
-          "type": "panel",
-          "size": [0, 4]
+        "text_input@invui_controls_probe.invui_controls_probe_text_input": {
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 72]
         }
       },
       {
-        "text_input@invui_controls_probe.invui_controls_probe_text_input": {}
-      },
-      {
-        "input_padding": {
-          "type": "panel",
-          "size": [0, 4]
-        }
-      },
-      {
-        "button@invui_controls_probe.invui_controls_probe_button": {}
-      },
-      {
-        "note_padding": {
-          "type": "panel",
-          "size": [0, 4]
-        }
-      },
-      {
-        "note": {
-          "type": "label",
-          "size": ["100%", "default"],
-          "text": "Not connected to any chest screen",
-          "color": [0.7, 0.7, 0.7],
-          "shadow": false
+        "send_button@invui_controls_probe.invui_controls_probe_send_button": {
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 100]
         }
       }
     ]
   },
-  "invui_controls_probe_text_input": {
-    "type": "edit_box",
-    "size": [300, 24],
-    "layer": 1,
-    "enabled": true,
-    "text_box_name": "invui_controls_probe_text_box",
-    "text_type": "ExtendedASCII",
+
+  "invui_controls_probe_text_input@common.text_edit_box": {
+    "layer": 102,
+    "size": [320, 20],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "max_length": 64,
-    "text_control": "display_text",
-    "place_holder_control": "place_holder_control",
-    "default_control": "default",
-    "hover_control": "hover",
-    "pressed_control": "pressed",
-    "locked_control": "locked",
-    "controls": [
-      {
-        "default": {
-          "type": "image",
-          "size": ["100%", "100%"],
-          "texture": "textures/ui/edit_box_indent",
-          "layer": 1
-        }
-      },
-      {
-        "hover": {
-          "type": "image",
-          "size": ["100%", "100%"],
-          "texture": "textures/ui/edit_box_indent_hover",
-          "layer": 1
-        }
-      },
-      {
-        "pressed": {
-          "type": "image",
-          "size": ["100%", "100%"],
-          "texture": "textures/ui/edit_box_indent_hover",
-          "layer": 1
-        }
-      },
-      {
-        "locked": {
-          "type": "image",
-          "size": ["100%", "100%"],
-          "texture": "textures/ui/edit_box_indent",
-          "alpha": 0.5,
-          "layer": 1
-        }
-      },
-      {
-        "display_text": {
-          "type": "label",
-          "size": ["100% - 6px", "default"],
-          "offset": [3, 0],
-          "anchor_from": "left_middle",
-          "anchor_to": "left_middle",
-          "text": "#item_name",
-          "color": [1.0, 1.0, 1.0],
-          "shadow": false,
-          "localize": false,
-          "layer": 2,
-          "property_bag": {
-            "#property_field": "#item_name"
-          }
-        }
-      },
-      {
-        "place_holder_control": {
-          "type": "label",
-          "size": ["100% - 6px", "default"],
-          "offset": [3, 0],
-          "anchor_from": "left_middle",
-          "anchor_to": "left_middle",
-          "text": "probe input",
-          "color": [0.7, 0.7, 0.7],
-          "shadow": false,
-          "localize": false,
-          "layer": 2,
-          "bindings": [
-            {
-              "binding_type": "view",
-              "source_control_name": "display_text",
-              "source_property_name": "(#item_name = '')",
-              "target_property_name": "#visible",
-              "resolve_sibling_scope": true
-            }
-          ]
-        }
-      }
-    ]
+    "always_listening": true,
+    "$focus_id": "invui_controls_probe_focus_id",
+    "$text_box_name": "#message_text_box",
+    "$text_edit_box_content_binding_name": "#message_text_box_content",
+    "$place_holder_text": "!invui:window-1:0:1"
   },
-  "invui_controls_probe_button": {
+
+  "invui_controls_probe_send_button": {
     "type": "button",
-    "size": [300, 28],
-    "layer": 1,
+    "$pressed_button_name": "button.send",
+    "layer": 103,
+    "size": [320, 20],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "sound_name": "random.click",
     "sound_volume": 1.0,
     "sound_pitch": 1.0,
     "default_control": "default",
     "hover_control": "hover",
     "pressed_control": "pressed",
-    "locked_control": "locked",
     "button_mappings": [
       {
         "from_button_id": "button.menu_select",
-        "to_button_id": "button.invui_controls_probe_submit",
+        "to_button_id": "$pressed_button_name",
         "mapping_type": "pressed"
       },
       {
         "from_button_id": "button.menu_ok",
-        "to_button_id": "button.invui_controls_probe_submit",
+        "to_button_id": "$pressed_button_name",
         "mapping_type": "focused"
       }
     ],
@@ -202,21 +115,13 @@
         }
       },
       {
-        "locked": {
-          "type": "image",
-          "size": ["100%", "100%"],
-          "texture": "textures/ui/disabledButtonNoBorder",
-          "layer": 1
-        }
-      },
-      {
         "label": {
           "type": "label",
           "size": ["100%", "100%"],
           "anchor_from": "center",
           "anchor_to": "center",
-          "text": "Submit probe (not wired)",
-          "color": [1.0, 1.0, 1.0],
+          "text": "Send typed payload (unverified)",
+          "color": [1.0, 1.0, 1.0, 1.0],
           "text_alignment": "center",
           "shadow": false,
           "layer": 2

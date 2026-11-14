@@ -48,7 +48,7 @@ const GENERATE_COMMAND = 'generate-resource-pack';
 
 // generate-resource-pack が新しい出力先へ同梱物から作るファイル。
 // ui/_ui_defs.json は同梱版（3 ファイルを登録済み）をそのまま使い、接続済みのパックを作る。
-// ui/invui_controls.json は作成中プローブのため対象外。
+// ui/invui_controls.json と invui_controls_data_driven.json は手動・オプトインの静的ペイロード送信プローブのため対象外。
 const GENERATED_FILES = ['manifest.json', UI_DEFS_RELATIVE_PATH, ...TEMPLATE_PATHS];
 
 const GENERATED_NOTE =

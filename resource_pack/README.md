@@ -6,7 +6,7 @@
 > - `ui/_ui_defs.json` は `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` の 3 つを登録済みです。後者 2 つが `data_driven_container` の `desktop_panel` / `pocket_panel` に警告ラベル、`invui_probe` のラベルと実験的 `button.send` 部品、および**透明ブロッカー**を差し込みます。**登録済みのため、パックを置けば接続が働く想定**です。ただし**実機未検証であり、接続・表示・入力のどれも保証しません**。
 > - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。VirtualContainer 画面がこのパネルを使っているかも未確定です。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
 > - **透明ブロッカーは保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆う透明な `button` で、スロット系の入力を `button.invui_connect_blocked` へ付け替えるだけです。この ID を処理するスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリやホットバーは覆わず、controller・タッチ入力の遮断を保証しません**。フォーカスが下のスロットへ移る、JSON UI を経由しない操作、タッチの長押し・ドラッグなどは止まらない可能性があります。**アイテム保護・入力抑制・画面終了処理は未完成**で、ブロッカーによる遮断を保証しません。表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
-> - `ui/invui_controls.json` は**作成中の追加プローブ**です。完成扱いせず、動作確認や受け入れ判断に使わないでください。どの画面にも接続されておらず、`ui/_ui_defs.json` へも登録していません。CLI の導入対象でもありません。
+> - `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく実装できません。このファイルは、chat と同じ text box 名と `button.send` を使い、固定例 `!invui:window-1:0:1` を手入力して送信経路だけを観察するための**オプトイン**部品です。既定の `ui/_ui_defs.json` へは登録しておらず、キーボード入力を奪い得るため既定接続には含めません。CLI の導入対象でもありません。
 > - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対応ゲーム版・パックの適用方法・読み込み順は確定していません。
 > - 他の Resource Pack との競合を検出・解消する機能はありません。他パックが同じ `invui_probe` / `invui_connect_probe` / `data_driven_container` 名前空間や同じ UUID を使っている場合も衝突し得ます。
 > - **使い捨てワールド専用。** バックアップを取り、試験後はワールドごと破棄するか、変更したファイルを元に戻してください。通常のワールドや配布物へ入れないでください。
@@ -27,7 +27,9 @@ resource_pack/
     ├── invui_connect.json # 警告ラベル + 透明ブロッカー + invui_probe_root のラッパー
     ├── invui_connect_data_driven.json
     │                      # data_driven_container の desktop/pocket への modifications
-    └── invui_controls.json # 作成中の追加プローブ（未登録・接続なし・CLI 対象外）
+    ├── invui_controls.json # 手動・静的ペイロード送信プローブ（オプトイン・未登録）
+    └── invui_controls_data_driven.json
+                           # そのプローブを desktop/pocket へ差し込む opt-in modifications
 ```
 
 ## 既定で有効な画面接続
@@ -58,16 +60,58 @@ resource_pack/
 長押し・ドラッグ、JSON UI を経由しないゲーム側処理は止まらない可能性があります。
 **完全な保護ではなく、遮断を保証しません。** アイテム保護は依然として未実装です。
 
-## `ui/invui_controls.json`（作成中・未検証）
+## `ui/invui_controls.json`（手動・静的ペイロード送信プローブ／オプトイン）
 
-入力部品（`edit_box` とボタン）の記法を確かめるための追加プローブです。現時点では**作成中**であり、次のいずれも行っていません。
+**JSON UI から `slot` / `session` / `sequence` を自動生成してチャット通知を送る方式は、公式構造からは実装できません。** このプローブは、その制約を前提にした**手入力の静的ペイロード実験**です。`common.text_edit_box` を chat 画面と同一の text box 名・content binding で置き、`button.send` を押して、入力した固定文字列が送信されるかだけを観察します。**自動 payload 生成、slot の自動挿入、session / sequence の自動採番は行いません。**
 
-- `ui/_ui_defs.json` への登録
-- どの画面からの参照・表示
-- スクリプト側の入力受信
-- 実機での確認
+### 自動生成できない根拠（2026-11-14 時点）
 
-CLI はこのファイルを導入しません。完成するまで、導入手順・部品名・挙動を確定したものとして扱わず、`invui.json` の確認や CHECKLIST の合否に含めないでください。
+公式 `bedrock-samples` のタグ **`v1.26.70.23-preview`**（commit `430142679bb7daf3160671f06ab32ea433be1e1d`）と Bedrock Wiki を確認しました。
+
+| 確認したこと | 実装への影響 |
+|---|---|
+| `button.send` は [`ui/chat_screen.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/chat_screen.json) と `ui/dev_console_screen.json` にだけ現れる。Wiki の [Hardcoded Button IDs](https://wiki.bedrock.dev/json-ui/json-ui-documentation) も **Chat 画面固有**と明記している | チェスト系画面での成立は未確認。成立しても、送る本文は text box の内容に依存する |
+| [`ui/ui_common.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/ui_common.json) の `common.button` は `from_button_id` → `$pressed_button_name` の対応だけを持ち、引数や文字列を渡す書式がない | 押下 slot をボタン ID に埋め込んだり、session / sequence を `button_mappings` で渡したりできない |
+| chat の [`text_edit_box@common.text_edit_box`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/chat_screen.json) は `$text_box_name: "#message_text_box"` と `$text_edit_box_content_binding_name: "#message_text_box_content"` を使う | 本文の表示はこの 2 つに依存する。後者は Wiki で **Chat 画面固有の hardcoded binding** とされている |
+| `edit_box` に `text` 初期値プロパティはなく、samples にも固定文字を初期表示する例がない。content binding はコード側が供給する | JSON UI だけで本文を書き込む／事前入力する書式は確認できない |
+| `collection_index` は grid item の静的 index であり、`#collection_index` のような実行時 binding をボタン ID やチャット本文へ変換する仕組みはない | slot を自動で本文へ入れる経路がない |
+| `VirtualContainer` の API は open / close / itemChange のみで、JSON UI からの汎用クリックイベントや script binding を公開しない | UI → script へ session / slot / sequence を渡す経路がない |
+
+したがって、**「押した slot・session・sequence を JSON UI が自動で送る」実装は、根拠のない binding を発明しない限り作れません。** このプローブは、その不可能な部分を実装したふりをせず、**手入力の固定ペイロードで送信経路だけを切り分ける**ためのものです。
+
+### 何をするか
+
+`ui/invui_controls_data_driven.json` を有効にすると、`data_driven_container.desktop_panel` / `pocket_panel` の `controls` 先頭へ `invui_controls_probe_root` を `insert_front` します。表示されるのは警告文、固定例、chat と同じ text box 名を持つ入力欄、`button.send` を発火するボタンです。
+
+固定例は **`!invui:window-1:0:1`** です。`Window.id` は `window-N` の連番で、最初の Window は `window-1`、sequence は最初の受理で `1` から始まります。slot は実際に button mode のスロットへ合わせて手で書き換えてください。入力欄には初期文字を入れていないため、**毎回手入力**が必要です。
+
+### オプトイン手順（既定では無効）
+
+`ui/_ui_defs.json` へは**登録していません**。キーボード入力を奪い得るため、既定の接続には含めません。使う場合だけ、`ui/invui_controls.json` と `ui/invui_controls_data_driven.json` をパックへコピーし、次の 2 ファイルを `ui_defs` に追加して有効化します（CLI の `--install-resource-pack` はこの 2 ファイルをコピーしません）。
+
+```json
+{
+  "ui_defs": [
+    "ui/invui_controls.json",
+    "ui/invui_controls_data_driven.json"
+  ]
+}
+```
+
+- **使い捨てワールド専用。** バックアップを取り、終了後はワールドごと破棄してください。
+- **`data_driven_container` のパネルを使う全画面に影響し得ます。** VirtualContainer だけに限定できません。
+- **キーボード入力を奪い得ます。** chat と同じ `#message_text_box` と `always_listening` を使うため、画面を開いている間、チャットやキー操作を壊す可能性があります。入力途中のチャットを残さないでください。
+- **自動送信ではありません。** 固定文字の初期表示、`bindings`、collection、slot / session / sequence の自動生成はありません。
+- **偽装可能です。** 通知はプレイヤーが手入力でき、`sender` 以外は信用できません。bridge の session / sequence 検査も認証ではありません。
+- **通常チェストの移動が壊れたら即時中止。** 他の手動プローブ（`tests/manual-bedrock/edit-box-resource-pack/` など）と同時に有効化しないでください。既定の接続（警告ラベルと `invui_probe`）と同じパネルへ差し込むため、ラベルやボタンが重なり得ます。単独試験を推奨します。
+
+構造チェック（実機の代替ではありません）:
+
+```bash
+node --test tests/resource-pack-ui.test.mjs
+```
+
+確認できるのは、既定の `_ui_defs.json` に登録されていないこと、text input が chat と同じ 2 つの識別子だけを使っていること、初期文字・`bindings`・collection・発明した slot/session binding がないこと、ボタンが `button.send` だけを発火すること、README に制約と出典が残っていることです。実機での表示・入力・送信は確認できません。
 
 ## `experimental/connect-data-driven/`（隔離コピー・独立した実験用）
 
@@ -117,8 +161,9 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 3 ファイルを登録してください（CLI は登録状況を検査して不足を報告します）。単体パックとして
 このディレクトリを使う場合は登録済みです。
 
-`manifest.json` と `ui/chest_screen.json` も作成も変更もしません。`ui/invui_controls.json` は
-導入対象ではないため、有無や内容は判定に影響しません。
+`manifest.json` と `ui/chest_screen.json` も作成も変更もしません。`ui/invui_controls.json` と
+`ui/invui_controls_data_driven.json` は導入対象ではないため、有無や内容は判定に影響しません。
+手動プローブを試す場合は、上記「オプトイン手順」に従って自分で `_ui_defs.json` へ登録してください。
 
 `--behavior-pack` も同時に検査できます（導入だけなら省略可）。
 
@@ -144,7 +189,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 2. 対象画面でラベル・ボタン・警告ラベルが表示されるか確認する。**`data_driven_container` のパネルを使う全画面に影響し得る**ため、VirtualContainer 以外（通常チェスト等）での表示も記録する。**VirtualContainer 画面がこのパネルを使っているかは未確定**であり、表示の有無だけで適用先を断定しない。
 3. 透明ブロッカーの範囲（desktop: `offset [7, 10]` / `size [162, "100%-24px"]`、pocket: 右半分）で、ホバー・押下時に赤く色づくか、**通常クリックが止まるか**、**ボタンや inventory slot まで押せなくなっていないか**を入力方式ごとに記録する。プレイヤー側・ホットバーはブロッカーの範囲外であり、controller・タッチ入力は未検証である。赤く色づいてもアイテムが動く場合は、上重ねでは遮断できないという結果として扱う。
 4. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。アイテム保護・画面終了処理・スクリプト側の入力処理は未実装であり、ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、`button.send` 部品からチャット送信が成立するかも未確認です。**ブロッカーがあることを保護の合格根拠にしないでください。**
-5. `ui/invui_controls.json` は作成中のため、完成後に別途検証する。現時点の手順・部品名・挙動を確定したものとして扱わない。
+5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で固定例 `!invui:window-1:<slot>:1` を送って観察する。slot / session / sequence の自動生成はできない。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
 
 画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
 
@@ -158,7 +203,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 - **アイテム保護・入力抑制・画面終了処理は未完成**です。表示アイテムの取り出し、再描画による複製・消失、チャット送信の成否は未検証です。
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。
-- `ui/invui_controls.json` は作成中であり、未完成・未登録・未接続です。完成まで利用者向け機能として扱えません。
+- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
 - 既存 Resource Pack との競合をゼロにはできません。追加するファイルは最小限ですが、無影響を保証するものではありません。
 - `manifest.json` の UUID は固定のプレースホルダです。同じ内容のパックを複数入れると UUID が衝突し得ます。
 - このテンプレートは実験用であり、初期リリースの正式機能ではありません。
