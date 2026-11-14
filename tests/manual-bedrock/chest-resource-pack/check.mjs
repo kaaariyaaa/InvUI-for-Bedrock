@@ -82,6 +82,19 @@ for (const name of ["desktop_marker", "pocket_marker"]) {
   assert.equal(marker.anchor_to, "top_left");
 }
 
+// The title marker reuses the screen variable that the chest panels already
+// render in their own title labels. It lets the player tie this panel to the
+// opened container (the raw probe opens with a distinctive title) instead of
+// only proving "a chest panel is in use". No new binding is invented.
+const titleMarker = probe.title_marker;
+assert.ok(titleMarker, "missing title_marker");
+assert.equal(titleMarker.type, "label");
+assert.equal(titleMarker.text, "$container_title", "the title marker must read the existing $container_title variable");
+assert.equal(titleMarker.layer, 100);
+for (const forbidden of ["bindings", "collection_name", "binding_name", "binding_name_override"]) {
+  assert.ok(!(forbidden in titleMarker), `title_marker must not define ${forbidden}`);
+}
+
 // The probe is deliberately observation-only: no button, input, binding, or
 // item manipulation controls. Crash the check if any appear.
 const forbiddenTypes = new Set(["button", "input", "toggle", "slider_box", "edit_box"]);
@@ -115,9 +128,13 @@ function assertPanelModifications(file, namespace, markerRef, panels) {
     const [change] = modifications;
     assert.equal(change.array_name, "controls");
     assert.equal(change.operation, "insert_front");
-    assert.ok(Array.isArray(change.value) && change.value.length === 1, `${panel} must insert exactly one marker`);
-    const controlName = Object.keys(change.value[0])[0];
-    assert.equal(controlName.split("@")[1], markerRef, `${panel} must reference ${markerRef}`);
+    assert.ok(Array.isArray(change.value) && change.value.length === 2, `${panel} must insert the marker and the title marker`);
+    const [markerName, markerOverrides] = Object.entries(change.value[0])[0];
+    assert.equal(markerName.split("@")[1], markerRef, `${panel} must reference ${markerRef}`);
+    assert.deepEqual(markerOverrides, {}, `${panel} marker must not override the definition`);
+    const [titleName, titleOverrides] = Object.entries(change.value[1])[0];
+    assert.equal(titleName.split("@")[1], "invui_probe.title_marker", `${panel} must reference invui_probe.title_marker`);
+    assert.deepEqual(titleOverrides, {}, `${panel} title marker must not override the definition`);
   }
 }
 
@@ -143,6 +160,9 @@ for (const phrase of [
   /陰性/,
   /別試験/,
   /data-driven-resource-pack/,
+  /\$container_title/,
+  /title_marker/,
+  /InvUI probe 27/,
 ]) {
   assert.match(readme, phrase, `README must mention ${phrase}`);
 }

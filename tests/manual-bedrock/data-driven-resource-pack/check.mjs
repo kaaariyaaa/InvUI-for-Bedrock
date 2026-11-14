@@ -54,11 +54,24 @@ for (const [name, suffix] of [
   assert.ok(marker.layer >= 1);
 }
 
+// The title marker reuses the screen variable that the candidate panels already
+// render in their own title labels. It lets the player tie this panel to the
+// opened container (the raw probe opens with a distinctive title) instead of
+// only proving "some screen uses this panel". No new binding is invented.
+const titleMarker = probe.title_marker;
+assert.ok(titleMarker, "missing title_marker");
+assert.equal(titleMarker.type, "label");
+assert.equal(titleMarker.text, "$container_title", "the title marker must read the existing $container_title variable");
+assert.equal(titleMarker.layer, 100);
+for (const forbidden of ["bindings", "collection_name", "binding_name", "binding_name_override"]) {
+  assert.ok(!(forbidden in titleMarker), `title_marker must not define ${forbidden}`);
+}
+
 const mods = readJson(MODS);
 assert.equal(mods.namespace, "data_driven_container");
-for (const [panel, marker] of [
-  ["desktop_panel", "invui_probe.desktop_marker"],
-  ["pocket_panel", "invui_probe.pocket_marker"],
+for (const [panel, marker, title] of [
+  ["desktop_panel", "invui_probe.desktop_marker", "invui_probe.title_marker"],
+  ["pocket_panel", "invui_probe.pocket_marker", "invui_probe.title_marker"],
 ]) {
   const mod = mods[panel];
   assert.ok(mod, `missing ${panel} modifications`);
@@ -66,9 +79,13 @@ for (const [panel, marker] of [
   const [change] = mod.modifications;
   assert.equal(change.array_name, "controls");
   assert.equal(change.operation, "insert_front");
-  assert.equal(change.value.length, 1, `${panel} must insert exactly one control`);
-  const controlName = Object.keys(change.value[0])[0];
-  assert.equal(controlName.split("@")[1], marker, `${panel} must reference ${marker}`);
+  assert.equal(change.value.length, 2, `${panel} must insert the marker and the title marker`);
+  const [markerName, markerOverrides] = Object.entries(change.value[0])[0];
+  assert.equal(markerName.split("@")[1], marker, `${panel} must reference ${marker}`);
+  assert.deepEqual(markerOverrides, {}, `${panel} marker must not override the definition`);
+  const [titleName, titleOverrides] = Object.entries(change.value[1])[0];
+  assert.equal(titleName.split("@")[1], title, `${panel} must reference ${title}`);
+  assert.deepEqual(titleOverrides, {}, `${panel} title marker must not override the definition`);
 }
 
 // Vanilla chest_screen is deliberately untouched: not registered and not declared.
@@ -76,6 +93,13 @@ for (const file of fs.readdirSync(uiDir)) {
   assert.ok(!file.includes("chest_screen"), `unexpected chest_screen file: ${file}`);
   const json = readJson(path.join(uiDir, file));
   assert.notEqual(json.namespace, "chest_screen", `${file} must not modify chest_screen`);
+}
+
+// The prose must explain how the title marker is read and must keep the
+// in-game title binding marked as unverified.
+const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+for (const phrase of ["$container_title", "title_marker", "InvUI probe 27", "実機未検証"]) {
+  assert.ok(readme.includes(phrase), `README must mention ${phrase}`);
 }
 
 console.log("OK: probe pack structure is valid");
