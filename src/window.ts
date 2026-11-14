@@ -1795,14 +1795,16 @@ export class Window {
       this.#scheduleRefresh();
       return;
     }
-    this.#renderChangedSlots(previousLayout, layout);
+    this.#queueChangedSlots(previousLayout, layout);
   }
 
   /**
-   * Draw the slots whose element differs between two layouts of the same
+   * Queue the slots whose element differs between two layouts of the same
    * container (design 8.4). Unchanged slots keep their displayed stack and any
-   * in-flight provider result stays valid; #renderSlot bumps the per-slot token
-   * for changed slots so an older result cannot overwrite them.
+   * in-flight provider result stays valid; #queueSlotRender bumps the per-slot
+   * token for changed slots so an older result cannot overwrite them. The
+   * slots join the normal refresh flush, so a notification or state change in
+   * the same timing still renders each slot once.
    *
    * Skipping an unchanged slot is only safe because the caller accepts the
    * same state schema: the schema contains the Structure rows, so both layouts
@@ -1810,13 +1812,12 @@ export class Window {
    * slot in both. The Window's state is also unchanged on this path; a clamped
    * page/line/tab forces a full refresh instead (see setUpperGui).
    */
-  #renderChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
-    const renders: Array<Promise<void>> = [];
+  #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
     const cache = this.#writeCache;
     for (let slot = 0; slot < next.slots.length; slot += 1) {
       const physicalSlot = physicalSlotOf(next, slot);
       if (previous.slots[slot] !== next.slots[slot]) {
-        renders.push(this.#renderSlot(slot));
+        this.#queueSlotRender(slot);
         continue;
       }
       // An unchanged slot that is not known to be clear may still need one
@@ -1824,17 +1825,12 @@ export class Window {
       // both failures). The cache is the same proof the full refresh uses.
       if (next.slots[slot] === null) {
         if (cache === undefined || cache.shouldWrite(physicalSlot, undefined)) {
-          renders.push(this.#renderSlot(slot));
+          this.#queueSlotRender(slot);
         }
       } else if (cache !== undefined && cache.needsRetry(physicalSlot)) {
-        renders.push(this.#renderSlot(slot));
+        this.#queueSlotRender(slot);
       }
     }
-    void Promise.all(renders).catch((error) => {
-      if (this.#status === "open") {
-        this.#report(error, "guiChange");
-      }
-    });
   }
 
   /**
