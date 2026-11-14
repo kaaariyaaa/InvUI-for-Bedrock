@@ -211,7 +211,8 @@ function inspectPack(root, area) {
     addCheck(checks, area, 'manifest.header', 'error', 'manifest.header がありません');
   } else {
     // min_engine_version は配列（format_version 2 まで）と SemVer 文字列（format_version 3 では必須）の
-    // どちらも有効。配列だけを有効扱いすると、正しい v3 manifest に「配列でありません」と誤案内し、
+    // どちらも有効。ただしここで見るのは型と、文字列が空でないことだけで、SemVer の形式は検証しない。
+    // 配列だけを有効扱いすると、正しい v3 manifest に「配列でありません」と誤案内し、
     // 利用者が文字列を配列へ書き換えて逆に壊しかねない。
     const minEngineVersion = header.min_engine_version;
     let minEngineText = null;
@@ -226,7 +227,7 @@ function inspectPack(root, area) {
         area,
         'manifest.min_engine_version',
         'ok',
-        `min_engine_version: ${minEngineText}（対応ゲーム版は実機で記録する）`,
+        `min_engine_version: ${minEngineText}（値の形式は検証していません。対応ゲーム版は実機で記録する）`,
       );
     } else if (minEngineVersion === undefined) {
       addCheck(checks, area, 'manifest.min_engine_version', 'warn', 'header.min_engine_version がありません');
@@ -236,7 +237,7 @@ function inspectPack(root, area) {
         area,
         'manifest.min_engine_version',
         'warn',
-        'header.min_engine_version が配列（例: [1, 21, 0]）でも SemVer 文字列（例: "1.26.40"）でもありません',
+        'header.min_engine_version が配列（例: [1, 21, 0]）でも空でない文字列（例: "1.26.40"）でもありません',
       );
     }
   }

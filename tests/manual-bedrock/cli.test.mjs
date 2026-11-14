@@ -420,6 +420,11 @@ test('SemVer 文字列の min_engine_version を配列と同じく正常とし�
           checks[0].message.includes(minEngineVersion),
           `format_version ${formatVersion}/${area}: ${checks[0].message}`,
         );
+        // 空でない文字列を受け付けるだけで SemVer の形式は検証しないため、その旨を明示する。
+        assert.ok(
+          checks[0].message.includes('形式は検証していません'),
+          `format_version ${formatVersion}/${area}: ${checks[0].message}`,
+        );
       }
     });
   }
