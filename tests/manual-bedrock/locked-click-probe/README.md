@@ -9,6 +9,7 @@
 > - **アイテムは `minecraft:stick` と `minecraft:paper` だけ**を使います。価値のあるアイテムを持ち込まないでください。
 > - **持ち出したアイテムがロック状態のままプレイヤーのインベントリに残る可能性があります（未検証）。** 特に `inventory` モードは、ロックが効かない場合に持ち出したアイテムが移動・破棄できなくなり得ます。`/clear` やワールド破棄でしか戻せない前提で、使い捨てワールドだけで行ってください。
 > - `VirtualContainer` の中身は保存されません。再読み込み・ワールド終了で消えます。
+> - **`.mcpack` のインポートは実機未検証です。** ファイルが正しい ZIP であることは自動テストで確認していますが、各プラットフォームの Minecraft Preview が取り込めるかは確認していません。取り込めない場合は下記 4.2 のフォルダ配置を使ってください。
 > - 異常（通常チェストの操作が壊れた、アイテムが増減した、画面が閉じない等）が出たら**即時中止**し、ワールドを破棄またはバックアップから復元してください。
 
 ## 1. 何を確かめるか
@@ -35,7 +36,8 @@
 
 - `behavior_pack/manifest.json`: 新規 UUID、`@minecraft/server` `2.13.0-beta`、警告入り description
 - `behavior_pack/scripts/main.js`: コンテナ作成、ロック済みアイテムの配置、観測イベントのログ、自動 close
-- `locked-click-probe.test.mjs`: manifest / 構文 / 危険警告 / モック上の fill・ロック・分類の静的確認
+- `locked-click-probe.mcpack`: `behavior_pack/` の `manifest.json` と `scripts/main.js` をそのまま ZIP にした導入用ファイル（実機取り込みは未検証）
+- `locked-click-probe.test.mjs`: manifest / 構文 / 危険警告 / モック上の fill・ロック・分類の静的確認、`.mcpack` とソースの一致
 
 含まれないもの:
 
@@ -58,7 +60,39 @@
 
 ## 4. 配置
 
-`behavior_pack/` を `development_behavior_packs/invui_locked_click_probe/` などへコピーし、使い捨てワールドで有効化します。専用サーバーの場合は `behavior_packs/` へ置き、`world_behavior_packs.json` に manifest の header UUID と version を追加します。
+### 4.1 `.mcpack` をインポートする（実機向け）
+
+`locked-click-probe.mcpack` を Minecraft Preview で開いて取り込み、使い捨てワールドの設定で有効化し、Beta APIs / Experimental API を有効にします。Windows はファイルをダブルクリックするか「プログラムから開く」で Minecraft Preview を選びます。タブレット / スマホはファイルマネージャーや共有シートから Minecraft Preview で開きます。
+
+- 取り込み先・パック一覧での表示名・有効化可否は**実機未検証**です。ワールド設定にパックが出ない、またはスクリプトが動かない場合は 4.2 のフォルダ配置を使ってください。
+- `.mcpack` は `behavior_pack/manifest.json` と `behavior_pack/scripts/main.js` をそのまま ZIP にしたものです。内容の一致は `locked-click-probe.test.mjs` が確認します。`main.js` や `manifest.json` を変えたら次で再生成してください（テストは不一致で失敗します）。
+  ```bash
+  (cd tests/manual-bedrock/locked-click-probe/behavior_pack && \
+    zip -X ../locked-click-probe.mcpack manifest.json scripts/main.js)
+  ```
+
+### 4.2 フォルダとして配置する（開発・専用サーバー向け）
+
+`behavior_pack/` を `development_behavior_packs/invui_locked_click_probe/` などへコピーし、使い捨てワールドで有効化します。
+
+Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版と分かれています。Preview の development pack は
+
+```text
+%APPDATA%\Minecraft Bedrock Preview\users\shared\games\com.mojang\development_behavior_packs\
+```
+
+に置きます（安定版は `Minecraft Bedrock Preview` ではなく `Minecraft Bedrock`）。古い UWP 版では `%LOCALAPPDATA%\Packages\<Preview のパッケージ>\LocalState\games\com.mojang\development_behavior_packs\` になります。どちらの構成かはゲーム版で確認してください（[GDK Migration on Windows](https://learn.microsoft.com/en-us/minecraft/creator/documents/gdkpcprojectfolder?view=minecraft-bedrock-stable)）。
+
+専用サーバーの場合は `behavior_packs/` へ置き、ワールドの `world_behavior_packs.json` に次の項目を追加します（`pack_id` と `version` は `manifest.json` の header と一致させます）。
+
+```json
+[
+  {
+    "pack_id": "c980bbce-7652-4920-97a1-c5e3376a2428",
+    "version": [0, 1, 0]
+  }
+]
+```
 
 ## 5. コマンド
 

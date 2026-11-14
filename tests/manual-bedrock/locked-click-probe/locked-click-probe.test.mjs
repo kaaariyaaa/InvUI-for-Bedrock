@@ -4,6 +4,7 @@
  *
  * 実機のクリックや itemChange を検証するものではない。確認するのは:
  * - manifest の UUID・beta 依存・警告
+ * - 導入用 `.mcpack` が behavior_pack と同一内容であること
  * - main.js の構文
  * - ロック済みアイテムを fill し、観測のみで復元・クリック実行をしないこと
  * - `SAME_ITEM_CANDIDATE` / `REMOVED` の分類
@@ -17,6 +18,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import zlib from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packDir = path.join(here, 'behavior_pack');
@@ -26,6 +28,49 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+/** 導入用 .mcpack（ZIP）を、依存を増やさずに読む。 */
+function readZipEntries(buffer) {
+  let eocd = -1;
+  for (let offset = buffer.length - 22; offset >= 0; offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) {
+      eocd = offset;
+      break;
+    }
+  }
+  assert.notEqual(eocd, -1, 'ZIP の End of Central Directory が見つからない');
+
+  const count = buffer.readUInt16LE(eocd + 10);
+  const directoryOffset = buffer.readUInt32LE(eocd + 16);
+  const entries = new Map();
+  let offset = directoryOffset;
+
+  for (let index = 0; index < count; index += 1) {
+    assert.equal(buffer.readUInt32LE(offset), 0x02014b50, 'central directory の署名が違う');
+    const method = buffer.readUInt16LE(offset + 10);
+    const compressedSize = buffer.readUInt32LE(offset + 20);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localOffset = buffer.readUInt32LE(offset + 42);
+    const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength);
+    offset += 46 + nameLength + extraLength + commentLength;
+
+    assert.equal(buffer.readUInt32LE(localOffset), 0x04034b50, `${name}: local header の署名が違う`);
+    const localNameLength = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const data = buffer.subarray(dataStart, dataStart + compressedSize);
+
+    if (method === 0) {
+      entries.set(name, Buffer.from(data));
+    } else {
+      assert.equal(method, 8, `${name}: 未対応の圧縮方式 ${method}`);
+      entries.set(name, zlib.inflateRawSync(data));
+    }
+  }
+  return entries;
 }
 
 function loadProbe() {
@@ -169,6 +214,16 @@ test('manifest.json は新規 UUID・beta 依存・危険警告を持つ', () =>
   const dependency = manifest.dependencies.find((entry) => entry.module_name === '@minecraft/server');
   assert.ok(dependency, '@minecraft/server の dependency がある');
   assert.equal(dependency.version, '2.13.0-beta');
+});
+
+test('mcpack は behavior_pack と同一内容で、実機に取り込める ZIP になっている', () => {
+  const mcpackPath = path.join(here, 'locked-click-probe.mcpack');
+  const entries = readZipEntries(fs.readFileSync(mcpackPath));
+  const files = [...entries.keys()].filter((name) => !name.endsWith('/')).sort();
+
+  assert.deepEqual(files, ['manifest.json', 'scripts/main.js']);
+  assert.equal(entries.get('manifest.json').toString('utf8'), fs.readFileSync(manifestPath, 'utf8'));
+  assert.equal(entries.get('scripts/main.js').toString('utf8'), fs.readFileSync(scriptPath, 'utf8'));
 });
 
 test('main.js は Node の構文チェックを通る', () => {
