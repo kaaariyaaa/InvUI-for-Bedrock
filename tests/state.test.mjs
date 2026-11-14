@@ -3034,6 +3034,7 @@ test("state errors reach the log when no reporter is configured (design 14.1)", 
     brokenHandle.release();
     assert.equal(logs.length, 1);
     assert.match(String(logs[0][1]), /reporter boom/);
+    assert.match(String(logs[0][2]), /listener boom/);
   } finally {
     console.error = original;
   }

@@ -1427,7 +1427,8 @@ export class StateManager {
   /**
    * Deliver a state error to the configured reporter, or to the log when none
    * is configured (design 14.1: never swallow an error, notify a handler or
-   * log it). A throwing reporter is logged and does not break state processing.
+   * log it). A throwing reporter is logged with the original error, and does
+   * not break state processing.
    */
   _reportError(error: unknown): void {
     if (this.#onError === undefined) {
@@ -1437,7 +1438,8 @@ export class StateManager {
     try {
       this.#onError(error);
     } catch (handlerError) {
-      console.error("InvUI: state error handler failed.", handlerError);
+      // Keep the original error too: the handler failed before handling it.
+      console.error("InvUI: state error handler failed.", handlerError, error);
     }
   }
 
