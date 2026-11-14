@@ -8,7 +8,7 @@
  */
 import type { Item } from "./item.js";
 import type { InventoryLink } from "./inventory.js";
-import type { GuiState } from "./state.js";
+import type { GuiState, GuiStatePatch } from "./state.js";
 
 export type GuiKind = "normal" | "paged" | "scroll" | "tab";
 export type ScrollDirection = "vertical" | "horizontal";
@@ -40,6 +40,13 @@ export interface ResolvedGuiLayout {
   tabCount: number;
   /** Structure slots that make up the content list, in content order. */
   contentSlots: number[];
+  /**
+   * State fields the layout had to clamp because the stored page/line/tab is
+   * outside the current content range (design 9.5). A Window writes this back
+   * so a shrunk content list cannot leave an out-of-range value behind that
+   * reappears when the content grows again.
+   */
+  statePatch?: GuiStatePatch;
 }
 
 export interface GuiOptions {
@@ -728,7 +735,12 @@ function resolveContentGui(
 ): ResolvedGuiLayout {
   const base = buildBaseGrid(gui._structure);
   const placement = placeContent(gui, base.contentSlots, base.slots, state, paged);
-  projectLinks(gui, base, viewer, state, stack);
+  const linkPatch = projectLinks(gui, base, viewer, state, stack);
+  const statePatch: GuiStatePatch = {};
+  if (paged && state.page !== undefined && state.page !== placement.page) {
+    statePatch.page = placement.page;
+  }
+  const merged = mergeStatePatches(statePatch, linkPatch);
 
   return {
     kind: paged ? "paged" : "normal",
@@ -743,6 +755,7 @@ function resolveContentGui(
     tab: -1,
     tabCount: 0,
     contentSlots: base.contentSlots,
+    ...(merged === undefined ? {} : { statePatch: merged }),
   };
 }
 
@@ -821,7 +834,12 @@ function resolveScroll(gui: ScrollGui, viewer: unknown, state: GuiState, stack: 
     }
   }
 
-  projectLinks(gui, base, viewer, state, stack);
+  const linkPatch = projectLinks(gui, base, viewer, state, stack);
+  const statePatch: GuiStatePatch = {};
+  if (state.line !== undefined && state.line !== line) {
+    statePatch.line = line;
+  }
+  const merged = mergeStatePatches(statePatch, linkPatch);
 
   return {
     kind: "scroll",
@@ -836,6 +854,7 @@ function resolveScroll(gui: ScrollGui, viewer: unknown, state: GuiState, stack: 
     tab: -1,
     tabCount: 0,
     contentSlots,
+    ...(merged === undefined ? {} : { statePatch: merged }),
   };
 }
 
@@ -877,11 +896,23 @@ function resolveTab(gui: TabGui, viewer: unknown, state: GuiState, stack: readon
   const storedTab = state.tabs ? state.tabs[tab] : undefined;
   const tabState = storedTab && typeof storedTab === "object" ? storedTab : {};
   const child = resolveGui(gui.tabs[tab], viewer, tabState, stack);
+  const statePatch: GuiStatePatch = {};
+  if (state.tab !== undefined && state.tab !== tab) {
+    statePatch.tab = tab;
+  }
+  if (child.statePatch !== undefined) {
+    // `tabs` replaces the map instead of merging, so carry the other tabs.
+    const tabs: Record<number, GuiState> = { ...(state.tabs ?? {}) };
+    tabs[tab] = { ...tabState, ...child.statePatch };
+    statePatch.tabs = tabs;
+  }
+  const merged = Object.keys(statePatch).length > 0 ? statePatch : undefined;
   return {
     ...child,
     kind: "tab",
     tab,
     tabCount: gui.tabs.length,
+    ...(merged === undefined ? {} : { statePatch: merged }),
   };
 }
 
@@ -945,14 +976,31 @@ function buildBaseGrid(structure: Structure): BaseGrid {
   return { slots, occupied, contentSlots, links };
 }
 
-function projectLinks(gui: Gui, base: BaseGrid, viewer: unknown, state: GuiState, stack: readonly Gui[]): void {
+function projectLinks(
+  gui: Gui,
+  base: BaseGrid,
+  viewer: unknown,
+  state: GuiState,
+  stack: readonly Gui[],
+): GuiStatePatch | undefined {
   const parentWidth = gui._structure.width;
   const parentHeight = gui._structure.height;
+  let children: Record<string, GuiState> | undefined;
 
   for (const { link, slot: placementSlot } of base.links) {
     const storedChild = link.key !== undefined && state.children ? state.children[link.key] : undefined;
     const childState = link.state ?? (storedChild && typeof storedChild === "object" ? storedChild : {});
     const child = resolveGui(link.gui, viewer, childState, stack);
+    if (
+      link.state === undefined &&
+      link.key !== undefined &&
+      storedChild !== undefined &&
+      child.statePatch !== undefined
+    ) {
+      // `children` replaces the map instead of merging, so carry the others.
+      children ??= { ...(state.children ?? {}) };
+      children[link.key] = { ...storedChild, ...child.statePatch };
+    }
 
     if (link.mapping) {
       for (const key of Object.keys(link.mapping)) {
@@ -989,6 +1037,17 @@ function projectLinks(gui: Gui, base: BaseGrid, viewer: unknown, state: GuiState
       }
     }
   }
+  return children === undefined ? undefined : { children };
+}
+
+function mergeStatePatches(
+  own: GuiStatePatch,
+  nested: GuiStatePatch | undefined,
+): GuiStatePatch | undefined {
+  if (nested === undefined) {
+    return Object.keys(own).length > 0 ? own : undefined;
+  }
+  return { ...own, ...nested };
 }
 
 function assertWritable(base: BaseGrid, slot: number, source: string): void {

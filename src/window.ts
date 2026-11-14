@@ -1133,6 +1133,12 @@ export class Window {
   /** Set when state or GUI changes while `open()` is still resolving providers. */
   #refreshPending = false;
   /**
+   * Set by a GUI content change: the next resolve writes back clamped
+   * page/line/tab values (design 9.5). A plain `setState()` does not set it, so
+   * an explicitly written value stays stored until content actually changes.
+   */
+  #revalidateStateRanges = false;
+  /**
    * Serializes async container regenerations (title change, layout size change)
    * so two of them cannot close a container the other is still using.
    */
@@ -1402,7 +1408,10 @@ export class Window {
         return container;
       };
 
-      let layout = this.upperGui.resolve(this.viewer, handle.get());
+      let layout = this.#resolveCurrentState(handle, true);
+      if (generation !== this.#generation || this.#status !== "opening") {
+        return;
+      }
       let size = containerSizeOf(layout);
       if (size < 1 || size > 54) {
         throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
@@ -1421,7 +1430,10 @@ export class Window {
         // Any state or GUI change after this point makes the pass stale;
         // re-resolve and render again until the rendered inputs are current.
         this.#refreshPending = false;
-        layout = this.upperGui.resolve(this.viewer, handle.get());
+        layout = this.#resolveCurrentState(handle, true);
+        if (generation !== this.#generation || this.#status !== "opening") {
+          return;
+        }
         size = containerSizeOf(layout);
         if (size < 1 || size > 54) {
           throw new RangeError(`InvUI: Window size ${size} is outside the supported 1..54.`);
@@ -1763,6 +1775,9 @@ export class Window {
     if (generation !== this.#generation) {
       return;
     }
+    // A different GUI may have a different content size; revalidate the state
+    // ranges on the refresh that renders it.
+    this.#revalidateStateRanges = true;
     this.#scheduleRefresh();
   }
 
@@ -1776,6 +1791,22 @@ export class Window {
     return this;
   }
 
+  /**
+   * Resolve the current state and, when asked, write back any page/line/tab
+   * value the layout clamped (design 9.5). Without the write-back the managed
+   * state keeps an out-of-range value after content shrinks, and growing the
+   * content again would restore that old page/line/tab instead of the one on
+   * screen. Revalidation runs after a content change and on open; a direct
+   * `setState()` is stored as written.
+   */
+  #resolveCurrentState(handle: StateHandle, revalidateRanges: boolean): ResolvedGuiLayout {
+    const layout = this.upperGui.resolve(this.viewer, handle.get());
+    if (revalidateRanges && layout.statePatch !== undefined) {
+      handle.set(layout.statePatch);
+    }
+    return layout;
+  }
+
   async #refresh(): Promise<void> {
     if (
       this.#renderingHalted ||
@@ -1786,11 +1817,18 @@ export class Window {
       return;
     }
     const generation = this.#generation;
+    const revalidateRanges = this.#revalidateStateRanges;
     let layout: ResolvedGuiLayout;
     try {
-      layout = this.upperGui.resolve(this.viewer, this.#stateHandle.get());
+      layout = this.#resolveCurrentState(this.#stateHandle, revalidateRanges);
     } catch (error) {
       this.#report(error, "resolve");
+      return;
+    }
+    if (revalidateRanges) {
+      this.#revalidateStateRanges = false;
+    }
+    if (generation !== this.#generation || this.#status !== "open") {
       return;
     }
     const current = this.#layout;
@@ -1843,7 +1881,7 @@ export class Window {
         }
         let next: ResolvedGuiLayout;
         try {
-          next = this.upperGui.resolve(this.viewer, handle.get());
+          next = this.#resolveCurrentState(handle, this.#revalidateStateRanges);
         } catch (error) {
           this.#report(error, "resize");
           return;
@@ -2260,6 +2298,7 @@ export class Window {
     this.#renderingHalted = true;
     this.#renderEpoch += 1;
     this.#refreshPending = false;
+    this.#revalidateStateRanges = false;
     this.#fullRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
@@ -2309,6 +2348,7 @@ export class Window {
       this.#failStateSchema("guiChange");
       return;
     }
+    this.#revalidateStateRanges = true;
     this.#scheduleRefresh();
   }
 

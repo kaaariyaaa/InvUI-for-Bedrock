@@ -2523,6 +2523,144 @@ test("GUI content updates keep the session state schema compatible", async () =>
   reopened.close();
 });
 
+const contentItems = (prefix, count) =>
+  Array.from({ length: count }, (_, index) =>
+    Item.simple(() => stack(`minecraft:${prefix}_${index}`)),
+  );
+
+test("shrinking paged content clamps the stored page instead of restoring it on growth", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const gui = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("page", 6),
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ page: 2 });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:page_4");
+
+  gui.setContent(contentItems("small", 2));
+  await tick();
+  assert.equal(window.getState().page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:small_0");
+
+  gui.setContent(contentItems("grown", 6));
+  await tick();
+  assert.equal(window.getState().page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:grown_0");
+  window.close();
+});
+
+test("shrinking scroll content clamps the stored line instead of restoring it on growth", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const gui = Gui.scroll({
+    structure: ["xxx", "xxx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_VERTICAL },
+    content: contentItems("row", 10),
+    direction: "vertical",
+    contentWidth: 3,
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ line: 2 });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:row_6");
+
+  gui.setContent(contentItems("short", 3));
+  await tick();
+  assert.equal(window.getState().line, 0);
+  assert.equal(container.items[0].typeId, "minecraft:short_0");
+
+  gui.setContent(contentItems("grown", 10));
+  await tick();
+  assert.equal(window.getState().line, 0);
+  assert.equal(container.items[0].typeId, "minecraft:grown_0");
+  window.close();
+});
+
+test("shrinking a tab's paged child clamps its nested page state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const child = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("tabpage", 4),
+  });
+  const gui = Gui.tab({
+    tabs: [child, Gui.normal({ structure: ["y"], ingredients: { y: Item.simple(() => stack("minecraft:other")) } })],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ tab: 0, tabs: { 0: { page: 1 } } });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:tabpage_2");
+
+  child.setContent(contentItems("tabsmall", 2));
+  await tick();
+  assert.equal(window.getState().tabs[0].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:tabsmall_0");
+
+  child.setContent(contentItems("tabgrown", 4));
+  await tick();
+  assert.equal(window.getState().tabs[0].page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:tabgrown_0");
+  window.close();
+});
+
+test("shrinking a keyed GuiLink child clamps its nested page state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const child = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("linkpage", 4),
+  });
+  const gui = Gui.normal({
+    structure: ["@.."],
+    ingredients: { "@": new GuiLink(child, { key: "linked" }) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  window.setState({ children: { linked: { page: 1 } } });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:linkpage_2");
+
+  child.setContent(contentItems("linksmall", 2));
+  await tick();
+  assert.equal(window.getState().children.linked.page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:linksmall_0");
+
+  child.setContent(contentItems("linkgrown", 4));
+  await tick();
+  assert.equal(window.getState().children.linked.page, 0);
+  assert.equal(container.items[0].typeId, "minecraft:linkgrown_0");
+  window.close();
+});
+
 test("a structural GUI change fails closed and never persists the old schema", async () => {
   const store = memoryStore();
   const adapter = new InMemoryTestAdapter();
