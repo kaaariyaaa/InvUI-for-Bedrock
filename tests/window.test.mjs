@@ -4157,6 +4157,179 @@ test("a width change with the same container size is applied in place", async ()
   window.close();
 });
 
+test("setUpperGui during a size regeneration applies the new content to the replacement container", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const responders = [];
+  const tab0 = Gui.normal({ structure: ["a"] });
+  const pending = Item.simple(() => new Promise((resolve) => responders.push(resolve)));
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: pending },
+  });
+  // The state schema is the GUI shape (kind, Structure rows, tabs, links), so a
+  // swappable GUI keeps the same rows and only changes what the slots render.
+  const next = Gui.tab({
+    tabs: [
+      tab0,
+      Gui.normal({
+        structure: ["b", "b", "b"],
+        ingredients: { b: Item.simple(() => stack("minecraft:n")) },
+      }),
+    ],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+  const second = adapter.containers[1];
+  assert.ok(second, "the replacement is created before the swap");
+
+  // The replacement is still rendering the tab-1 slots when the swap arrives.
+  window.setUpperGui(next);
+  for (const resolve of responders) resolve(stack("minecraft:b"));
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+  assert.equal(window.upperGui, next);
+  assert.equal(window.container, second, "the swap keeps the regenerated container");
+  assert.equal(window.getState().tab, 1, "the state handle is kept");
+  assert.equal(second.size, 27);
+  assert.deepEqual(
+    [second.items[0]?.typeId, second.items[9]?.typeId, second.items[18]?.typeId],
+    ["minecraft:n", "minecraft:n", "minecraft:n"],
+    "the swapped-in content is rendered into the replacement before it is shown",
+  );
+  assert.deepEqual(adapter.closed.map((entry) => entry.container), [first]);
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first, second]);
+  window.close();
+});
+
+test("a schema-different setUpperGui during a size regeneration fails closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const closeReasons = [];
+  const responders = [];
+  const tab0 = Gui.normal({ structure: ["a"] });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: Item.simple(() => new Promise((resolve) => responders.push(resolve))) },
+  });
+  // Renaming the Structure rows changes the state schema, so the acquired
+  // state would describe the previous shape: the swap fails closed exactly
+  // like the same swap on a Window that is not regenerating.
+  const next = Gui.tab({
+    tabs: [
+      tab0,
+      Gui.normal({
+        structure: ["n", "n", "n"],
+        ingredients: { n: Item.simple(() => stack("minecraft:n")) },
+      }),
+    ],
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+  assert.ok(adapter.containers[1]);
+
+  window.setUpperGui(next);
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["ServerClosed"]);
+  assert.deepEqual(adapter.closed.map((entry) => entry.container), [first]);
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first]);
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].error instanceof WindowStateSchemaChangedError);
+  assert.equal(errors[0].context.operation, "guiChange");
+
+  for (const resolve of responders) resolve(stack("minecraft:b"));
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+  assert.equal(window.status, "closed", "the in-flight regeneration never opens a screen");
+});
+
+test("a setUpperGui refused for the old size in the same tick still lets the regeneration settle", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const tab0 = Gui.normal({ structure: ["a"] });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  // Same rows as the TabGui above, so the schema matches and the swap is
+  // allowed. It is queued in the same tick as the state change, before the
+  // refresh microtask has started the size regeneration.
+  const next = Gui.tab({
+    tabs: [
+      tab0,
+      Gui.normal({
+        structure: ["b", "b", "b"],
+        ingredients: { b: Item.simple(() => stack("minecraft:m")) },
+      }),
+    ],
+  });
+  const original = Gui.tab({ tabs: [tab0, tab1] });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(original)
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ tab: 1 });
+  // The size regeneration has not started yet, so the Window still owns the
+  // 9-slot container and refuses the 27-slot candidate. That refusal must not
+  // disturb the regeneration queued by the state change.
+  window.setUpperGui(next);
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].error.message, /layout size changed/);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.equal(window.upperGui, original, "the refused candidate must not win");
+  const last = adapter.containers[adapter.containers.length - 1];
+  assert.equal(window.container, last);
+  assert.equal(last.size, 27);
+  assert.equal(last.items[0].typeId, "minecraft:b", "the current GUI is rendered");
+  window.close();
+});
+
+
 test("width shrink clears the columns the previous tab used", async () => {
   const adapter = new InMemoryTestAdapter();
   const tab0 = Gui.normal({
