@@ -32,6 +32,23 @@ test("a failed write is retried because it was never marked", () => {
   assert.equal(cache.shouldWrite(1, undefined), true);
 });
 
+test("a failed write is recorded so an unchanged slot is retried", () => {
+  const cache = new SlotWriteCache();
+  cache.markWritten(1, stack("minecraft:stone"));
+  assert.equal(cache.needsRetry(1), false);
+
+  cache.markFailed(1);
+  assert.equal(cache.needsRetry(1), true);
+  // A failed clear must not leave the slot marked empty.
+  cache.markFailed(5);
+  assert.equal(cache.shouldWrite(5, undefined), true);
+
+  cache.markWritten(1, stack("minecraft:dirt"));
+  assert.equal(cache.needsRetry(1), false);
+  cache.invalidate(5);
+  assert.equal(cache.needsRetry(5), false);
+});
+
 test("invalidate forces the next write", () => {
   const cache = new SlotWriteCache();
   cache.markWritten(2, undefined);

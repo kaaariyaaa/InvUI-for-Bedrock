@@ -1803,22 +1803,30 @@ export class Window {
    * container (design 8.4). Unchanged slots keep their displayed stack and any
    * in-flight provider result stays valid; #renderSlot bumps the per-slot token
    * for changed slots so an older result cannot overwrite them.
+   *
+   * Skipping an unchanged slot is only safe because the caller accepts the
+   * same state schema: the schema contains the Structure rows, so both layouts
+   * have the same width/height and a logical slot maps to the same physical
+   * slot in both. The Window's state is also unchanged on this path; a clamped
+   * page/line/tab forces a full refresh instead (see setUpperGui).
    */
   #renderChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
     const renders: Array<Promise<void>> = [];
     const cache = this.#writeCache;
     for (let slot = 0; slot < next.slots.length; slot += 1) {
+      const physicalSlot = physicalSlotOf(next, slot);
       if (previous.slots[slot] !== next.slots[slot]) {
         renders.push(this.#renderSlot(slot));
         continue;
       }
-      // An unchanged empty slot still needs one attempt if this Window cannot
-      // prove it is already empty: a previous clear may have failed. The cache
-      // is the same proof the full refresh uses.
-      if (
-        next.slots[slot] === null &&
-        (cache === undefined || cache.shouldWrite(physicalSlotOf(next, slot), undefined))
-      ) {
+      // An unchanged slot that is not known to be clear may still need one
+      // attempt: a previous write or clear may have failed (the cache records
+      // both failures). The cache is the same proof the full refresh uses.
+      if (next.slots[slot] === null) {
+        if (cache === undefined || cache.shouldWrite(physicalSlot, undefined)) {
+          renders.push(this.#renderSlot(slot));
+        }
+      } else if (cache !== undefined && cache.needsRetry(physicalSlot)) {
         renders.push(this.#renderSlot(slot));
       }
     }
@@ -2735,6 +2743,9 @@ export class Window {
     try {
       container.setItem(physicalSlot, stack);
     } catch (error) {
+      // Remember the failure so a slot-skipping diff still re-renders this
+      // slot; otherwise the failed write's stale display would persist.
+      cache.markFailed(physicalSlot);
       this.#report(error, "setItem", slot);
       return;
     }
