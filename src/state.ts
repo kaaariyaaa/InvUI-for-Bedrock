@@ -80,10 +80,36 @@ export interface StateStore {
 export interface StateManagerOptions {
   /**
    * Receives isolated errors that must not break state processing, such as a
-   * subscriber throwing. Corrupt persisted data is surfaced as a
-   * {@link StateCorruptionError} from `acquire` instead.
+   * subscriber throwing. With {@link StateManagerOptions.quarantineCorrupt}
+   * enabled, a recovered corrupt record is reported here; otherwise corrupt
+   * persisted data is surfaced as a {@link StateCorruptionError} from
+   * `acquire`.
    */
   onError?: (error: unknown) => void;
+  /**
+   * Opt-in automatic recovery of corrupt persisted records. When `acquire`
+   * cannot decode or validate a stored record, its raw string is copied to a
+   * free `...:quarantine` key next to the record, the original key is removed,
+   * and the corruption is reported through {@link onError}. The acquire then
+   * starts from `initial` and persists it, as if no record existed.
+   *
+   * Defaults to false: the record is left untouched and `acquire` throws a
+   * {@link StateCorruptionError}, so a human can inspect it. Recovery applies
+   * only to `acquire`; `migrate` still fails closed. The raw value that failed
+   * decoding is copied verbatim. If the copy fails, the store error propagates
+   * and the original record is untouched. If the copy succeeds but the deletion
+   * fails, both remain and a retry reuses the existing backup. A value that
+   * changed between decoding and deletion is never deleted. A store that
+   * reports every quarantine key as occupied fails closed after a bounded
+   * number of attempts.
+   *
+   * The identity stays locked while the copy, the deletion, and the
+   * {@link onError} report run: a reentrant `acquire`, `migrate`, or `remove`
+   * for it (from the store or from the callback) throws a `LIVE_STATE`
+   * {@link StateConflictError}, so recovery cannot leave a second live entry
+   * behind.
+   */
+  quarantineCorrupt?: boolean;
 }
 
 export interface StateAcquireOptions {
@@ -273,8 +299,10 @@ export class StateReleasedError extends StateError {
 }
 
 /**
- * Persisted data could not be decoded. The stored record is left untouched and
- * acquisition fails closed so the next write cannot destroy recoverable data.
+ * Persisted data could not be decoded. By default the stored record is left
+ * untouched and acquisition fails closed so the next write cannot destroy
+ * recoverable data. With {@link StateManagerOptions.quarantineCorrupt} enabled,
+ * `acquire` quarantines the raw record and starts from `initial` instead.
  */
 export class StateCorruptionError extends StateError {
   constructor(message: string) {
@@ -309,9 +337,16 @@ const MIGRATION_KEYS = new Set([
   "schema",
 ]);
 const REMOVE_KEYS = new Set(["scope", "key", "ownerId"]);
-const MANAGER_KEYS = new Set(["onError"]);
+const MANAGER_KEYS = new Set(["onError", "quarantineCorrupt"]);
 const EMPTY_STATE: StateSnapshot = Object.freeze({});
 const EMPTY_CHANGED: readonly GuiStateField[] = Object.freeze([]);
+/**
+ * Upper bound for the `...:quarantine` slot search. A store whose `getItem`
+ * reports every slot as occupied must make `acquire` fail closed instead of
+ * looping forever. Raise it only if one key ever needs more retained backups.
+ * ponytail: bounded scan, raise if 1000 backups per key is ever not enough.
+ */
+const MAX_QUARANTINE_SLOTS = 1000;
 
 function requireNonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -521,6 +556,12 @@ interface NormalizedIdentityOptions {
   scope: StateScope;
   key: string;
   ownerId: string | undefined;
+}
+
+/** A decoded store record plus the raw string it came from. */
+interface StoredRead {
+  raw: string;
+  parsed: Record<string, unknown>;
 }
 
 function normalizeIdentityOptions(
@@ -756,13 +797,16 @@ function requireInternals(
 export class StateManager {
   readonly #store: StateStore | undefined;
   readonly #onError: ((error: unknown) => void) | undefined;
+  readonly #quarantineCorrupt: boolean;
   readonly #entries = new Map<string, StateEntry>();
   /**
-   * Identities whose record is being mutated (a running migration callback or
-   * a running `store.removeItem`). `acquire`, `migrate`, and `remove` reject
-   * these so a reentrant call from inside the callback cannot resurrect a stale
-   * entry, register a lease that survives the mutation, or delete a record the
-   * mutation is still writing.
+   * Identities whose record is being mutated: a running migration callback, a
+   * running `store.removeItem`, or the load/seed phase of an `acquire` (which
+   * may quarantine a corrupt record). `acquire`, `migrate`, and `remove` reject
+   * these so a reentrant call from inside a callback or a store hook cannot
+   * resurrect a stale entry, register a lease that survives the mutation,
+   * delete a record the mutation is still writing, or open a second live entry
+   * for the identity being recovered.
    */
   readonly #mutating = new Set<string>();
 
@@ -802,18 +846,25 @@ export class StateManager {
     ) {
       throw new StateValidationError("onError must be a function");
     }
+    if (
+      options.quarantineCorrupt !== undefined &&
+      typeof options.quarantineCorrupt !== "boolean"
+    ) {
+      throw new StateValidationError("quarantineCorrupt must be a boolean");
+    }
 
     this.#store = store ?? undefined;
     this.#onError = options.onError;
+    this.#quarantineCorrupt = options.quarantineCorrupt === true;
   }
 
   /**
    * Registers a Window's interest in a state identity and returns its lease.
    * The state starts from the live value, then persisted data, then `initial`.
    *
-   * Acquiring an identity whose {@link migrate} callback or {@link remove}
-   * store call is running throws a `LIVE_STATE` {@link StateConflictError};
-   * other identities are unaffected.
+   * Acquiring an identity whose {@link migrate} callback, {@link remove} store
+   * call, or `quarantineCorrupt` recovery is running throws a `LIVE_STATE`
+   * {@link StateConflictError}; other identities are unaffected.
    */
   acquire(options: StateAcquireOptions): StateHandle {
     const optionsInput: unknown = options;
@@ -827,7 +878,7 @@ export class StateManager {
     if (this.#mutating.has(identity)) {
       throw new StateConflictError(
         "LIVE_STATE",
-        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated or removed; acquire it after the operation settles`,
+        `State ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)} is being migrated, removed, or recovered; acquire it after the operation settles`,
       );
     }
 
@@ -847,18 +898,27 @@ export class StateManager {
       );
     }
     if (this.#store !== undefined) {
-      // Peek even for non-persistent lifetimes so a stored persistent record
-      // under the same key is rejected as a lifetime/schema conflict instead of
-      // silently coexisting with a new in-memory state.
-      const loaded = this.#loadPersistent(normalized, identity);
-      if (normalized.lifetime === "persistent") {
-        if (loaded !== null) {
-          state = loaded;
-        } else {
-          // Persist the first value immediately so a reload before any change
-          // still restores the declared initial state.
-          this.#savePersistent(identity, normalized, state);
+      // Lock the identity while its record is read and, for persistent states,
+      // seeded. With `quarantineCorrupt` this covers the quarantine and the
+      // `onError` report, so neither a store hook nor the callback can open a
+      // second live entry for the identity while recovery is in progress.
+      this.#mutating.add(identity);
+      try {
+        // Peek even for non-persistent lifetimes so a stored persistent record
+        // under the same key is rejected as a lifetime/schema conflict instead
+        // of silently coexisting with a new in-memory state.
+        const loaded = this.#loadPersistent(normalized, identity);
+        if (normalized.lifetime === "persistent") {
+          if (loaded !== null) {
+            state = loaded;
+          } else {
+            // Persist the first value immediately so a reload before any change
+            // still restores the declared initial state.
+            this.#savePersistent(identity, normalized, state);
+          }
         }
+      } finally {
+        this.#mutating.delete(identity);
       }
     }
 
@@ -953,13 +1013,14 @@ export class StateManager {
 
     this.#mutating.add(identity);
     try {
-      const legacy = this.#readStoredObject(identity);
-      if (legacy === null) {
+      const stored = this.#readStoredObject(identity);
+      if (stored === null) {
         throw new StateConflictError(
           "MISSING_STATE",
           `No persisted state exists for ${describeIdentity(normalized.scope, normalized.ownerId, normalized.key)}`,
         );
       }
+      const legacy = stored.parsed;
       this.#assertMigrationSource(identity, legacy, normalized);
 
       const guiState = cloneState(migrate(legacy), "migrated.guiState");
@@ -1320,9 +1381,15 @@ export class StateManager {
   /**
    * Reads and decodes the record at `identity` without interpreting its
    * version or schema. Returns `null` when no record exists. Malformed data
-   * throws {@link StateCorruptionError} and is never modified.
+   * throws {@link StateCorruptionError} and is never modified, unless
+   * `recover` is true, in which case the record is quarantined and `null` is
+   * returned. The raw value is returned next to the decoded object so a
+   * quarantine backs up exactly the bytes that failed to decode.
    */
-  #readStoredObject(identity: string): Record<string, unknown> | null {
+  #readStoredObject(
+    identity: string,
+    recover = false,
+  ): StoredRead | null {
     const store = this.#store;
     if (store === undefined) {
       return null;
@@ -1332,19 +1399,34 @@ export class StateManager {
       return null;
     }
     if (typeof raw !== "string") {
-      this.#corrupt(identity, "stored value is not a string");
+      return this.#corrupt(
+        identity,
+        raw,
+        "stored value is not a string",
+        recover,
+      );
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      this.#corrupt(identity, "stored value is not valid JSON");
+      return this.#corrupt(
+        identity,
+        raw,
+        "stored value is not valid JSON",
+        recover,
+      );
     }
     if (!isPlainObject(parsed)) {
-      this.#corrupt(identity, "stored value is not a JSON object");
+      return this.#corrupt(
+        identity,
+        raw,
+        "stored value is not a JSON object",
+        recover,
+      );
     }
-    return parsed;
+    return { raw, parsed };
   }
 
   #loadPersistent(
@@ -1354,10 +1436,11 @@ export class StateManager {
     if (this.#store === undefined) {
       return null;
     }
-    const parsed = this.#readStoredObject(identity);
-    if (parsed === null) {
+    const stored = this.#readStoredObject(identity, this.#quarantineCorrupt);
+    if (stored === null) {
       return null;
     }
+    const parsed = stored.parsed;
 
     if (parsed.version !== STATE_STORAGE_VERSION) {
       throw new StateConflictError(
@@ -1388,23 +1471,102 @@ export class StateManager {
       );
     }
     if (!hasOwn(parsed, "guiState")) {
-      this.#corrupt(identity, "stored value has no guiState");
+      return this.#corrupt(
+        identity,
+        stored.raw,
+        "stored value has no guiState",
+        this.#quarantineCorrupt,
+      );
     }
 
     try {
       return cloneState(parsed.guiState, "persisted.guiState");
     } catch (error) {
-      this.#corrupt(
+      return this.#corrupt(
         identity,
+        stored.raw,
         `stored guiState is invalid (${error instanceof Error ? error.message : String(error)})`,
+        this.#quarantineCorrupt,
       );
     }
   }
 
-  #corrupt(identity: string, reason: string): never {
-    throw new StateCorruptionError(
+  #corrupt(
+    identity: string,
+    raw: unknown,
+    reason: string,
+    recover: boolean,
+  ): null {
+    const error = new StateCorruptionError(
       `Corrupt persisted state ${storageKeyOf(identity)}: ${reason}. ` +
-        "The stored record was left unchanged; fix or remove it explicitly.",
+        (recover
+          ? "The stored record was quarantined and acquire starts from its initial state."
+          : "The stored record was left unchanged; fix or remove it explicitly."),
+    );
+    if (!recover) {
+      throw error;
+    }
+    // `acquire` holds the identity lock here, so neither a store hook nor the
+    // `onError` callback can open a second live entry for this identity while
+    // the recovery is half-done.
+    this.#quarantine(identity, raw);
+    this._reportError(error);
+    return null;
+  }
+
+  /**
+   * Copies the raw record at `identity` to the first free `...:quarantine`
+   * key, then removes the original. The caller holds the identity lock.
+   *
+   * Quarantine keys are prefixed with the record's own storage key, which is
+   * `invui:gui-state:<JSON identity>` and therefore always ends in `]`. A
+   * normal storage key can never equal `<base>:quarantine` (that suffix is not
+   * part of a JSON identity), so a backup never shadows another record; the
+   * bounded slot scan below stays inside the same namespace.
+   *
+   * The copy is written before the removal, and the removal re-checks that the
+   * value is still the one that failed to decode, so a failing or changing
+   * store never destroys un-backed-up data.
+   */
+  #quarantine(identity: string, raw: unknown): void {
+    const store = this.#store;
+    if (store === undefined) {
+      throw new StateValidationError(
+        "quarantineCorrupt requires an injected state store",
+      );
+    }
+    const base = storageKeyOf(identity);
+    if (typeof raw !== "string") {
+      throw new StateCorruptionError(
+        `Corrupt persisted state ${base}: the stored value is not a string, so it cannot be quarantined; it was left unchanged.`,
+      );
+    }
+
+    for (let index = 1; index <= MAX_QUARANTINE_SLOTS; index += 1) {
+      const key =
+        index === 1 ? `${base}:quarantine` : `${base}:quarantine:${index}`;
+      const existing: unknown = store.getItem(key);
+      if (existing !== null && existing !== undefined && existing !== raw) {
+        continue;
+      }
+      // Identical bytes are already backed up, for example when an earlier
+      // attempt failed between the copy and the deletion. Reusing that slot
+      // keeps retries idempotent instead of filling new slots forever.
+      const alreadyBackedUp = existing === raw;
+      if (!alreadyBackedUp) {
+        store.setItem(key, raw);
+      }
+      if (store.getItem(base) !== raw) {
+        throw new StateCorruptionError(
+          `Corrupt persisted state ${base} changed while it was being quarantined; the stored record was left in place` +
+            (alreadyBackedUp ? "." : ` (backup at ${key}).`),
+        );
+      }
+      store.removeItem(base);
+      return;
+    }
+    throw new StateCorruptionError(
+      `Corrupt persisted state ${base}: no free quarantine key within ${MAX_QUARANTINE_SLOTS} slots; the stored record was left unchanged.`,
     );
   }
 }

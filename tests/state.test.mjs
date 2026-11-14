@@ -1303,6 +1303,496 @@ test("corrupt persisted state fails closed without deleting or overwriting it", 
   repaired.release();
 });
 
+test("quarantineCorrupt moves a corrupt record aside and starts from initial", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "recover",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "recover");
+  store.setItem(storageKey, "{not json");
+
+  const errors = [];
+  const manager = new StateManager(store, {
+    onError: (error) => errors.push(error),
+    quarantineCorrupt: true,
+  });
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "recover",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+
+  assert.deepEqual(handle.get(), { page: 7 });
+  assert.equal(store.getItem(`${storageKey}:quarantine`), "{not json");
+  assert.match(store.getItem(storageKey), /"page":7/);
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0] instanceof StateCorruptionError);
+  assert.equal(errors[0].code, "CORRUPT_STORE");
+  handle.release();
+
+  // A second corruption does not overwrite the first backup.
+  store.setItem(storageKey, "{still broken");
+  new StateManager(store, { quarantineCorrupt: true })
+    .acquire({
+      ownerId: "p",
+      key: "recover",
+      lifetime: "persistent",
+      initial: { page: 8 },
+    })
+    .release();
+  assert.equal(store.getItem(`${storageKey}:quarantine`), "{not json");
+  assert.equal(store.getItem(`${storageKey}:quarantine:2`), "{still broken");
+});
+
+test("quarantine never overwrites an occupied backup slot or a look-alike state key", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "collide",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "collide");
+
+  // A normal state whose key literally contains `:quarantine` keeps its own
+  // storage key; it must not be adopted as (or overwritten by) a backup slot.
+  const lookAlikeKey = `${storageKey}:quarantine`;
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: lookAlikeKey,
+      lifetime: "persistent",
+      schema: "decoy",
+      initial: { page: 3 },
+    })
+    .release();
+  const lookAlike = store.findRecord((entry) => entry.key === lookAlikeKey);
+
+  // A foreign value already parked in the first candidate slot must survive.
+  const foreign = JSON.stringify({
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "foreign",
+    ownerId: "p",
+    lifetime: "persistent",
+    schema: "x",
+    guiState: { page: 4 },
+  });
+  store.setItem(`${storageKey}:quarantine`, foreign);
+  store.setItem(storageKey, "{broken");
+
+  const handle = new StateManager(store, { quarantineCorrupt: true }).acquire({
+    ownerId: "p",
+    key: "collide",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+
+  assert.equal(
+    store.getItem(`${storageKey}:quarantine`),
+    foreign,
+    "the occupied slot is not overwritten",
+  );
+  assert.equal(store.getItem(`${storageKey}:quarantine:2`), "{broken");
+  assert.equal(
+    store.getItem(lookAlike.storageKey),
+    lookAlike.raw,
+    "a key containing ':quarantine' is still an ordinary record",
+  );
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 7);
+  handle.release();
+});
+
+test("a quarantine backup write failure leaves the original record untouched", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "backup-fail",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "backup-fail");
+  store.setItem(storageKey, "{broken");
+  const writes = store.setCalls.length;
+  const removes = store.removeCalls.length;
+
+  const setItem = store.setItem.bind(store);
+  store.setItem = (key, value) => {
+    if (key.endsWith(":quarantine")) {
+      throw new Error("quota exceeded");
+    }
+    setItem(key, value);
+  };
+  const errors = [];
+  const manager = new StateManager(store, {
+    quarantineCorrupt: true,
+    onError: (error) => errors.push(error),
+  });
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "backup-fail",
+        lifetime: "persistent",
+        initial: { page: 7 },
+      }),
+    /quota exceeded/,
+  );
+  store.setItem = setItem;
+
+  assert.equal(store.getItem(storageKey), "{broken", "the original is preserved");
+  assert.equal(store.setCalls.length, writes);
+  assert.equal(store.removeCalls.length, removes, "nothing was deleted");
+  assert.equal(errors.length, 0, "the corruption is not reported as recovered");
+  assert.equal(store.getItem(`${storageKey}:quarantine`), null);
+
+  const recovered = manager.acquire({
+    ownerId: "p",
+    key: "backup-fail",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+  assert.deepEqual(recovered.get(), { page: 7 }, "the lock was released");
+  assert.equal(store.getItem(`${storageKey}:quarantine`), "{broken");
+  recovered.release();
+});
+
+test("a quarantine delete failure keeps both copies and a retry reuses the backup", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "delete-fail",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "delete-fail");
+  store.setItem(storageKey, "{broken");
+
+  const removeItem = store.removeItem.bind(store);
+  store.removeItem = () => {
+    throw new Error("io error");
+  };
+  const manager = new StateManager(store, { quarantineCorrupt: true });
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "delete-fail",
+        lifetime: "persistent",
+        initial: { page: 7 },
+      }),
+    /io error/,
+  );
+  store.removeItem = removeItem;
+
+  assert.equal(store.getItem(`${storageKey}:quarantine`), "{broken");
+  assert.equal(store.getItem(storageKey), "{broken", "the original is not deleted");
+
+  const errors = [];
+  const retried = new StateManager(store, {
+    quarantineCorrupt: true,
+    onError: (error) => errors.push(error),
+  }).acquire({
+    ownerId: "p",
+    key: "delete-fail",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+
+  assert.deepEqual(retried.get(), { page: 7 });
+  assert.equal(errors.length, 1);
+  assert.equal(
+    store.getItem(`${storageKey}:quarantine:2`),
+    null,
+    "the retry reuses the existing backup instead of filling a new slot",
+  );
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 7);
+  retried.release();
+});
+
+test("onError cannot reacquire, remove, or migrate the identity being quarantined", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "reentrant",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "reentrant");
+  store.setItem(storageKey, "{broken");
+
+  const attempts = {};
+  const errors = [];
+  const manager = new StateManager(store, {
+    quarantineCorrupt: true,
+    onError: (error) => {
+      errors.push(error);
+      const attempt = (label, run) => {
+        try {
+          run();
+          attempts[label] = "allowed";
+        } catch (failure) {
+          attempts[label] = failure.code;
+        }
+      };
+      attempt("acquire", () =>
+        manager.acquire({
+          ownerId: "p",
+          key: "reentrant",
+          lifetime: "persistent",
+          initial: { page: 99 },
+        }),
+      );
+      attempt("remove", () => manager.remove({ ownerId: "p", key: "reentrant" }));
+      attempt("migrate", () =>
+        manager.migrate(
+          {
+            ownerId: "p",
+            key: "reentrant",
+            fromVersion: STATE_STORAGE_VERSION,
+            fromSchema: "default",
+            schema: "v2",
+          },
+          () => ({ page: 99 }),
+        ),
+      );
+    },
+  });
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "reentrant",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+
+  assert.deepEqual(
+    attempts,
+    { acquire: "LIVE_STATE", remove: "LIVE_STATE", migrate: "LIVE_STATE" },
+    "recovery holds the identity lock while onError runs",
+  );
+  assert.equal(errors.length, 1);
+  assert.deepEqual(handle.get(), { page: 7 });
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 7);
+
+  // Only one entry may be registered: a second lease shares the recovered one.
+  const shared = manager.acquire({
+    ownerId: "p",
+    key: "reentrant",
+    lifetime: "persistent",
+  });
+  shared.set({ page: 8 });
+  assert.equal(handle.get().page, 8);
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 8);
+
+  shared.release();
+  handle.release();
+  manager.remove({ ownerId: "p", key: "reentrant" });
+  assert.equal(store.getItem(storageKey), null, "the lock is released afterwards");
+});
+
+test("a store hook running during the backup cannot open a competing lease", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "store-hook",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "store-hook");
+  store.setItem(storageKey, "{broken");
+
+  const attempts = [];
+  const manager = new StateManager(store, { quarantineCorrupt: true });
+  const setItem = store.setItem.bind(store);
+  store.setItem = (key, value) => {
+    if (key.endsWith(":quarantine")) {
+      try {
+        manager.acquire({
+          ownerId: "p",
+          key: "store-hook",
+          lifetime: "persistent",
+          initial: { page: 99 },
+        });
+        attempts.push("allowed");
+      } catch (error) {
+        attempts.push(error.code);
+      }
+    }
+    setItem(key, value);
+  };
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "store-hook",
+    lifetime: "persistent",
+    initial: { page: 7 },
+  });
+  store.setItem = setItem;
+
+  assert.deepEqual(attempts, ["LIVE_STATE"]);
+  assert.deepEqual(handle.get(), { page: 7 });
+  assert.equal(JSON.parse(store.getItem(storageKey)).guiState.page, 7);
+  assert.equal(store.getItem(`${storageKey}:quarantine`), "{broken");
+  handle.release();
+});
+
+test("a record replaced during the backup is not deleted as if it were corrupt", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "swap",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "swap");
+  store.setItem(storageKey, "{broken");
+
+  const replacement = JSON.stringify({
+    version: STATE_STORAGE_VERSION,
+    scope: "player",
+    key: "swap",
+    ownerId: "p",
+    lifetime: "persistent",
+    schema: "default",
+    guiState: { page: 5 },
+  });
+  const manager = new StateManager(store, { quarantineCorrupt: true });
+  const setItem = store.setItem.bind(store);
+  store.setItem = (key, value) => {
+    setItem(key, value);
+    if (key.endsWith(":quarantine")) {
+      // An outside writer replaces the corrupt record mid-quarantine.
+      setItem(storageKey, replacement);
+    }
+  };
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "swap",
+        lifetime: "persistent",
+        initial: { page: 7 },
+      }),
+    (error) => {
+      assert.ok(error instanceof StateCorruptionError);
+      assert.match(error.message, /changed while it was being quarantined/);
+      return true;
+    },
+  );
+  store.setItem = setItem;
+
+  assert.equal(
+    store.getItem(storageKey),
+    replacement,
+    "the replacement is not deleted",
+  );
+  assert.equal(
+    store.getItem(`${storageKey}:quarantine`),
+    "{broken",
+    "the bytes that failed to decode are still backed up",
+  );
+});
+
+test("quarantine fails closed when no backup slot is free", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "no-slot",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "no-slot");
+  store.setItem(storageKey, "{broken");
+  const writes = store.setCalls.length;
+  const removes = store.removeCalls.length;
+
+  const getItem = store.getItem.bind(store);
+  store.getItem = (key) =>
+    key.includes(":quarantine") ? "occupied" : getItem(key);
+
+  const manager = new StateManager(store, { quarantineCorrupt: true });
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "no-slot",
+        lifetime: "persistent",
+        initial: { page: 7 },
+      }),
+    (error) => {
+      assert.ok(error instanceof StateCorruptionError);
+      assert.match(error.message, /no free quarantine key/);
+      return true;
+    },
+    "the bounded scan terminates instead of looping forever",
+  );
+  store.getItem = getItem;
+
+  assert.equal(store.getItem(storageKey), "{broken");
+  assert.equal(store.setCalls.length, writes);
+  assert.equal(store.removeCalls.length, removes);
+});
+
+test("a non-string stored value cannot be quarantined and is preserved", () => {
+  const store = new MemoryStore();
+  new StateManager(store)
+    .acquire({
+      ownerId: "p",
+      key: "non-string",
+      lifetime: "persistent",
+      initial: { page: 1 },
+    })
+    .release();
+  const { storageKey } = store.findRecord((entry) => entry.key === "non-string");
+  store.data.set(storageKey, 42);
+  const removes = store.removeCalls.length;
+  const errors = [];
+  const manager = new StateManager(store, {
+    quarantineCorrupt: true,
+    onError: (error) => errors.push(error),
+  });
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "non-string",
+        lifetime: "persistent",
+        initial: { page: 7 },
+      }),
+    (error) => {
+      assert.ok(error instanceof StateCorruptionError);
+      assert.match(error.message, /not a string/);
+      return true;
+    },
+  );
+  assert.equal(store.getItem(storageKey), 42);
+  assert.equal(store.removeCalls.length, removes, "nothing was deleted");
+  assert.equal(errors.length, 0);
+});
+
 test("corrupt nested guiState fails closed", () => {
   const store = new MemoryStore();
   const manager = new StateManager(store);
@@ -1639,6 +2129,10 @@ test("persistent lifetime requires a store; other lifetimes do not", () => {
 test("validates store and manager options", () => {
   assert.throws(() => new StateManager({ getItem() {} }), StateValidationError);
   assert.throws(() => new StateManager(null, { onError: 1 }), StateValidationError);
+  assert.throws(
+    () => new StateManager(null, { quarantineCorrupt: "yes" }),
+    StateValidationError,
+  );
   assert.throws(
     () => new StateManager(null, { nope: true }),
     StateValidationError,
