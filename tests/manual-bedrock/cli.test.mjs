@@ -615,6 +615,109 @@ test('既存の ui/_ui_defs.json が登録済みなら、そのまま尊重し�
   });
 });
 
+test('--install-resource-pack 未指定でも登録済み _ui_defs.json を未登録扱いしない', () => {
+  withFixture(({ behaviorPack, resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const userDefs = {
+      ui_defs: ['ui/user_screen.json', ...installedFiles.map(([relativePath]) => relativePath)],
+    };
+    writeJson(uiDefsPath, userDefs);
+    const before = snapshot(resourcePack);
+
+    const result = runCli([
+      'init',
+      '--behavior-pack',
+      behaviorPack,
+      '--resource-pack',
+      resourcePack,
+      '--json',
+    ]);
+
+    assert.equal(result.status, 0, result.both);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.resourcePackInstall.status, 'not-requested');
+    const uiDefsEntry = report.notCreated.find((entry) => entry.path.endsWith('ui/_ui_defs.json'));
+    assert.match(uiDefsEntry.reason, /登録済みのため変更していません/);
+    assert.doesNotMatch(uiDefsEntry.reason, /手動で ui_defs 配列へ追記/);
+    const step = report.manualSteps.find((text) => text.includes('ui/_ui_defs.json'));
+    assert.match(step, /登録済み/);
+    assert.doesNotMatch(step, /手動で追記/);
+    assert.doesNotMatch(step, /登録が別途必要/);
+    // 検査のみなので、既存ファイルは書き換えない。
+    assert.deepEqual(snapshot(resourcePack), before);
+  });
+});
+
+test('--install-resource-pack 指定でも登録済み _ui_defs.json は書き換えず登録を促さない', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const userDefs = {
+      ui_defs: ['ui/user_screen.json', ...installedFiles.map(([relativePath]) => relativePath)],
+    };
+    writeJson(uiDefsPath, userDefs);
+    const before = fs.readFileSync(uiDefsPath, 'utf8');
+
+    const result = runCli([
+      'init',
+      '--resource-pack',
+      resourcePack,
+      '--install-resource-pack',
+      '--json',
+    ]);
+
+    assert.equal(result.status, 0, result.both);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.resourcePackInstall.uiDefs.action, 'not-modified');
+    assert.equal(report.resourcePackInstall.uiDefs.verified, true);
+    assert.deepEqual(report.resourcePackInstall.uiDefs.missing, []);
+    const uiDefsEntry = report.notCreated.find((entry) => entry.path.endsWith('ui/_ui_defs.json'));
+    assert.match(uiDefsEntry.reason, /登録済みのため変更していません/);
+    const step = report.manualSteps.find((text) => text.includes('ui/_ui_defs.json'));
+    assert.match(step, /登録済み/);
+    assert.doesNotMatch(step, /手動で追記/);
+    assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), before);
+    assert.equal(
+      fs.readdirSync(path.join(resourcePack, 'ui')).some((name) => name.includes('.invui-backup.')),
+      false,
+    );
+  });
+});
+
+test('読めない _ui_defs.json は未登録ではなく登録未確認として区別する', () => {
+  const unverifiedContents = [
+    '{"ui_defs": "ui/invui.json"}\n', // ui_defs が配列でない
+    '{"ui_defs": [42]}\n', // 文字列以外の要素
+    '{ not json\n', // JSON として読めない
+  ];
+
+  for (const content of unverifiedContents) {
+    withFixture(({ behaviorPack, resourcePack }) => {
+      const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+      fs.writeFileSync(uiDefsPath, content);
+
+      const result = runCli([
+        'init',
+        '--behavior-pack',
+        behaviorPack,
+        '--resource-pack',
+        resourcePack,
+        '--json',
+      ]);
+
+      assert.equal(result.status, 0, result.both);
+      const report = JSON.parse(result.stdout);
+      const uiDefsEntry = report.notCreated.find((entry) => entry.path.endsWith('ui/_ui_defs.json'));
+      assert.match(uiDefsEntry.reason, /登録状況を確認できません/);
+      assert.doesNotMatch(uiDefsEntry.reason, /登録済みのため変更していません/);
+      const step = report.manualSteps.find((text) => text.includes('ui/_ui_defs.json'));
+      assert.match(step, /登録状況を確認できません/);
+      assert.doesNotMatch(step, /手動で追記する（生成物は登録済み）/);
+      // 未確認でも既定では既存ファイルを書き換えない。
+      assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), content);
+    });
+  }
+});
+
 test('接続ファイルの競合は全体を中断し、部分適用を残さない', () => {
   withFixture(({ resourcePack }) => {
     const conflictPath = path.join(resourcePack, 'ui', 'invui_connect_data_driven.json');
