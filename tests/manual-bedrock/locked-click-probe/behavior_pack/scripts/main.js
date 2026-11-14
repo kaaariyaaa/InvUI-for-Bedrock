@@ -57,12 +57,12 @@ const MODES = new Set(["slot", "inventory", "plain"]);
 
 /** @type {Map<string, import("@minecraft/server").VirtualContainer>} */
 const containers = new Map();
-/** @type {WeakMap<import("@minecraft/server").VirtualContainer, Set<import("@minecraft/server").Player>>} */
+/** @type {WeakMap<import("@minecraft/server").VirtualContainer, Set<string>>} */
 const pendingOpen = new WeakMap();
 /** @type {Map<string, number>} */
 const openGenerations = new Map();
-/** @type {WeakMap<import("@minecraft/server").Player, string>} */
-const lastKeyByPlayer = new WeakMap();
+/** @type {Map<string, string>} */
+const lastKeyByPlayer = new Map();
 let stopReason = "";
 
 function log(line) {
@@ -95,6 +95,20 @@ function playerLabel(player) {
     return player && player.isValid ? player.name : "(invalid player)";
   } catch {
     return "(invalid player)";
+  }
+}
+
+/**
+ * Stable player key. The API does not promise that the Player object handed to
+ * an event is the same object as the one from a previous event, so identity
+ * (`===`, WeakMap keys) must not be used to remember a player. `Entity.id` is
+ * documented as unique and readable even when `isValid` is false.
+ */
+function playerId(player) {
+  try {
+    return player.id;
+  } catch {
+    return undefined;
   }
 }
 
@@ -191,13 +205,13 @@ function openFor(player, size, mode, ticks) {
   const key = keyFor(size, mode);
   const generation = (openGenerations.get(key) ?? 0) + 1;
   openGenerations.set(key, generation);
-  lastKeyByPlayer.set(player, key);
+  lastKeyByPlayer.set(playerId(player), key);
   let pending = pendingOpen.get(container);
   if (!pending) {
     pending = new Set();
     pendingOpen.set(container, pending);
   }
-  pending.add(player);
+  pending.add(playerId(player));
   reply(
     player,
     `OPEN_REQUESTED size=${size} mode=${mode} ticks=${ticks} generation=${generation} (display is not guaranteed)`,
@@ -220,7 +234,7 @@ function openFor(player, size, mode, ticks) {
 }
 
 function closePlayer(player) {
-  const key = lastKeyByPlayer.get(player);
+  const key = lastKeyByPlayer.get(playerId(player));
   if (!key) {
     reply(player, "CLOSE_REJECTED no previous open");
     return;
@@ -348,9 +362,16 @@ subscribe("virtualContainerItemChange", () => world.afterEvents.virtualContainer
 });
 
 subscribe("virtualContainerClose", () => world.afterEvents.virtualContainerClose, (event) => {
-  const pending = pendingOpen.get(event.container);
-  if (pending) {
-    pending.delete(event.player);
+  // The Player object and the container reference seen in an event are not
+  // promised to be the same objects this script holds. A player can view only
+  // one container screen at a time, so clear the closed player from every
+  // pending set instead of looking the container up by reference.
+  const closedPlayerId = playerId(event.player);
+  for (const container of containers.values()) {
+    const pending = pendingOpen.get(container);
+    if (pending) {
+      pending.delete(closedPlayerId);
+    }
   }
   log(
     `CLOSE size=${containerSize(event.container)} reason=${event.reason} ` +

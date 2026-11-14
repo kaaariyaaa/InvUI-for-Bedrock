@@ -96,6 +96,7 @@ function loadProbe() {
   let closeCalls = 0;
 
   const player = {
+    id: 'tester-id',
     name: 'Tester',
     isValid: true,
     sendMessage: (line) => messages.push(line),
@@ -173,9 +174,9 @@ function loadProbe() {
         handler({ container, slot, beforeItemStack: before, itemStack: after, player: who });
       }
     },
-    fireClose({ who = player, reason = 'ServerClosed', contents = items } = {}) {
+    fireClose({ who = player, reason = 'ServerClosed', contents = items, container: closedContainer = container } = {}) {
       for (const handler of events.virtualContainerClose) {
-        handler({ container, player: who, reason, items: contents });
+        handler({ container: closedContainer, player: who, reason, items: contents });
       }
     },
     timers,
@@ -184,6 +185,16 @@ function loadProbe() {
     items,
     cursor,
     player,
+    /** 別イベントで渡され得る、同じプレイヤーの別オブジェクト。 */
+    samePlayer() {
+      return {
+        id: player.id,
+        name: player.name,
+        isValid: true,
+        sendMessage: (line) => messages.push(line),
+        getComponent: (id) => (id === 'cursor_inventory' ? cursor : undefined),
+      };
+    },
     openCalls: () => openCalls,
     closeCalls: () => closeCalls,
   };
@@ -351,4 +362,26 @@ test('再 open は前回の内容を引き継がず、開く直前に fill し�
   assert.equal(probe.openCalls(), 2);
   assert.ok(probe.items[0], '再 open で slot 0 が戻る');
   assert.equal(probe.items[0].lockMode, 'slot');
+});
+
+test('close イベントの参照が別でも pending を解除して再 open できる', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  // Player はイベントごとに別オブジェクトで渡され得る。id で同一人物と判定する。
+  // イベントの container 参照も create() の戻り値と同一とは限らないため、
+  // 参照ではなく「そのプレイヤーの画面が閉じた」ことで pending を解除する。
+  probe.fireClose({ who: probe.samePlayer(), container: { size: 9 } });
+  probe.chat('!lockprobe open 9 slot 40');
+
+  assert.equal(probe.openCalls(), 2);
+  assert.doesNotMatch(probe.messages.join('\n'), /previous open still pending/);
+});
+
+test('close コマンドは Player オブジェクトが変わっても最後に開いた key を閉じる', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.chat('!lockprobe close', probe.samePlayer());
+
+  assert.equal(probe.closeCalls(), 1);
+  assert.match(probe.messages.join('\n'), /CLOSE_REQUESTED key=9:slot/);
 });
