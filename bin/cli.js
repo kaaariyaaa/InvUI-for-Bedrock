@@ -10,7 +10,9 @@
  * - --install-resource-pack を明示した場合だけ、未検証の隔離プローブ
  *   resource_pack/ui/invui.json と試験的接続 invui_connect*.json を
  *   Resource Pack の ui/ へ追加する。既存ファイルは上書きせず、競合時は差分を出して中断する。
- * - 既存 Resource Pack の ui/_ui_defs.json は自動変更しない。登録は利用者が手動で行う。
+ * - 既存 Resource Pack の ui/_ui_defs.json は既定で自動変更しない。登録は利用者が手動で行う。
+ *   --register-ui-defs を --install-resource-pack と併用して明示した場合だけ、バックアップを取り、
+ *   不足エントリを追記する。解析不能・非配列・競合時は書き込まず、失敗時は追記を戻す。
  *   generate-resource-pack の生成物だけは、同梱の _ui_defs.json 込みで接続済みになる。
  */
 
@@ -24,7 +26,7 @@ const TOOL_NAME = 'invui-bedrock';
 const FALLBACK_VERSION = '0.1.0-beta.1';
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// 導入されるのはこの一覧だけ。ui/_ui_defs.json や chest_screen.json は変更しない。
+// 導入されるのはこの一覧だけ。ui/_ui_defs.json や chest_screen.json は --register-ui-defs 指定時を除き変更しない。
 const TEMPLATE_FILES = [
   {
     relativePath: 'ui/invui.json',
@@ -44,6 +46,7 @@ const TEMPLATE_PATHS = TEMPLATE_FILES.map((file) => file.relativePath);
 const UI_DEFS_RELATIVE_PATH = 'ui/_ui_defs.json';
 
 const INSTALL_FLAG = '--install-resource-pack';
+const REGISTER_UI_DEFS_FLAG = '--register-ui-defs';
 const GENERATE_COMMAND = 'generate-resource-pack';
 
 // generate-resource-pack が新しい出力先へ同梱物から作るファイル。
@@ -78,14 +81,15 @@ const BETA_LINES = [
 const BETA_NOTICE =
   'VirtualContainer は Bedrock Preview/Beta の Experimental API を前提とした設計です。' +
   'クリック、アイテム保護、JSON UI、InventoryLink は実機未検証であり、安全に利用できる状態ではありません。' +
-  'ui/invui.json は隔離プローブで、試験的接続ファイルは既存 Resource Pack の ui/_ui_defs.json へ' +
-  '自動登録しないため、置いただけでは有効になりません。生成物は登録済みですが実機未検証です。';
+  'ui/invui.json は隔離プローブで、試験的接続ファイルは既定では既存 Resource Pack の ui/_ui_defs.json へ' +
+  '自動登録しないため、置いただけでは有効になりません（--register-ui-defs 明示時だけバックアップ付きで追記）。' +
+  '生成物は登録済みですが実機未検証です。';
 
 const USAGE = `invui-bedrock — setup helper (inspection + opt-in probe install)
 
 使い方:
   invui-bedrock init --behavior-pack <dir> --resource-pack <dir> [--json]
-  invui-bedrock init --resource-pack <dir> ${INSTALL_FLAG} [--json]
+  invui-bedrock init --resource-pack <dir> ${INSTALL_FLAG} [${REGISTER_UI_DEFS_FLAG}] [--json]
   invui-bedrock ${GENERATE_COMMAND} --output <dir> [--json]
   invui-bedrock --help
   invui-bedrock --version
@@ -104,7 +108,12 @@ const USAGE = `invui-bedrock — setup helper (inspection + opt-in probe install
   --resource-pack <dir>             Resource Pack のルート
   ${INSTALL_FLAG}   ui/invui.json と試験的接続 2 ファイルを追加する（明示時のみ）
                                     既存ファイルは上書きせず、競合時は差分を出して中断する
-                                    既存の ui/_ui_defs.json は自動変更しない（登録は手動）
+                                    既存の ui/_ui_defs.json は既定では変更しない（登録は手動）
+  ${REGISTER_UI_DEFS_FLAG}
+                                    ${INSTALL_FLAG} と併用。既存の ui/_ui_defs.json へ
+                                    不足している 3 エントリを追記する。追記前に同一
+                                    ディレクトリへバックアップを作り、JSON として
+                                    読めない・ui_defs が配列でない・競合時は書き込まず中断する
   --output <dir>                    ${GENERATE_COMMAND} の生成先。既存のパスと
                                     シンボリックリンクは拒否し、上書きしない
   --json                            結果を JSON として標準出力へ出す
@@ -115,7 +124,8 @@ const USAGE = `invui-bedrock — setup helper (inspection + opt-in probe install
   - ${BETA_LINES[0]}
   - ${BETA_LINES[1]}
   - ${BETA_LINES[2]}
-  - 既存 Resource Pack の ui/_ui_defs.json へ登録する作業は手動。登録するまで接続ファイルは有効にならない。
+  - 既存 Resource Pack の ui/_ui_defs.json へ登録する作業は既定では手動。登録するまで接続ファイルは有効にならない。
+    ${REGISTER_UI_DEFS_FLAG} を ${INSTALL_FLAG} と併用した場合だけ、バックアップ付きで不足分を追記する。
   - ${GENERATE_COMMAND} の生成物は Experimental API・スクリプト連携へ未接続で実機未検証。
     ただし ui/_ui_defs.json は接続 2 ファイルを登録済みで、data_driven_container のパネルを使う全画面に影響し得る。
     manifest.json の UUID は生成のたびに作り直すが、他パックとの衝突をゼロにはできない。
@@ -283,8 +293,9 @@ function inspectPack(root, area) {
         area,
         'rp.ui-defs',
         'info',
-        'ui/_ui_defs.json があります。この CLI は既存の _ui_defs.json を自動変更しません。' +
-          '登録は手動で行い、generate-resource-pack の生成物は登録済みです',
+        'ui/_ui_defs.json があります。既定では既存の _ui_defs.json を自動変更しません。' +
+          `${REGISTER_UI_DEFS_FLAG} を明示した場合だけ不足分をバックアップ付きで追記します。` +
+          '手動登録も可能で、generate-resource-pack の生成物は登録済みです',
       );
     }
 
@@ -294,7 +305,8 @@ function inspectPack(root, area) {
       'rp.json-ui-unverified',
       'warn',
       `JSON UI と画面への適用方法は実機未検証です。ui/invui.json と試験的接続 2 ファイルは置いただけでは有効にならず、` +
-        `既存 Resource Pack では ui/_ui_defs.json への登録が必要です（手動）。導入は ${INSTALL_FLAG} 指定時のみ行います`,
+        `既存 Resource Pack では ui/_ui_defs.json への登録が必要です（既定は手動、${REGISTER_UI_DEFS_FLAG} 明示時は追記）。` +
+        `導入は ${INSTALL_FLAG} 指定時のみ行います`,
     );
   }
 
@@ -362,7 +374,13 @@ function findSymlinkComponent(root, target) {
 }
 
 function sameFileIdentity(stat, identity) {
-  return Boolean(identity) && stat.isFile() && stat.dev === identity.dev && stat.ino === identity.ino;
+  return (
+    Boolean(identity) &&
+    Boolean(stat) &&
+    stat.isFile() &&
+    stat.dev === identity.dev &&
+    stat.ino === identity.ino
+  );
 }
 
 // 自分が排他的に作り、dev/ino で同一と確認できたファイルだけを削除する。
@@ -559,6 +577,276 @@ function inspectUiDefs(resourcePack) {
   return result;
 }
 
+function uiDefsConflict(reason) {
+  return { path: UI_DEFS_RELATIVE_PATH, reason, diff: null };
+}
+
+// --register-ui-defs 用の事前検査。書き込みはせず、競合・解析不能・追記内容だけを決める。
+function preflightUiDefsRegistration(resourcePack) {
+  const destination = path.join(resourcePack, UI_DEFS_RELATIVE_PATH);
+  const result = {
+    resourcePack,
+    destination,
+    status: 'failed',
+    exists: false,
+    registered: [],
+    missing: [...TEMPLATE_PATHS],
+    added: [],
+    originalContent: null,
+    nextContent: null,
+    backup: null,
+    error: null,
+    conflicts: [],
+  };
+
+  let linkedPath;
+  try {
+    linkedPath = findSymlinkComponent(resourcePack, destination);
+  } catch (error) {
+    result.error = `ui/_ui_defs.json の経路を確認できません: ${error.message}`;
+    return result;
+  }
+  if (linkedPath) {
+    result.status = 'conflict';
+    result.conflicts = [
+      uiDefsConflict(`導入先の経路にシンボリックリンクがあります。パック外へ書き込まないため変更しません: ${linkedPath}`),
+    ];
+    return result;
+  }
+
+  let stat;
+  try {
+    stat = fs.lstatSync(destination);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      result.error =
+        'ui/_ui_defs.json がありません。--register-ui-defs は既存ファイルへの追記だけを行うため、' +
+        '先に作成するか generate-resource-pack を使ってください。';
+      return result;
+    }
+    result.error = `ui/_ui_defs.json を確認できません: ${error.message}`;
+    return result;
+  }
+  result.exists = true;
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    result.status = 'conflict';
+    result.conflicts = [uiDefsConflict('ui/_ui_defs.json が通常ファイルではありません。変更しません。')];
+    return result;
+  }
+
+  let originalContent;
+  try {
+    originalContent = fs.readFileSync(destination);
+  } catch (error) {
+    result.error = `ui/_ui_defs.json を読めません: ${error.message}`;
+    return result;
+  }
+  const text = originalContent.toString('utf8');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    result.status = 'conflict';
+    result.conflicts = [uiDefsConflict(`ui/_ui_defs.json を JSON として読めないため変更しません: ${error.message}`)];
+    return result;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    result.status = 'conflict';
+    result.conflicts = [uiDefsConflict('ui/_ui_defs.json のルートがオブジェクトではないため変更しません。')];
+    return result;
+  }
+  if (!Array.isArray(parsed.ui_defs)) {
+    result.status = 'conflict';
+    result.conflicts = [uiDefsConflict('ui/_ui_defs.json に ui_defs 配列がないため変更しません。')];
+    return result;
+  }
+  if (parsed.ui_defs.some((entry) => typeof entry !== 'string')) {
+    result.status = 'conflict';
+    result.conflicts = [uiDefsConflict('ui_defs 配列に文字列以外の要素があるため変更しません。')];
+    return result;
+  }
+
+  result.registered = TEMPLATE_PATHS.filter((entry) => parsed.ui_defs.includes(entry));
+  result.missing = TEMPLATE_PATHS.filter((entry) => !parsed.ui_defs.includes(entry));
+  if (result.missing.length === 0) {
+    result.status = 'already-registered';
+    return result;
+  }
+
+  // 既存の並び・キー順・インデント・改行コードは保ち、追記した分だけを差分にする。
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  const indentMatch = text.match(/\n([ \t]+)"/);
+  const indent = text.includes('\n') ? (indentMatch ? indentMatch[1] : 2) : 0;
+  const next = { ...parsed, ui_defs: [...parsed.ui_defs, ...result.missing] };
+  let nextText = JSON.stringify(next, null, indent);
+  if (/\r?\n$/.test(text)) {
+    nextText += '\n';
+  }
+  nextText = nextText.replace(/\n/g, newline);
+  result.originalContent = originalContent;
+  result.nextContent = Buffer.from(nextText, 'utf8');
+  result.added = [...result.missing];
+  result.status = 'pending';
+  return result;
+}
+
+// 事前検査から書き込みまでの間に経路がシンボリックリンクへ差し替えられていないか確認する。
+// テンプレート配置と同じく、書き込み直前にもう一度見る。
+function assertUiDefsPath(resourcePack, destination) {
+  const linkedPath = findSymlinkComponent(resourcePack, destination);
+  if (linkedPath) {
+    throw new Error(`ui/_ui_defs.json の経路がシンボリックリンクに変わったため書き込みませんでした: ${linkedPath}`);
+  }
+}
+
+// 追記した自分のファイル（dev/ino が一致）だけを、シンボリックリンクを辿らずに戻す。
+// バックアップは消さない。呼び出し側が復元結果を検証してから片付ける。
+function restoreUiDefsFromBackup(destination, identity, backupPath) {
+  const flags = fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0);
+  let fd;
+  try {
+    fd = fs.openSync(destination, flags);
+  } catch (error) {
+    if (error.code === 'ELOOP') {
+      throw new Error('復元先の経路がシンボリックリンクに変わったため書き戻しません');
+    }
+    throw error;
+  }
+  try {
+    if (!sameFileIdentity(fs.fstatSync(fd), identity)) {
+      throw new Error('復元先が追記したファイルと確認できないため書き戻しません');
+    }
+    const backupContent = fs.readFileSync(backupPath);
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, backupContent);
+    fs.fsyncSync(fd);
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // close 失敗は復元結果を変えない。
+    }
+  }
+}
+
+// バックアップを排他的に作り、内容が変わっていないことを確認してから rename で置き換える。
+// 失敗時は一時ファイルを片付ける。追記が確定した後の例外は、追記した inode と内容を
+// 確認できた場合だけ元へ戻し、確認できなければバックアップを残して報告する。
+// ponytail: 内容比較と rename の間の TOCTOU は塞ぎ切らない。塞ぐなら fd + flock が要る。
+function registerUiDefs(preflight) {
+  const { resourcePack, destination, originalContent, nextContent } = preflight;
+  const nonce = `${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+  const backupPath = `${destination}.invui-backup.${nonce}.bak`;
+  const tempPath = path.join(
+    path.dirname(destination),
+    `.${path.basename(destination)}.${nonce}.tmp`,
+  );
+  let backupCreated = false;
+  let tempCreated = false;
+  let originalIdentity = null;
+  let tempIdentity = null;
+
+  try {
+    assertUiDefsPath(resourcePack, destination);
+    const originalStat = fs.lstatSync(destination);
+    if (!originalStat.isFile() || originalStat.isSymbolicLink()) {
+      throw new Error('ui/_ui_defs.json が通常ファイルではないため書き込みませんでした。');
+    }
+    originalIdentity = { dev: originalStat.dev, ino: originalStat.ino };
+    fs.copyFileSync(destination, backupPath, fs.constants.COPYFILE_EXCL);
+    backupCreated = true;
+    if (!fs.readFileSync(destination).equals(originalContent)) {
+      throw new Error('確認中に ui/_ui_defs.json が別プロセスに変更されたため書き込みませんでした。');
+    }
+    fs.writeFileSync(tempPath, nextContent, { flag: 'wx', mode: 0o644 });
+    tempCreated = true;
+    const tempStat = fs.lstatSync(tempPath);
+    tempIdentity = { dev: tempStat.dev, ino: tempStat.ino };
+    if (!fs.readFileSync(destination).equals(originalContent)) {
+      throw new Error('確認中に ui/_ui_defs.json が別プロセスに変更されたため書き込みませんでした。');
+    }
+    // rename は追記を確定させる操作なので、直前に経路をもう一度見る。
+    assertUiDefsPath(resourcePack, destination);
+    fs.renameSync(tempPath, destination);
+    tempCreated = false;
+    // rename 後に差し替えられていないこと（inode）を確認してから成功とする。
+    if (!sameFileIdentity(fs.lstatSync(destination), tempIdentity)) {
+      throw new Error('追記後の ui/_ui_defs.json を自分が置いたファイルと確認できませんでした。');
+    }
+    return backupPath;
+  } catch (error) {
+    if (tempCreated) {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') {
+          error.message += ` / 一時ファイルを削除できません: ${tempPath} (${cleanupError.message})`;
+        }
+      }
+    }
+    if (backupCreated) {
+      let currentStat = null;
+      let currentError = null;
+      try {
+        currentStat = fs.lstatSync(destination);
+      } catch (lstatError) {
+        currentError = lstatError;
+      }
+      // rename 後も追記したのと同じ inode で、かつ内容が追記したままの場合だけ戻す。
+      // 別ファイル（内容が同じでも）や、追記後に変更されたファイルは上書きしない。
+      let landed = false;
+      if (sameFileIdentity(currentStat, tempIdentity)) {
+        try {
+          landed = fs.readFileSync(destination).equals(nextContent);
+        } catch {
+          landed = false;
+        }
+      }
+      let restoreNote = null;
+      if (landed) {
+        try {
+          assertUiDefsPath(resourcePack, destination);
+          restoreUiDefsFromBackup(destination, tempIdentity, backupPath);
+        } catch (restoreError) {
+          restoreNote = `追記を元に戻せませんでした: ${restoreError.message}`;
+        }
+      } else if (currentError && currentError.code !== 'ENOENT') {
+        restoreNote = `追記後の状態を確認できません: ${currentError.message}`;
+      } else {
+        restoreNote = currentStat
+          ? '追記後に別プロセスが内容またはファイルを変更したため自動では戻しません'
+          : '追記したファイルが見つからないため自動では戻しません';
+      }
+      // 復元できた場合も、宛先が自分の追記ファイル（または元のファイル）で、
+      // 内容が元に戻っていると確認できた場合だけバックアップを片付ける。
+      let afterStat = null;
+      let afterContent = null;
+      try {
+        afterStat = fs.lstatSync(destination);
+        afterContent = fs.readFileSync(destination);
+      } catch {
+        afterContent = null;
+      }
+      const recovered =
+        afterContent !== null &&
+        afterContent.equals(originalContent) &&
+        (sameFileIdentity(afterStat, tempIdentity) || sameFileIdentity(afterStat, originalIdentity));
+      if (recovered) {
+        try {
+          fs.unlinkSync(backupPath);
+        } catch (cleanupError) {
+          error.message += ` / バックアップを削除できません: ${backupPath} (${cleanupError.message})`;
+        }
+      } else {
+        error.message +=
+          ` / ${restoreNote ? `${restoreNote} / ` : ''}現在の内容は ${backupPath} に退避しています`;
+      }
+    }
+    throw error;
+  }
+}
+
 function conflictError(destination) {
   const conflict = new Error(`導入先が同時に作成されました: ${destination}`);
   conflict.code = 'EEXIST';
@@ -624,16 +912,43 @@ function placeFileWithoutOverwrite(tempPath, destination) {
   }
 }
 
-function applyTemplate(resourcePack) {
+function applyTemplate(resourcePack, options = {}) {
+  const registerRequested = options.registerUiDefs === true;
+  const templateRoot = path.join(PACKAGE_ROOT, 'resource_pack');
   const preflight = preflightTemplate(resourcePack);
   if (preflight.error) {
     return {
       requested: true,
       status: 'failed',
       error: preflight.error,
-      templateRoot: path.join(PACKAGE_ROOT, 'resource_pack'),
+      templateRoot,
       files: [],
       conflicts: [],
+      createdDirectories: [],
+    };
+  }
+
+  // 登録の事前検査を先に行い、競合時はテンプレートを 1 ファイルも追加しない。
+  const uiDefsPreflight = registerRequested ? preflightUiDefsRegistration(resourcePack) : null;
+  if (uiDefsPreflight && uiDefsPreflight.status === 'failed') {
+    return {
+      requested: true,
+      status: 'failed',
+      error: `ui/_ui_defs.json の登録前検査で失敗したため導入を中断しました: ${uiDefsPreflight.error}`,
+      templateRoot,
+      files: [],
+      conflicts: [],
+      createdDirectories: [],
+    };
+  }
+  if (uiDefsPreflight && uiDefsPreflight.conflicts.length > 0) {
+    return {
+      requested: true,
+      status: 'conflict',
+      error: '既存の ui/_ui_defs.json と競合したため導入を中断しました。既存ファイルは変更していません。',
+      templateRoot,
+      files: [],
+      conflicts: uiDefsPreflight.conflicts,
       createdDirectories: [],
     };
   }
@@ -643,20 +958,62 @@ function applyTemplate(resourcePack) {
       requested: true,
       status: 'conflict',
       error: '既存ファイルと競合したため導入を中断しました。既存ファイルは変更していません。',
-      templateRoot: path.join(PACKAGE_ROOT, 'resource_pack'),
+      templateRoot,
       files: [],
       conflicts: preflight.conflicts,
       createdDirectories: [],
     };
   }
 
+  const uiDefsReport = () => {
+    if (!registerRequested) {
+      return inspectUiDefs(resourcePack);
+    }
+    return {
+      path: UI_DEFS_RELATIVE_PATH,
+      action: uiDefsPreflight.status,
+      exists: uiDefsPreflight.exists,
+      registered: [...uiDefsPreflight.registered],
+      missing: [...uiDefsPreflight.missing],
+      added: [...uiDefsPreflight.added],
+      backup: uiDefsPreflight.backup,
+      error: uiDefsPreflight.error,
+    };
+  };
+  const registerNow = () => {
+    if (!uiDefsPreflight || uiDefsPreflight.status !== 'pending') {
+      return;
+    }
+    uiDefsPreflight.backup = registerUiDefs(uiDefsPreflight);
+    uiDefsPreflight.status = 'registered';
+    uiDefsPreflight.registered = [...TEMPLATE_PATHS];
+    uiDefsPreflight.missing = [];
+  };
+  const uiDefsRestore = () =>
+    uiDefsPreflight && uiDefsPreflight.status === 'registered'
+      ? [`cp "${uiDefsPreflight.backup}" "${uiDefsPreflight.destination}"`]
+      : [];
+
   const toCreate = preflight.entries.filter((entry) => entry.action === 'create');
   if (toCreate.length === 0) {
-    return {
+    try {
+      registerNow();
+    } catch (error) {
+      return {
+        requested: true,
+        status: 'failed',
+        error: `ui/_ui_defs.json の登録中に失敗したため、既存ファイルは変更していません: ${error.message}`,
+        templateRoot,
+        files: [],
+        conflicts: [],
+        createdDirectories: [],
+      };
+    }
+    const result = {
       requested: true,
       status: 'already-installed',
       error: null,
-      templateRoot: path.join(PACKAGE_ROOT, 'resource_pack'),
+      templateRoot,
       files: preflight.entries.map((entry) => ({
         path: entry.relativePath,
         action: 'already-present',
@@ -665,8 +1022,13 @@ function applyTemplate(resourcePack) {
       })),
       conflicts: [],
       createdDirectories: [],
-      uiDefs: inspectUiDefs(resourcePack),
+      uiDefs: uiDefsReport(),
     };
+    const restore = uiDefsRestore();
+    if (restore.length > 0) {
+      result.restore = restore;
+    }
+    return result;
   }
 
   const createdDirectories = [];
@@ -711,6 +1073,9 @@ function applyTemplate(resourcePack) {
       fs.unlinkSync(entry.tempPath);
       entry.tempPath = null;
     }
+
+    // ファイル配置後の最後に追記する。ここで失敗したら catch が追加済みファイルを戻す。
+    registerNow();
   } catch (error) {
     const cleanupErrors = [];
     for (const entry of installed) {
@@ -755,7 +1120,7 @@ function applyTemplate(resourcePack) {
     requested: true,
     status: 'installed',
     error: null,
-    templateRoot: path.join(PACKAGE_ROOT, 'resource_pack'),
+    templateRoot,
     files: [
       ...preflight.entries
         .filter((entry) => entry.action === 'already-present')
@@ -774,12 +1139,13 @@ function applyTemplate(resourcePack) {
     ],
     conflicts: [],
     createdDirectories,
-    uiDefs: inspectUiDefs(resourcePack),
+    uiDefs: uiDefsReport(),
     restore: [
       ...installed.map((entry) => `rm "${entry.destination}"`),
       ...(createdDirectories.length > 0
         ? [`rmdir "${path.dirname(installed[0].destination)}"（空の場合のみ）`]
         : []),
+      ...uiDefsRestore(),
     ],
   };
 }
@@ -1039,6 +1405,9 @@ function finalizeReport(report, installResult) {
   report.resourcePackInstall = installResult;
 
   const installedPaths = new Set((installResult.files || []).map((file) => file.path));
+  const uiDefsAction = installResult.uiDefs ? installResult.uiDefs.action : null;
+  const uiDefsRegistered = uiDefsAction === 'registered';
+  const uiDefsAlreadyRegistered = uiDefsAction === 'already-registered';
   const notCreated = [];
 
   for (const relativePath of TEMPLATE_PATHS) {
@@ -1053,30 +1422,44 @@ function finalizeReport(report, installResult) {
           ? `未検証の隔離プローブです。${INSTALL_FLAG} を明示した場合だけ追加し、` +
             '置いただけではどの画面にも適用されません。'
           : `実機未検証の試験的接続ファイルです。${INSTALL_FLAG} を明示した場合だけ追加し、` +
-            '既存の ui/_ui_defs.json へは自動登録しません。',
+            `既存の ui/_ui_defs.json へは既定で自動登録しません（${REGISTER_UI_DEFS_FLAG} 明示時は追記）。`,
     });
   }
-  notCreated.push(
-    {
+  if (uiDefsAlreadyRegistered) {
+    notCreated.push({
       path: path.join(report.inputs.resourcePack, 'ui', '_ui_defs.json'),
       action: 'not-modified',
       reason:
-        '既存ファイルとの競合を避けるため、_ui_defs.json は自動変更しません。' +
-        'ui/invui.json・ui/invui_connect.json・ui/invui_connect_data_driven.json を登録する場合は、' +
-        'バックアップして手動で ui_defs 配列へ追記してください（generate-resource-pack の生成物は登録済み）。',
-    },
-    {
-      path: path.join(report.inputs.resourcePack, 'ui', 'chest_screen.json'),
+        `対象 ${TEMPLATE_PATHS.length} ファイルはすべて ui/_ui_defs.json に登録済みのため変更していません。` +
+        '追記もバックアップ作成も行っていません。',
+    });
+  } else if (!uiDefsRegistered) {
+    notCreated.push({
+      path: path.join(report.inputs.resourcePack, 'ui', '_ui_defs.json'),
       action: 'not-modified',
-      reason: '標準チェスト画面の既存定義を上書きしません。必要な場合は手動でマージしてください。',
-    },
-  );
+      reason:
+        '既存ファイルとの競合を避けるため、_ui_defs.json は既定で自動変更しません。' +
+        'ui/invui.json・ui/invui_connect.json・ui/invui_connect_data_driven.json を登録する場合は、' +
+        `バックアップして手動で ui_defs 配列へ追記するか、${REGISTER_UI_DEFS_FLAG} を明示してください` +
+        '（generate-resource-pack の生成物は登録済み）。',
+    });
+  }
+  notCreated.push({
+    path: path.join(report.inputs.resourcePack, 'ui', 'chest_screen.json'),
+    action: 'not-modified',
+    reason: '標準チェスト画面の既存定義を上書きしません。必要な場合は手動でマージしてください。',
+  });
   report.notCreated = notCreated;
 
   report.manualSteps = [
     '対象の Minecraft が Preview/Beta で、設計書が前提とする Experimental API を利用できる状態か確認する。',
     'ゲーム版と @minecraft/server の版を実機テスト記録に残す。',
-    'ui/invui.json と試験的接続 2 ファイルを置いただけでは有効にならない。既存 Resource Pack では ui/_ui_defs.json への登録が別途必要で、この CLI は自動変更しない。対象ゲーム版の JSON UI 仕様を確認して手動で追記する（生成物は登録済み）。',
+    uiDefsRegistered
+      ? `ui/_ui_defs.json へ不足分を追記しました。バックアップ（${installResult.uiDefs.backup}）を確認し、` +
+        '対象ゲーム版の JSON UI 仕様と食い違う場合は復元してください。'
+      : uiDefsAlreadyRegistered
+        ? `ui/_ui_defs.json には対象 ${TEMPLATE_PATHS.length} ファイルがすべて登録済みのため、追記もバックアップ作成も行っていません。バックアップは存在しません。`
+        : 'ui/invui.json と試験的接続 2 ファイルを置いただけでは有効にならない。既存 Resource Pack では ui/_ui_defs.json への登録が別途必要で、この CLI は既定では自動変更しない。対象ゲーム版の JSON UI 仕様を確認して手動で追記する（生成物は登録済み）。',
     '試験的接続は VirtualContainer を特定できず、data_driven_container の desktop/pocket パネルを使う全画面に作用し得る。有効化は使い捨てワールドだけで行い、通常画面への影響を確認する。',
     'tests/manual-bedrock/CHECKLIST.md の検証が終わるまで、クリック・アイテム保護・JSON UI 連携を有効な機能として扱わない。',
     'Resource Pack の既存 UI を手動でマージする場合は、バックアップを取り、差分を確認する。',
@@ -1098,9 +1481,21 @@ function printChecks(checks, area, heading) {
   }
 }
 
-// 既存 _ui_defs.json は変更していないので、登録状況と手動作業だけを表示する。
+// 登録済みなら追記内容とバックアップ、未指定なら登録状況と手動作業を表示する。
 function printUiDefs(uiDefs) {
   if (!uiDefs) {
+    return;
+  }
+  if (uiDefs.action === 'registered') {
+    out(`  ui/_ui_defs.json に追記しました: ${(uiDefs.added || []).join(', ')}`);
+    if (uiDefs.backup) {
+      out(`  バックアップ: ${uiDefs.backup}`);
+    }
+    out('  復元する場合はバックアップを ui/_ui_defs.json へ書き戻してください（追記後の手動変更は失われます）。');
+    return;
+  }
+  if (uiDefs.action === 'already-registered') {
+    out('  ui/_ui_defs.json は登録済みです（変更していません。バックアップも作成していません）。');
     return;
   }
   out('  ui/_ui_defs.json は変更していません（既存定義を尊重）。');
@@ -1110,7 +1505,10 @@ function printUiDefs(uiDefs) {
     out('  - ファイルがありません。登録する場合は手動で ui_defs 配列を用意してください。');
   } else if (uiDefs.missing.length > 0) {
     out(`  - 未登録: ${uiDefs.missing.join(', ')}`);
-    out('  - 登録は手動です。ui_defs 配列へ追記する前にバックアップと差分確認を行ってください。');
+    out(
+      `  - 登録は手動です。ui_defs 配列へ追記する前にバックアップと差分確認を行うか、` +
+        `${REGISTER_UI_DEFS_FLAG} を明示してください。`,
+    );
   } else {
     out(`  - 登録済み: ${uiDefs.registered.join(', ')}`);
   }
@@ -1123,8 +1521,19 @@ function printInstallSection(install) {
     return;
   }
 
+  const uiDefsRegistered = Boolean(install.uiDefs && install.uiDefs.action === 'registered');
+  const uiDefsAlreadyRegistered = Boolean(
+    install.uiDefs && install.uiDefs.action === 'already-registered',
+  );
+
   if (install.status === 'installed') {
-    out('  状態: 導入済み（既存ファイルは変更していません）');
+    out(
+      uiDefsRegistered
+        ? '  状態: 導入済み（テンプレートは既存のまま。ui/_ui_defs.json のみ追記しました）'
+        : uiDefsAlreadyRegistered
+          ? '  状態: 導入済み（ui/_ui_defs.json は登録済みのため変更していません）'
+          : '  状態: 導入済み（既存ファイルは変更していません）',
+    );
     for (const file of install.files) {
       const prefix = file.action === 'created' ? '追加' : '既存と同一';
       out(`  - ${prefix}: ${file.path} (${file.bytes} bytes, sha256 ${file.sha256})`);
@@ -1145,11 +1554,20 @@ function printInstallSection(install) {
   }
 
   if (install.status === 'already-installed') {
-    out('  状態: 導入済み（同梱テンプレートと同一のため、何も書き換えていません）');
+    out(
+      uiDefsRegistered
+        ? '  状態: 導入済み（同梱テンプレートと同一。ui/_ui_defs.json に不足分を追記しました）'
+        : uiDefsAlreadyRegistered
+          ? '  状態: 導入済み（同梱テンプレートと同一。ui/_ui_defs.json は登録済みのため変更していません）'
+          : '  状態: 導入済み（同梱テンプレートと同一のため、何も書き換えていません）',
+    );
     for (const file of install.files) {
       out(`  - 既存と同一: ${file.path} (sha256 ${file.sha256})`);
     }
     printUiDefs(install.uiDefs);
+    for (const command of install.restore || []) {
+      out(`  復元: ${command}`);
+    }
     return;
   }
 
@@ -1242,7 +1660,22 @@ function printHuman(report) {
   });
   out('');
 
-  if (report.resourcePackInstall.status === 'installed') {
+  const uiDefsRegistered = Boolean(
+    report.resourcePackInstall.uiDefs && report.resourcePackInstall.uiDefs.action === 'registered',
+  );
+  const uiDefsAlreadyRegistered = Boolean(
+    report.resourcePackInstall.uiDefs &&
+      report.resourcePackInstall.uiDefs.action === 'already-registered',
+  );
+  if (uiDefsRegistered) {
+    out('テンプレートは変更していません。変更したのは ui/_ui_defs.json へ追記した登録だけです。');
+  } else if (uiDefsAlreadyRegistered) {
+    out(
+      report.resourcePackInstall.status === 'installed'
+        ? '既存ファイルは変更していません。ui/_ui_defs.json は登録済みのため、追記もバックアップ作成もしていません。追加したファイルだけが導入内容です。'
+        : '既存ファイルは変更していません。ui/_ui_defs.json は登録済みのため、追記もバックアップ作成もしていません。',
+    );
+  } else if (report.resourcePackInstall.status === 'installed') {
     out('既存ファイルは変更していません。追加したファイルだけが導入内容です。');
   } else {
     out('既存ファイルは変更していません。追加したファイルはありません。');
@@ -1263,6 +1696,7 @@ function main(argv) {
         'resource-pack': { type: 'string' },
         output: { type: 'string' },
         'install-resource-pack': { type: 'boolean', default: false },
+        'register-ui-defs': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },
@@ -1294,9 +1728,15 @@ function main(argv) {
   }
 
   if (command === GENERATE_COMMAND) {
-    if (parsed.values['behavior-pack'] || parsed.values['resource-pack'] || parsed.values['install-resource-pack']) {
+    if (
+      parsed.values['behavior-pack'] ||
+      parsed.values['resource-pack'] ||
+      parsed.values['install-resource-pack'] ||
+      parsed.values['register-ui-defs']
+    ) {
       err(
-        `[FAIL] ${GENERATE_COMMAND} は init 用の --behavior-pack / --resource-pack / ${INSTALL_FLAG} を受け付けません。`,
+        `[FAIL] ${GENERATE_COMMAND} は init 用の --behavior-pack / --resource-pack / ${INSTALL_FLAG} / ` +
+          `${REGISTER_UI_DEFS_FLAG} を受け付けません。`,
       );
       err('');
       err(USAGE);
@@ -1345,8 +1785,15 @@ function main(argv) {
   }
 
   const installRequested = parsed.values['install-resource-pack'];
+  const registerUiDefs = parsed.values['register-ui-defs'];
   const rawBehaviorPack = parsed.values['behavior-pack'];
   const rawResourcePack = parsed.values['resource-pack'];
+  if (registerUiDefs && !installRequested) {
+    err(`[FAIL] ${REGISTER_UI_DEFS_FLAG} は ${INSTALL_FLAG} と併用してください。`);
+    err('');
+    err(USAGE);
+    return 1;
+  }
   if (!rawResourcePack || (!installRequested && !rawBehaviorPack)) {
     err(
       installRequested
@@ -1378,7 +1825,7 @@ function main(argv) {
         uiDefs: null,
       };
     } else {
-      installResult = applyTemplate(resourcePack);
+      installResult = applyTemplate(resourcePack, { registerUiDefs });
     }
   }
   finalizeReport(report, installResult);
@@ -1400,4 +1847,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   process.exitCode = main(process.argv.slice(2));
 }
 
-export { generateResourcePack, placeFileWithoutOverwrite };
+export { applyTemplate, generateResourcePack, placeFileWithoutOverwrite };
