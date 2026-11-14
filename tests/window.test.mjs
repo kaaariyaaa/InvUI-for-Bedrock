@@ -2974,6 +2974,136 @@ test("a failed size-changing swap keeps the old screen and restores its state", 
   assert.deepEqual(closeReasons, ["PlayerClosed"]);
 });
 
+test("a failed size-changing swap restores the old GUI and state before reporting", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const observed = [];
+  const createContainer = adapter.createContainer.bind(adapter);
+  let creates = 0;
+  adapter.createContainer = (options) => {
+    creates += 1;
+    if (creates === 2) {
+      throw new Error("create failed");
+    }
+    return createContainer(options);
+  };
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["ab", "cd"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (context.operation !== "guiChange") {
+        return;
+      }
+      // The failed swap must already be rolled back: this handler sees the
+      // screen the player still sees, and a recovery write it makes must not
+      // be discarded by a later rollback.
+      observed.push({
+        upperGui: window.upperGui,
+        status: window.status,
+        selection: window.getState().selection,
+      });
+      window.setState({ selection: "recovered" });
+    })
+    .build();
+
+  await window.open();
+  window.setState({ selection: "before", data: { coins: 3 } });
+  const container = adapter.containers[0];
+
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui);
+  assert.equal(window.container, container);
+  assert.equal(adapter.containers.length, 1, "no replacement screen is shown");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "guiChange");
+  assert.match(errors[0].error.message, /create failed/);
+  assert.deepEqual(observed, [
+    { upperGui: oldGui, status: "open", selection: "before" },
+  ]);
+  assert.deepEqual(
+    window.getState(),
+    { selection: "recovered", data: { coins: 3 } },
+    "the error handler's recovery write survives the failed swap",
+  );
+  window.close("PlayerClosed");
+});
+
+test("an error handler that reopens after a failed size swap keeps the old GUI", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const createContainer = adapter.createContainer.bind(adapter);
+  let creates = 0;
+  adapter.createContainer = (options) => {
+    creates += 1;
+    if (creates === 2) {
+      throw new Error("create failed");
+    }
+    return createContainer(options);
+  };
+  const oldGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:old")) },
+  });
+  const bigger = Gui.normal({
+    structure: ["ab", "cd"],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  let reopened;
+  let reopening = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(oldGui)
+    .setStateManager(new StateManager())
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push({ error, context });
+      if (reopening || context.operation !== "guiChange") {
+        return;
+      }
+      // Recover from the failed swap with a fresh open. The rejected candidate
+      // never reached the screen, so the reopen must use the old GUI.
+      reopening = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  window.setUpperGui(bigger);
+  for (let i = 0; i < 20 && !reopening; i += 1) {
+    await tick();
+  }
+  await reopened;
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(window.upperGui, oldGui, "the failed candidate never took effect");
+  assert.equal(window.container.size, 9);
+  assert.equal(adapter.containers.length, 2);
+  assert.equal(adapter.containers[1].size, 9, "the reopen shows the old size");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "guiChange");
+  window.close("PlayerClosed");
+});
+
 test("a size-changing swap with another live shared registration is refused", async () => {
   const manager = new StateManager();
   const key = "shared-size";

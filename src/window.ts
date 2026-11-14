@@ -1682,11 +1682,20 @@ export class Window {
    * closed, so a render failure leaves the old screen showing. Only after that
    * is the old screen closed and the new one opened. Open and close handlers do
    * not run again for this internal reopen.
+   *
+   * `reportBeforeCloseFailure` is false when the caller restores more than the
+   * container on a failure that leaves the old screen showing (the
+   * size-changing GUI swap also restores the GUI and state registration). The
+   * caller then reports the error after that restore, so an error handler that
+   * reads or writes the Window sees the old GUI and the registration the screen
+   * still shows; it cannot discard the failed candidate or its own state write.
+   * A failure after the old screen was closed is always reported here.
    */
   async #regenerateContainer(
     title: string,
     layout: ResolvedGuiLayout,
     operation: string,
+    reportBeforeCloseFailure = true,
   ): Promise<void> {
     const generation = this.#generation;
     const previousTitle = this.#title;
@@ -1701,7 +1710,9 @@ export class Window {
     try {
       nextContainer = this.#adapter.createContainer(options);
     } catch (error) {
-      this.#report(error, operation);
+      if (reportBeforeCloseFailure) {
+        this.#report(error, operation);
+      }
       throw error;
     }
 
@@ -1722,10 +1733,9 @@ export class Window {
       await this.#renderAll(generation);
     } catch (error) {
       // #renderAll normally reports per-slot failures instead of throwing. If
-      // it does throw, the old screen is still showing: restore it and report
-      // the change as not applied. A close or reopen during the render owns
-      // the Window now; restoring then would resurrect a torn-down screen.
-      this.#report(error, operation);
+      // it does throw, the old screen is still showing: restore it, then report
+      // the change as not applied. A close or reopen during the render owns the
+      // Window now; restoring then would resurrect a torn-down screen.
       if (
         generation === this.#generation &&
         this.#status === "open" &&
@@ -1738,6 +1748,9 @@ export class Window {
         this.#title = previousTitle;
         this.#applyLayout(previousLayout);
         this.#scheduleRefresh();
+      }
+      if (reportBeforeCloseFailure) {
+        this.#report(error, operation);
       }
       throw error;
     }
@@ -2039,10 +2052,7 @@ export class Window {
       this.#revalidateStateRanges = false;
       next = this.#resolveCurrentState(nextHandle, true);
     } catch (error) {
-      this.#report(error, "guiChange");
-      if (generation === this.#generation && this.#status === "open") {
-        this.#rollbackGuiSizeSwap(previousGui, previousState);
-      }
+      this.#failGuiSizeSwap(error, previousGui, previousState, generation);
       return;
     }
     if (generation !== this.#generation || this.#status !== "open") {
@@ -2058,15 +2068,14 @@ export class Window {
       return;
     }
     try {
-      await this.#regenerateContainer(this.title, next, "guiChange");
-    } catch {
-      // #regenerateContainer reported the failure and restored the previous
-      // container and layout. Restore the GUI and registration so the screen
-      // still shown is described by the acquired state; a failure while doing
-      // so fails closed instead of leaving the two out of step.
-      if (generation === this.#generation && this.#status === "open") {
-        this.#rollbackGuiSizeSwap(previousGui, previousState);
-      }
+      // The old container is restored by #regenerateContainer when the failure
+      // leaves the old screen showing; this caller restores the GUI and state
+      // registration before reporting, so the error handler sees the Window the
+      // player still sees. A failure after the old screen was closed is
+      // reported (and failed closed) there instead.
+      await this.#regenerateContainer(this.title, next, "guiChange", false);
+    } catch (error) {
+      this.#failGuiSizeSwap(error, previousGui, previousState, generation);
     }
   }
 
@@ -2221,6 +2230,36 @@ export class Window {
     }
     this.#revalidateStateRanges = true;
     this.#scheduleRefresh();
+  }
+
+  /**
+   * Repair a size-changing swap that failed while the old screen was still
+   * showing, then report it.
+   *
+   * The repair must finish before the report: the error handler may read the
+   * Window, write state, or close and reopen it. Reporting first would let it
+   * observe the GUI and state registration that were never applied, discard
+   * the write during the later rollback, or reopen into the failed candidate.
+   * The report is delivered only while the generation that owned the swap still
+   * shows the old GUI; a handler that already started a newer generation keeps
+   * the original error from reaching it. A restore failure inside the rollback
+   * reports its own error and fails closed, and the original is still reported
+   * because no newer screen exists to disturb.
+   */
+  #failGuiSizeSwap(
+    error: unknown,
+    previousGui: Gui,
+    previousState: StateSnapshot,
+    generation: number,
+  ): void {
+    if (generation !== this.#generation || this.#status !== "open") {
+      return;
+    }
+    this.#rollbackGuiSizeSwap(previousGui, previousState);
+    // `closed` means the rollback failed to restore and failed closed.
+    if (generation === this.#generation || this.status === "closed") {
+      this.#report(error, "guiChange");
+    }
   }
 
   /**
