@@ -559,6 +559,73 @@ test("Window.mergedBuilder still requires viewer and GUI", () => {
   assert.throws(() => Window.mergedBuilder().setViewer(player).build(), /setUpperGui/);
 });
 
+test("setLowerGui keeps a logical association that open never renders", async () => {
+  const upper = Gui.normal({ structure: ["ab"] });
+  // Three rows: if this leaked into the container, the size would be 27.
+  const lower = Gui.normal({ structure: ["abc", "abc", "abc"] });
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(upper)
+    .setLowerGui(lower)
+    .setContainerAdapter(adapter)
+    .build();
+
+  assert.equal(window.upperGui, upper);
+  assert.equal(window.lowerGui, lower);
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(window.container, adapter.containers[0]);
+  assert.equal(window.container.size, 9); // the upper GUI's one row only
+  assert.equal(adapter.opened.length, 1);
+
+  window.close("PlayerClosed");
+});
+
+test("Window.setLowerGui swaps the reference without rendering or rebuilding", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["ab"] }))
+    .setContainerAdapter(adapter)
+    .build();
+  await window.open();
+
+  const container = window.container;
+  const upper = window.upperGui;
+  let writes = 0;
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes += 1;
+    setItem(slot, item);
+  };
+
+  // The lower GUI is valid but must never be resolved or subscribed to.
+  const lower = {
+    resolve() {
+      throw new Error("the lower GUI must not be resolved");
+    },
+    subscribe() {
+      throw new Error("the lower GUI must not be subscribed to");
+    },
+  };
+  window.setLowerGui(lower);
+
+  assert.equal(window.lowerGui, lower);
+  assert.equal(window.upperGui, upper);
+  assert.equal(window.container, container);
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers.length, 1);
+  assert.equal(adapter.opened.length, 1);
+  assert.equal(writes, 0);
+
+  assert.throws(() => window.setLowerGui(), /lower GUI/);
+  assert.throws(() => window.setLowerGui({}), /lower GUI/);
+  window.close("PlayerClosed");
+});
+
 test("real adapter opens and closes screens through VirtualContainer.open/close", async () => {
   const adapter = new MinecraftVirtualContainerAdapter();
   assert.equal(adapter.canOpenScreens, true);
