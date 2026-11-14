@@ -1,5 +1,7 @@
 import type { ItemStack } from "@minecraft/server";
 
+import { createJsonCloner, hasOwn, isPlainObject } from "./json.js";
+
 export interface InventoryChange {
   readonly inventory: Inventory;
   readonly slot: number;
@@ -76,120 +78,17 @@ function isCloneableItemStack(value: unknown): value is ItemStack {
   );
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function hasOwn(value: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
-const MAX_JSON_DEPTH = 64;
-
 /**
- * Validates and deep-clones a JSON value. This mirrors `state.ts` and rejects
- * what `JSON.stringify` silently rewrites: nested `undefined` (key dropped),
- * non-finite numbers and array holes (turned into `null`), `toJSON`
- * (invoked), accessors, and circular references (throw on stringify). The
- * result shares no objects or arrays with the input.
+ * Strict JSON clone for encoded item values and snapshots: rejects what
+ * `JSON.stringify` silently rewrites or drops (nested `undefined`, non-finite
+ * numbers, sparse arrays, `toJSON`, accessors, symbol/non-index keys,
+ * non-enumerable properties, circular references). See `json.ts` for the
+ * shared walk.
  */
-function cloneJson(
-  value: unknown,
-  path: string,
-  ancestors: Set<object>,
-  depth: number,
-): unknown {
-  if (depth > MAX_JSON_DEPTH) {
-    throw new TypeError(`InvUI: ${path} is nested too deeply.`);
-  }
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError(`InvUI: ${path} contains a non-finite number.`);
-    }
-    return value;
-  }
-  if (typeof value !== "object") {
-    throw new TypeError(`InvUI: ${path} contains a non-JSON value (${typeof value}).`);
-  }
-
-  const object = value as object;
-  if (ancestors.has(object)) {
-    throw new TypeError(`InvUI: ${path} contains a circular reference.`);
-  }
-  ancestors.add(object);
-
-  let cloned: unknown;
-  if (Array.isArray(object)) {
-    // JSON only sees index 0..length-1 and never a symbol or extra own key, so
-    // accepting those would drop data; reading `object[index]` would also run
-    // accessors. Require exactly the dense indices plus the intrinsic length.
-    if (Object.getOwnPropertySymbols(object).length > 0) {
-      throw new TypeError(`InvUI: ${path} contains symbol keys.`);
-    }
-    if (Object.getOwnPropertyNames(object).length !== object.length + 1) {
-      throw new TypeError(`InvUI: ${path} contains non-index array keys.`);
-    }
-    const array: unknown[] = [];
-    for (let index = 0; index < object.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(object, String(index));
-      if (descriptor === undefined) {
-        throw new TypeError(`InvUI: ${path} contains a sparse array.`);
-      }
-      if (!("value" in descriptor)) {
-        throw new TypeError(`InvUI: ${path}[${index}] must be a data property.`);
-      }
-      array.push(
-        cloneJson(descriptor.value, `${path}[${index}]`, ancestors, depth + 1),
-      );
-    }
-    cloned = array;
-  } else {
-    if (!isPlainObject(object)) {
-      throw new TypeError(
-        `InvUI: ${path} must contain only plain objects and arrays.`,
-      );
-    }
-    if (Object.getOwnPropertySymbols(object).length > 0) {
-      throw new TypeError(`InvUI: ${path} contains symbol keys.`);
-    }
-    if (Object.getOwnPropertyNames(object).length !== Object.keys(object).length) {
-      throw new TypeError(`InvUI: ${path} contains a non-enumerable property.`);
-    }
-    const record: Record<string, unknown> = {};
-    for (const key of Object.keys(object)) {
-      const descriptor = Object.getOwnPropertyDescriptor(object, key);
-      if (descriptor === undefined || !("value" in descriptor)) {
-        throw new TypeError(`InvUI: ${path}.${key} must be a data property.`);
-      }
-      Object.defineProperty(record, key, {
-        value: cloneJson(
-          descriptor.value,
-          `${path}.${key}`,
-          ancestors,
-          depth + 1,
-        ),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    }
-    cloned = record;
-  }
-
-  ancestors.delete(object);
-  return cloned;
-}
+const cloneJson = createJsonCloner({
+  fail: (message) => new TypeError(`InvUI: ${message}.`),
+  strict: true,
+});
 
 /** In-memory Inventory. Not to be confused with Script API VirtualContainer. */
 export class VirtualInventory implements Inventory {
@@ -256,8 +155,6 @@ export class VirtualInventory implements Inventory {
       item: cloneJson(
         codec.encode(item),
         `encoded item for slot ${slot}`,
-        new Set(),
-        0,
       ) as T,
     }));
     return { version: INVENTORY_SNAPSHOT_VERSION, size: this.size, slots };
@@ -275,7 +172,7 @@ export class VirtualInventory implements Inventory {
     codec: InventoryItemCodec<T>,
   ): VirtualInventory {
     assertCodec(codec);
-    const data = cloneJson(snapshot, "inventory snapshot", new Set(), 0);
+    const data = cloneJson(snapshot, "inventory snapshot");
     if (!isPlainObject(data)) {
       throw new TypeError("InvUI: inventory snapshot must be an object.");
     }

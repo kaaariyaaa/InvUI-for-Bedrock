@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import {
   BEDROCK_MAX_DYNAMIC_PROPERTY_IDENTIFIER_LENGTH,
@@ -7,7 +10,28 @@ import {
   BedrockStoreError,
   BedrockWorldStateStore,
 } from "../src/bedrock-store.ts";
-import { STATE_STORAGE_VERSION, StateManager } from "../src/state.ts";
+
+// Match window.test.mjs: allow src TS imports of "./json.js" before build.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      specifier.endsWith(".js") &&
+      context.parentURL?.startsWith("file:") &&
+      context.parentURL.includes("/src/")
+    ) {
+      const target = new URL(specifier, context.parentURL);
+      if (!existsSync(fileURLToPath(target))) {
+        return {
+          url: new URL(specifier.replace(/\.js$/, ".ts"), context.parentURL).href,
+          shortCircuit: true,
+        };
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const { STATE_STORAGE_VERSION, StateManager } = await import("../src/state.ts");
 
 /**
  * Stand-in for the injected world. Mirrors the two dynamic-property calls and

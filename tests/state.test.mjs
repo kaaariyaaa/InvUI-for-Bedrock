@@ -1,15 +1,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
-import {
+// Match window.test.mjs: allow src TS imports of "./json.js" before build.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      specifier.endsWith(".js") &&
+      context.parentURL?.startsWith("file:") &&
+      context.parentURL.includes("/src/")
+    ) {
+      const target = new URL(specifier, context.parentURL);
+      if (!existsSync(fileURLToPath(target))) {
+        return {
+          url: new URL(specifier.replace(/\.js$/, ".ts"), context.parentURL).href,
+          shortCircuit: true,
+        };
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   STATE_STORAGE_VERSION,
   StateConflictError,
   StateCorruptionError,
   StateManager,
   StateReleasedError,
   StateValidationError,
-} from "../src/state.ts";
+} = await import("../src/state.ts");
 
 class MemoryStore {
   constructor(initial = {}) {

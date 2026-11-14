@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import {
   Gui,
@@ -10,7 +13,28 @@ import {
   Structure,
   TabGui,
 } from "../src/gui.ts";
-import { InventoryLink, VirtualInventory } from "../src/inventory.ts";
+
+// Match window.test.mjs: allow src TS imports of "./json.js" before build.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      specifier.endsWith(".js") &&
+      context.parentURL?.startsWith("file:") &&
+      context.parentURL.includes("/src/")
+    ) {
+      const target = new URL(specifier, context.parentURL);
+      if (!existsSync(fileURLToPath(target))) {
+        return {
+          url: new URL(specifier.replace(/\.js$/, ".ts"), context.parentURL).href,
+          shortCircuit: true,
+        };
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const { InventoryLink, VirtualInventory } = await import("../src/inventory.ts");
 
 const item = (id) => ({ id });
 const ids = (layout) => layout.slots.map((slot) => (slot === null ? null : (slot.id ?? slot)));

@@ -6,6 +6,13 @@
  * the state machine testable outside Minecraft.
  */
 
+import {
+  createJsonCloner,
+  hasOwn,
+  isPlainObject,
+  MAX_JSON_DEPTH,
+} from "./json.js";
+
 export type StateScope = "player" | "shared";
 export type StateLifetime = "window" | "session" | "persistent";
 
@@ -305,19 +312,6 @@ const REMOVE_KEYS = new Set(["scope", "key", "ownerId"]);
 const MANAGER_KEYS = new Set(["onError"]);
 const EMPTY_STATE: StateSnapshot = Object.freeze({});
 const EMPTY_CHANGED: readonly GuiStateField[] = Object.freeze([]);
-const MAX_JSON_DEPTH = 64;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function hasOwn(value: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
 
 function requireNonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -347,98 +341,14 @@ function requireSelection(value: unknown, label: string): string {
 }
 
 /**
- * Validates, deep-clones, and deep-freezes a JSON value. Only plain objects,
- * arrays, strings, finite numbers, booleans, and null are accepted.
+ * Validated, deep-cloned, and deep-frozen copy of a JSON value. Container
+ * shapes are read the way `JSON.stringify` reads them; unlike `inventory.ts`
+ * this copy is frozen. See `json.ts` for the shared walk.
  */
-function cloneJsonValue(
-  value: unknown,
-  path: string,
-  ancestors: Set<object>,
-  depth: number,
-): unknown {
-  if (depth > MAX_JSON_DEPTH) {
-    throw new StateValidationError(`${path} is nested too deeply`);
-  }
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new StateValidationError(`${path} contains a non-finite number`);
-    }
-    return value;
-  }
-  if (typeof value !== "object") {
-    throw new StateValidationError(
-      `${path} contains a non-JSON value (${typeof value})`,
-    );
-  }
-
-  const object = value as object;
-  if (ancestors.has(object)) {
-    throw new StateValidationError(`${path} contains a circular reference`);
-  }
-  ancestors.add(object);
-
-  let cloned: unknown;
-  if (Array.isArray(object)) {
-    const array: unknown[] = [];
-    for (let index = 0; index < object.length; index += 1) {
-      if (!(index in object)) {
-        throw new StateValidationError(`${path} contains a sparse array`);
-      }
-      array.push(
-        cloneJsonValue(object[index], `${path}[${index}]`, ancestors, depth + 1),
-      );
-    }
-    cloned = Object.freeze(array);
-  } else {
-    if (!isPlainObject(object)) {
-      throw new StateValidationError(
-        `${path} must contain only plain objects and arrays`,
-      );
-    }
-    if (Object.getOwnPropertySymbols(object).length > 0) {
-      throw new StateValidationError(`${path} contains symbol keys`);
-    }
-    const record: Record<string, unknown> = {};
-    for (const key of Object.keys(object)) {
-      const descriptor = Object.getOwnPropertyDescriptor(object, key);
-      if (descriptor === undefined || !("value" in descriptor)) {
-        throw new StateValidationError(`${path}.${key} must be a data property`);
-      }
-      if (
-        descriptor.value === undefined ||
-        typeof descriptor.value === "function" ||
-        typeof descriptor.value === "symbol" ||
-        typeof descriptor.value === "bigint"
-      ) {
-        throw new StateValidationError(
-          `${path}.${key} contains a non-JSON value`,
-        );
-      }
-      Object.defineProperty(record, key, {
-        value: cloneJsonValue(
-          descriptor.value,
-          `${path}.${key}`,
-          ancestors,
-          depth + 1,
-        ),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    }
-    cloned = Object.freeze(record);
-  }
-
-  ancestors.delete(object);
-  return cloned;
-}
+const cloneJsonValue = createJsonCloner({
+  fail: (message) => new StateValidationError(message),
+  freeze: true,
+});
 
 function isCanonicalIndex(key: string): boolean {
   return /^(0|[1-9][0-9]*)$/.test(key) && Number.isSafeInteger(Number(key));
@@ -514,7 +424,7 @@ function cloneState(
     state.selection = requireSelection(input.selection, `${label}.selection`);
   }
   if (hasOwn(input, "data")) {
-    state.data = cloneJsonValue(input.data, `${label}.data`, new Set(), 0);
+    state.data = cloneJsonValue(input.data, `${label}.data`);
   }
   if (hasOwn(input, "tabs")) {
     state.tabs = cloneStateMap(
