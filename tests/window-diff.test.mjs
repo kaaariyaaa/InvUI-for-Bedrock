@@ -286,3 +286,38 @@ test("multiple Item notifications in one timing render the slot once", async () 
   assert.equal(container.items[0].typeId, "minecraft:third");
   window.close();
 });
+
+test("a notification batched with a setUpperGui swap renders only the new GUI", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let oldCalls = 0;
+  let newCalls = 0;
+  const oldItem = Item.simple(() => {
+    oldCalls += 1;
+    return stack("minecraft:old");
+  });
+  const newItem = Item.simple(() => {
+    newCalls += 1;
+    return stack("minecraft:new");
+  });
+  const window = buildWindow(
+    Gui.normal({ structure: ["a"], ingredients: { a: oldItem } }),
+    adapter,
+  );
+
+  await window.open();
+  const container = adapter.containers[0];
+  oldCalls = 0;
+  newCalls = 0;
+
+  // Both happen before the batched refresh runs: the swap replaces the pending
+  // notification, so the old element must not render and the new one renders once.
+  oldItem.notifyWindows();
+  window.setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: newItem } }));
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:new");
+  assert.equal(oldCalls, 0, "the old element must not render after the swap");
+  assert.equal(newCalls, 1, "the full refresh renders the new slot once");
+  window.close();
+});
