@@ -12,11 +12,18 @@ const closeCallbacks = new Set();
 const itemChangeCallbacks = new Set();
 const chatSendCallbacks = new Set();
 const playerLeaveCallbacks = new Set();
+const entityDieCallbacks = new Set();
 export const scheduledRuns = [];
 
 export function emitPlayerLeave(playerId) {
   for (const callback of [...playerLeaveCallbacks]) {
     callback({ playerId, playerName: playerId });
+  }
+}
+
+export function emitEntityDie(deadEntity) {
+  for (const callback of [...entityDieCallbacks]) {
+    callback({ deadEntity });
   }
 }
 
@@ -101,6 +108,15 @@ export const world = {
     },
   },
   afterEvents: {
+    entityDie: {
+      subscribe(callback) {
+        entityDieCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        entityDieCallbacks.delete(callback);
+      },
+    },
     playerLeave: {
       subscribe(callback) {
         playerLeaveCallbacks.add(callback);
@@ -199,6 +215,7 @@ const {
 const {
   createdContainers,
   emitChatSend,
+  emitEntityDie,
   emitPlayerLeave,
   emitVirtualContainerClose,
   emitVirtualContainerItemChange,
@@ -4334,4 +4351,126 @@ test("Windows keep working when world.afterEvents.playerLeave is absent", async 
   window.close();
   assert.equal(window.status, "closed");
   assert.equal(adapter.closed.length, 1);
+});
+
+test("entityDie closes only the dead viewer's Window with PlayerDied and releases it", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const otherCloseReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+  const otherWindow = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => otherCloseReasons.push(reason))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+  assert.equal(window.status, "open");
+
+  // A non-player, an untracked id, a missing entity, and an entity whose id
+  // cannot be read must not close anything.
+  emitEntityDie({ id: "minecraft:cow" });
+  emitEntityDie({ id: "p3" });
+  emitEntityDie(undefined);
+  emitEntityDie({
+    get id() {
+      throw new Error("invalid entity");
+    },
+  });
+  assert.equal(window.status, "open");
+  assert.deepEqual(closeReasons, []);
+  assert.equal(otherWindow.status, "open");
+
+  emitEntityDie({ id: player.id });
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["PlayerDied"]);
+  // The screen goes away with the player: no adapter close is requested.
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  // The normal close path released state and stopped chat routing.
+  assert.throws(() => window.getState(), /not open/);
+  const delayed = await sendChat(window, 0, 1);
+  assert.equal(delayed.cancel, true);
+
+  // A repeated death is a no-op; the other viewer is untouched.
+  emitEntityDie({ id: player.id });
+  assert.deepEqual(closeReasons, ["PlayerDied"]);
+  assert.equal(otherWindow.status, "open");
+  assert.deepEqual(otherCloseReasons, []);
+
+  otherWindow.close();
+});
+
+test("entityDie while a Window is opening closes it before a screen is shown", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const openHandlers = [];
+  let resolveProvider;
+  const item = Item.simple(
+    () =>
+      new Promise((resolve) => {
+        resolveProvider = resolve;
+      }),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addOpenHandler(() => openHandlers.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  const opening = window.open();
+  await Promise.resolve();
+  assert.equal(window.status, "opening");
+  const container = adapter.containers[0];
+  assert.ok(container, "container exists while providers are unresolved");
+
+  emitEntityDie({ id: player.id });
+  assert.equal(window.status, "closed");
+
+  // A provider that resolves after the death must not write into the container
+  // or open the screen.
+  resolveProvider(stack("minecraft:late"));
+  await opening;
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(adapter.opened.length, 0, "the screen must never be requested");
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(openHandlers, []);
+  assert.deepEqual(closeReasons, ["PlayerDied"]);
+  assert.equal(container.items[0], undefined, "a late provider must not write");
+  assert.throws(() => window.getState(), /not open/);
 });

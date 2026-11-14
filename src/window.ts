@@ -43,7 +43,17 @@
  * and element subscriptions, and adapter subscriptions through the normal
  * close path (generation checks intact). An environment without the event
  * (older API, test double) is detected once and Windows keep working without
- * the automatic close. This is NOT verified on a real device.
+ * the automatic close.
+ *
+ * `world.afterEvents.entityDie` closes the Window of its viewer with
+ * `PlayerDied` while it is still `opening` or already `open`. Only the dead
+ * entity's id is read and matched against the id captured at open, so a
+ * non-player death, another player, or an entity whose id cannot be read is
+ * ignored; the game's own `PlayerDied` close event is the fallback. It reuses
+ * the same close path and module-level subscription shape as `playerLeave`, and
+ * the adapter is not asked to close a screen that went away with the player.
+ * An environment without the event is detected separately and latches off.
+ * This is NOT verified on a real device.
  */
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
@@ -435,14 +445,16 @@ function invalidateChatInputWindow(window: Window): void {
 
 /**
  * Windows that are `opening` or `open` and must be closed when their viewer
- * leaves, one set shared by the module so a single `playerLeave` subscription
- * serves every Window. A Window is added when `open()` starts and removed by
- * `#teardown()`.
+ * leaves or dies, one set shared by the module so a single `playerLeave` and a
+ * single `entityDie` subscription serve every Window. A Window is added when
+ * `open()` starts and removed by `#teardown()`.
  */
 const leaveWindows = new Set<Window>();
 let playerLeaveSubscribed = false;
+let entityDieSubscribed = false;
 /** Latches the feature-detection failure, like the chat input bridge. */
 let playerLeaveUnavailable = false;
+let entityDieUnavailable = false;
 
 /**
  * Installs the `playerLeave` subscription on first use, or latches it off when
@@ -489,6 +501,61 @@ function ensurePlayerLeaveSubscription(): void {
       error,
     );
     playerLeaveUnavailable = true;
+  }
+}
+
+/**
+ * Installs the `entityDie` subscription on first use, or latches it off when the
+ * game API is absent. It is separate from `playerLeave`: either signal may be
+ * missing in an older API or a test double, and one must not disable the other.
+ * A Window still opens and closes normally without it.
+ */
+function ensureEntityDieSubscription(): void {
+  if (entityDieSubscribed || entityDieUnavailable) {
+    return;
+  }
+  let entityDie: typeof world.afterEvents.entityDie | undefined;
+  try {
+    entityDie = world.afterEvents?.entityDie;
+  } catch {
+    entityDie = undefined;
+  }
+  if (!entityDie || typeof entityDie.subscribe !== "function") {
+    entityDieUnavailable = true;
+    return;
+  }
+  try {
+    entityDie.subscribe((event) => {
+      // Only the id is read: the Window matches it against the id captured at
+      // open, like playerLeave, and a dead entity whose id cannot be read is
+      // skipped (the game's own PlayerDied close event still closes the Window).
+      let entityId: string | undefined;
+      try {
+        entityId = event?.deadEntity?.id;
+      } catch {
+        return;
+      }
+      if (typeof entityId !== "string" || entityId.length === 0) {
+        return;
+      }
+      // Snapshot: a close handler may open or close other Windows while this
+      // loop runs. Each Window re-checks its own status and generation.
+      for (const window of [...leaveWindows]) {
+        try {
+          window._onViewerDied(entityId);
+        } catch (error) {
+          // One Window's close handler must not keep the other Windows open.
+          console.error("InvUI: closing a Window after its viewer died failed.", error);
+        }
+      }
+    });
+    entityDieSubscribed = true;
+  } catch (error) {
+    console.error(
+      "InvUI: entityDie subscription could not be installed; Windows will not close automatically when a player dies.",
+      error,
+    );
+    entityDieUnavailable = true;
   }
 }
 
@@ -809,7 +876,10 @@ export class Window {
   #status: WindowStatus = "created";
   /** Per-open chat input session id; see `_inputSessionId`. */
   #inputSessionId: string | undefined;
-  /** Viewer id captured at registration, because playerLeave carries only an id. */
+  /**
+   * Viewer id captured at registration: playerLeave and entityDie are matched
+   * against it rather than against a possibly invalid player object.
+   */
   #viewerId: string | undefined;
   #stateScope: StateScope;
   #stateKey: string | undefined;
@@ -972,6 +1042,27 @@ export class Window {
     this.#performClose("PlayerLeft", false);
   }
 
+  /**
+   * Internal: close this Window because its viewer died.
+   *
+   * `entityDie` carries the dead entity but only its id is read, matched against
+   * the id captured when this open cycle registered, so a non-player death or
+   * another player's death is ignored. The adapter is not asked to close: the
+   * game removes the screen with the player, and an `opening` Window never
+   * requested one. Both statuses go through the normal close path, so
+   * subscriptions, state handle, and layout are released and in-flight renders
+   * are discarded by the existing generation checks.
+   */
+  _onViewerDied(playerId: string): void {
+    if (this.#viewerId !== playerId) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("PlayerDied", false);
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -1011,8 +1102,8 @@ export class Window {
     const generation = ++this.#generation;
 
     try {
-      // Register before the screen can be shown so a leave during `opening`
-      // closes this Window too. A synchronous leave event delivered by the
+      // Register before the screen can be shown so a leave or death during
+      // `opening` closes this Window too. A synchronous event delivered by the
       // subscription closes it here; open() then resolves as closed.
       this.#registerForPlayerLeave();
       if (this.#status !== "opening" || generation !== this.#generation) {
@@ -1709,10 +1800,10 @@ export class Window {
   }
 
   /**
-   * Track this Window for automatic close when its viewer leaves. The viewer
-   * id is read here, before the player can go invalid; if it cannot be read the
-   * Window is simply not auto-closed, so opening still works (fail closed for
-   * this feature only).
+   * Track this Window for automatic close when its viewer leaves or dies. The
+   * viewer id is read here, before the player can go invalid; if it cannot be
+   * read the Window is simply not auto-closed, so opening still works (fail
+   * closed for this feature only).
    */
   #registerForPlayerLeave(): void {
     try {
@@ -1725,6 +1816,7 @@ export class Window {
     }
     leaveWindows.add(this);
     ensurePlayerLeaveSubscription();
+    ensureEntityDieSubscription();
   }
 
   /**
