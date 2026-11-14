@@ -2476,6 +2476,14 @@ export class Window {
       return;
     }
     this.#applyLayout(layout);
+    // Moving the element subscriptions reports a failed subscribe/unsubscribe,
+    // and that handler may close and reopen the Window. The rest of this pass
+    // belongs to the generation that is gone: starting its render batch would
+    // bump the render epoch and discard the reopened generation's in-flight
+    // provider results, leaving its screen blank.
+    if (generation !== this.#generation || this.#status !== "open") {
+      return;
+    }
     try {
       await this.#renderAll(generation);
     } catch (error) {
@@ -3780,9 +3788,23 @@ export class Window {
    * the period would never tick.
    */
   #subscribeToUpdates(): void {
+    const generation = this.#generation;
     const layout = this.#layout;
     const previous = this.#elementSubscriptions;
     const next = new Map<number, { element: SlotElement; unsubscribe: () => void }>();
+    // A report from this pass may run a handler that closes and reopens: the
+    // subscriptions made for the old layout belong to the generation that is
+    // gone. Release them instead of replacing the reopened generation's own
+    // subscriptions with a stale map.
+    const abandon = (): void => {
+      for (const { unsubscribe } of next.values()) {
+        try {
+          unsubscribe();
+        } catch {
+          // The generation is gone; its failure is not the reopen's to report.
+        }
+      }
+    };
     if (layout) {
       for (let slot = 0; slot < layout.slots.length; slot += 1) {
         const element = layout.slots[slot];
@@ -3806,6 +3828,10 @@ export class Window {
           // A broken element subscription must not abort the state-update path.
           this.#report(error, "subscribe", slot);
         }
+        if (generation !== this.#generation) {
+          abandon();
+          return;
+        }
       }
     }
     // Whatever remains refers to an element that is no longer in that slot.
@@ -3814,7 +3840,15 @@ export class Window {
         unsubscribe();
       } catch (error) {
         this.#report(error, "unsubscribe");
+        if (generation !== this.#generation) {
+          abandon();
+          return;
+        }
       }
+    }
+    if (generation !== this.#generation) {
+      abandon();
+      return;
     }
     this.#elementSubscriptions = next;
   }

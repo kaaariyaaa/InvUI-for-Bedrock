@@ -7578,3 +7578,157 @@ test("a reopen from a replaced container's unsubscribe failure keeps the reopene
   );
   window.close();
 });
+
+test("a reopen from an element unsubscribe error keeps the reopened element subscriptions", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let subscribes = 0;
+  let unsubscribes = 0;
+  let failUnsubscribe = false;
+  const makeElement = () => ({
+    resolve: () => stack("minecraft:e"),
+    subscribe() {
+      subscribes += 1;
+      let active = true;
+      return () => {
+        if (!active) {
+          return;
+        }
+        active = false;
+        unsubscribes += 1;
+        if (failUnsubscribe) {
+          failUnsubscribe = false;
+          throw new Error("element unsubscribe failed");
+        }
+      };
+    },
+  });
+  const first = makeElement();
+  const second = makeElement();
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: first } });
+  let reopened;
+  let handling = false;
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (handling || context.operation !== "unsubscribe") {
+        return;
+      }
+      handling = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  assert.equal(subscribes, 1);
+  failUnsubscribe = true;
+  gui.setIngredient("a", second);
+  await tick();
+  for (let i = 0; i < 20 && subscribes < 3; i += 1) {
+    await tick();
+  }
+  assert.ok(reopened, "the handler reopened");
+  await reopened;
+  await tick();
+  assert.equal(window.status, "open");
+  window.close("PlayerClosed");
+  assert.equal(
+    unsubscribes,
+    subscribes,
+    `leaked element subscription: ${subscribes} subscribes vs ${unsubscribes} unsubscribes`,
+  );
+});
+
+test("a reopen from a subscribe error during a refresh keeps the reopened render", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const pending = [];
+  let subscribes = 0;
+  let unsubscribes = 0;
+  const first = {
+    resolve: () => stack("minecraft:first"),
+    subscribe() {
+      subscribes += 1;
+      let active = true;
+      return () => {
+        if (active) {
+          active = false;
+          unsubscribes += 1;
+        }
+      };
+    },
+  };
+  let failSubscribe = true;
+  const second = {
+    resolve: () =>
+      new Promise((resolve) => pending.push(() => resolve(stack("minecraft:second")))),
+    subscribe() {
+      if (failSubscribe) {
+        failSubscribe = false;
+        throw new Error("element subscribe failed");
+      }
+      subscribes += 1;
+      let active = true;
+      return () => {
+        if (active) {
+          active = false;
+          unsubscribes += 1;
+        }
+      };
+    },
+  };
+  const gui = Gui.normal({ structure: ["a"], ingredients: { a: first } });
+  const errors = [];
+  let reopened;
+  let ready = false;
+  let handling = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (!ready || handling || context.operation !== "subscribe") {
+        return;
+      }
+      handling = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  assert.equal(window.container.items[0]?.typeId, "minecraft:first");
+
+  // A GUI change re-renders; the replacement element throws from subscribe, and
+  // the handler closes and reopens while the old refresh pass is still running.
+  ready = true;
+  gui.setIngredient("a", second);
+  for (let i = 0; i < 20 && pending.length === 0; i += 1) {
+    await tick();
+  }
+  assert.ok(reopened, "the handler reopened");
+  assert.equal(pending.length, 1, "the reopened generation is rendering");
+
+  pending[0]();
+  await reopened;
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(
+    window.container.items[0]?.typeId,
+    "minecraft:second",
+    "the reopened generation's resolved item is on screen",
+  );
+  window.close("PlayerClosed");
+  assert.equal(
+    unsubscribes,
+    subscribes,
+    `leaked element subscription: ${subscribes} subscribes vs ${unsubscribes} unsubscribes`,
+  );
+});
