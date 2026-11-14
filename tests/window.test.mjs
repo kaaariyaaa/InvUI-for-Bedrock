@@ -4030,6 +4030,244 @@ test("closing during a title regeneration closes the shown old screen", async ()
   assert.equal(window.status, "closed");
 });
 
+test("a layout size change while open regenerates the container and keeps state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  let opened = 0;
+  const closeReasons = [];
+  const errors = [];
+  const tab0 = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:tab0")) },
+  });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: { b: Item.simple(() => stack("minecraft:tab1")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Sized")
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .addOpenHandler(() => opened += 1)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+  assert.equal(first.size, 9);
+  assert.equal(first.items[0].typeId, "minecraft:tab0");
+
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers.length, 2, "the new size needs a new VirtualContainer");
+  const second = adapter.containers[1];
+  assert.notEqual(second, first);
+  assert.equal(second.size, 27);
+  assert.equal(second.title, "Sized");
+  assert.equal(window.container, second);
+  assert.equal(
+    second.items[0].typeId,
+    "minecraft:tab1",
+    "the replacement is rendered before it is shown",
+  );
+  assert.equal(second.items[9].typeId, "minecraft:tab1");
+  assert.equal(second.items[18].typeId, "minecraft:tab1");
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container),
+    [first],
+    "the previous screen is closed exactly once",
+  );
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first, second]);
+  assert.equal(opened, 1, "an internal regeneration is not a new open");
+  assert.deepEqual(closeReasons, [], "an internal regeneration is not a close");
+  assert.deepEqual(errors, []);
+  assert.equal(window.getState().tab, 1, "state survives the regeneration");
+
+  window.close("PlayerClosed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.equal(adapter.closed.length, 2);
+});
+
+test("a width change with the same container size is applied in place", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const tab0 = Gui.normal({
+    structure: ["a........", "........."],
+    ingredients: { a: Item.simple(() => stack("minecraft:wide")) },
+  });
+  const tab1 = Gui.normal({
+    structure: [".b.", "..."],
+    ingredients: { b: Item.simple(() => stack("minecraft:narrow")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const only = adapter.containers[0];
+  assert.equal(only.size, 18);
+  assert.equal(only.items[0].typeId, "minecraft:wide");
+
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(adapter.containers.length, 1, "the same container size is reused");
+  assert.equal(window.container, only);
+  assert.equal(only.items[0], undefined, "the removed wide slot is cleared");
+  assert.equal(only.items[1].typeId, "minecraft:narrow");
+  window.close();
+});
+
+test("width shrink clears the columns the previous tab used", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const tab0 = Gui.normal({
+    structure: ["a...c....", "........."],
+    ingredients: {
+      a: Item.simple(() => stack("minecraft:a")),
+      c: Item.simple(() => stack("minecraft:c")),
+    },
+  });
+  const tab1 = Gui.normal({
+    structure: [".b.", "..."],
+    ingredients: { b: Item.simple(() => stack("minecraft:b")) },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const only = adapter.containers[0];
+  assert.equal(only.size, 18);
+  assert.equal(only.items[4].typeId, "minecraft:c");
+
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(adapter.containers.length, 1, "the same container size is reused");
+  assert.deepEqual(
+    only.items.map((item) => item?.typeId),
+    [
+      undefined, "minecraft:b", undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+    ],
+    "only the narrow layout is visible",
+  );
+  window.close();
+});
+
+test("a failed size regeneration keeps the current container and reports resize", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const tab0 = Gui.normal({ structure: ["a"] });
+  const tab1 = Gui.normal({ structure: ["b", "b", "b"] });
+  const createContainer = adapter.createContainer.bind(adapter);
+  let creates = 0;
+  adapter.createContainer = (options) => {
+    creates += 1;
+    if (creates === 2) {
+      throw new Error("create failed");
+    }
+    return createContainer(options);
+  };
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20; i += 1) {
+    await tick();
+  }
+
+  assert.equal(window.status, "open");
+  assert.equal(adapter.containers.length, 1, "no replacement container was created");
+  assert.equal(window.container, first);
+  assert.deepEqual(adapter.closed, [], "the shown screen is not closed");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "resize");
+  assert.match(errors[0].error.message, /create failed/);
+  window.close();
+});
+
+test("closing during a size regeneration closes only the shown screen", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const tab0 = Gui.normal({ structure: ["a"] });
+  const tab1 = Gui.normal({
+    structure: ["b", "b", "b"],
+    ingredients: {
+      b: Item.simple(() =>
+        async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:b"),
+      ),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.tab({ tabs: [tab0, tab1] }))
+    .setStateManager(new StateManager())
+    .setStateLifetime("session")
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+
+  async = true;
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 20 && adapter.containers.length < 2; i += 1) {
+    await tick();
+  }
+  const replacement = adapter.containers[1];
+  assert.ok(replacement, "the replacement container is created before the render finishes");
+  assert.equal(window.container, replacement);
+
+  window.close("PlayerClosed");
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+  assert.deepEqual(
+    adapter.closed.map((entry) => entry.container),
+    [first],
+    "the visible old screen is closed, not the replacement that was never shown",
+  );
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first]);
+
+  pending[0](stack("minecraft:b"));
+  for (let i = 0; i < 8; i += 1) {
+    await tick();
+  }
+  assert.equal(window.status, "closed");
+  assert.deepEqual(adapter.opened.map((entry) => entry.container), [first]);
+});
+
 test("an open Window auto-connects chatSend to its own button slot", async () => {
   const viewer = { id: "chat-auto", name: "Chatter" };
   const clicks = [];

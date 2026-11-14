@@ -1073,6 +1073,13 @@ export class Window {
    * failed write is retried on the next pass.
    */
   #writeCache: SlotWriteCache | undefined;
+  /**
+   * Structure width the current container's physical slots were last laid out
+   * with. A narrower layout in the same container (same height) leaves the
+   * columns beyond its width stale, so `#renderAll` clears them when the width
+   * shrinks. Undefined means no layout has been rendered into this container.
+   */
+  #renderedWidth: number | undefined;
   #stateHandle: StateHandle | undefined;
   /** Schema token the current state handle was acquired with. */
   #stateSchema: string | undefined;
@@ -1107,8 +1114,11 @@ export class Window {
   #renderEpoch = 0;
   /** Set when state or GUI changes while `open()` is still resolving providers. */
   #refreshPending = false;
-  /** Serializes async title changes so two regenerations cannot overlap. */
-  #titleQueue: Promise<void> = Promise.resolve();
+  /**
+   * Serializes async container regenerations (title change, layout size change)
+   * so two of them cannot close a container the other is still using.
+   */
+  #regenerationQueue: Promise<void> = Promise.resolve();
   /**
    * Bumped for every `setTitle` request. A queued change that can only store
    * the title (the Window closed or reopened while it waited) is dropped when a
@@ -1362,6 +1372,7 @@ export class Window {
         // while opening) starts empty, so nothing is skipped against slots the
         // previous container owned.
         this.#writeCache = new SlotWriteCache();
+        this.#renderedWidth = undefined;
         return container;
       };
 
@@ -1486,10 +1497,10 @@ export class Window {
     // Two overlapping regenerations would each close a container the other is
     // still using, so run them in call order. Equality is checked when the turn
     // arrives, after any earlier change, so "B" then "A" settles on "A".
-    const run = this.#titleQueue.then(() =>
+    const run = this.#regenerationQueue.then(() =>
       this.#applyTitle(title, version, generation),
     );
-    this.#titleQueue = run.then(
+    this.#regenerationQueue = run.then(
       () => undefined,
       () => undefined,
     );
@@ -1520,19 +1531,31 @@ export class Window {
       }
       return;
     }
-    await this.#reopenWithTitle(title);
+    await this.#regenerateContainer(title, this.#layout, "titleChange");
   }
 
   /**
-   * Regenerate the container with a new title while the Window stays logically
-   * open. The caller (`setTitle`) has checked status, layout, and state handle.
+   * Regenerate the container while the Window stays logically open (design
+   * 8.4 / 11.4). The caller has checked status, layout, and state handle.
+   *
+   * `title` and `layout` are what the new container must show; `operation` is
+   * the error-operation name used by the caller (`titleChange`, `resize`). The
+   * new container is created and fully rendered before the old screen is
+   * closed, so a render failure leaves the old screen showing. Only after that
+   * is the old screen closed and the new one opened. Open and close handlers do
+   * not run again for this internal reopen.
    */
-  async #reopenWithTitle(title: string): Promise<void> {
+  async #regenerateContainer(
+    title: string,
+    layout: ResolvedGuiLayout,
+    operation: string,
+  ): Promise<void> {
     const generation = this.#generation;
     const previousTitle = this.#title;
     const previousContainer = this.#container as VirtualContainer;
+    const previousLayout = this.#layout as ResolvedGuiLayout;
     const previousCache = this.#writeCache;
-    const size = previousContainer.size;
+    const size = containerSizeOf(layout);
     const options: VirtualContainerOptions =
       title.length === 0 ? { size } : { size, title };
 
@@ -1540,7 +1563,7 @@ export class Window {
     try {
       nextContainer = this.#adapter.createContainer(options);
     } catch (error) {
-      this.#report(error, "titleChange");
+      this.#report(error, operation);
       throw error;
     }
 
@@ -1553,20 +1576,31 @@ export class Window {
     // handled as this Window's events until then (see #onContainerClose).
     this.#retiringContainer = previousContainer;
     this.#writeCache = new SlotWriteCache();
+    this.#renderedWidth = undefined;
     this.#title = title;
 
     try {
+      this.#applyLayout(layout);
       await this.#renderAll(generation);
     } catch (error) {
       // #renderAll normally reports per-slot failures instead of throwing. If
       // it does throw, the old screen is still showing: restore it and report
-      // the title change as not applied.
-      this.#container = previousContainer;
-      this.#retiringContainer = undefined;
-      this.#writeCache = previousCache;
-      this.#title = previousTitle;
-      this.#report(error, "titleChange");
-      this.#scheduleRefresh();
+      // the change as not applied. A close or reopen during the render owns
+      // the Window now; restoring then would resurrect a torn-down screen.
+      this.#report(error, operation);
+      if (
+        generation === this.#generation &&
+        this.#status === "open" &&
+        this.#container === nextContainer
+      ) {
+        this.#container = previousContainer;
+        this.#retiringContainer = undefined;
+        this.#writeCache = previousCache;
+        this.#renderedWidth = previousLayout.width;
+        this.#title = previousTitle;
+        this.#applyLayout(previousLayout);
+        this.#scheduleRefresh();
+      }
       throw error;
     }
 
@@ -1588,8 +1622,8 @@ export class Window {
     } catch (error) {
       // The old screen may or may not have closed. Do not open a second screen
       // on an unknown state: report, retry closing the old screen, and fail
-      // closed. The requested title stays for the next open().
-      this.#report(error, "titleChange");
+      // closed. The requested change stays for the next open().
+      this.#report(error, operation);
       if (generation === this.#generation && this.#status === "open") {
         this.#retiringContainer = previousContainer;
         this.#performClose("ServerClosed", true);
@@ -1613,7 +1647,7 @@ export class Window {
       // The old screen is already closed, so the Window cannot stay open with
       // an unknown container. `openContainer` may also have dispatched a close
       // event synchronously; #performClose is idempotent.
-      this.#report(error, "titleChange");
+      this.#report(error, operation);
       if (generation === this.#generation && this.#status === "open") {
         this.#performClose("ServerClosed", false);
       }
@@ -1735,17 +1769,13 @@ export class Window {
     }
     const current = this.#layout;
     if (
-      !current ||
-      layout.width !== current.width ||
-      layout.height !== current.height ||
+      current &&
       containerSizeOf(layout) !== this.#container.size
     ) {
-      // Recreating the screen is required for a size change (design 8.4), and
-      // that path depends on the unverified close/reopen behavior.
-      this.#report(
-        new Error("InvUI: layout size changed; reopen the Window to apply it."),
-        "refresh",
-      );
+      // The container size cannot change in place, so the Window regenerates
+      // it (design 8.4 / 11.4). A width-only change (same container size) is
+      // applied to the existing container below.
+      await this.#resizeTo();
       return;
     }
     this.#applyLayout(layout);
@@ -1758,6 +1788,76 @@ export class Window {
         this.#report(error, "refresh");
       }
     }
+  }
+
+  /**
+   * Regenerate the container for a layout whose size no longer matches the
+   * open one (design 8.4 / 11.4). Runs on the regeneration queue so it cannot
+   * race a title change, and re-resolves the current state when its turn
+   * arrives: an earlier queued change may already have settled the size.
+   *
+   * Failures keep the current screen: the error is reported with operation
+   * `resize` and the previous container stays in place.
+   */
+  async #resizeTo(): Promise<void> {
+    const generation = this.#generation;
+    const run = this.#regenerationQueue.then(async () => {
+      try {
+        if (
+          generation !== this.#generation ||
+          this.#status !== "open" ||
+          this.#renderingHalted
+        ) {
+          return;
+        }
+        const container = this.#container;
+        const handle = this.#stateHandle;
+        if (!container || !handle) {
+          return;
+        }
+        let next: ResolvedGuiLayout;
+        try {
+          next = this.upperGui.resolve(this.viewer, handle.get());
+        } catch (error) {
+          this.#report(error, "resize");
+          return;
+        }
+        if (
+          generation !== this.#generation ||
+          this.#status !== "open" ||
+          this.#container !== container
+        ) {
+          return;
+        }
+        if (containerSizeOf(next) === container.size) {
+          // The state settled back to the current size: no regeneration needed.
+          this.#applyLayout(next);
+          try {
+            await this.#renderAll(generation);
+          } catch (error) {
+            if (generation === this.#generation) {
+              this.#report(error, "refresh");
+            }
+          }
+          return;
+        }
+        try {
+          await this.#regenerateContainer(this.title, next, "resize");
+        } catch {
+          // #regenerateContainer already reported the failure and restored
+          // the previous container; a later refresh may try again.
+        }
+      } catch (error) {
+        // The queue must never produce an unhandled rejection from a refresh
+        // microtask; the Window stays usable with the current screen.
+        this.#report(error, "resize");
+      }
+    });
+    this.#regenerationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 
   /** Patch the Window's state. Subscribers (including this Window) refresh. */
@@ -2344,6 +2444,13 @@ export class Window {
     if (!layout || this.#renderingHalted) {
       return;
     }
+    // A narrower Structure reuses the same container: the columns beyond its
+    // width are no longer addressed, so slots a wider layout wrote there must
+    // be cleared instead of left visible.
+    if (this.#renderedWidth !== undefined && this.#renderedWidth > layout.width) {
+      this.#clearUnmappedColumns(layout);
+    }
+    this.#renderedWidth = layout.width;
     // A new batch invalidates every result started before it.
     const epoch = ++this.#renderEpoch;
     const renders: Array<Promise<void>> = [];
@@ -2356,6 +2463,37 @@ export class Window {
       renders.push(this.#renderSlot(slot, epoch));
     }
     await Promise.all(renders);
+  }
+
+  /**
+   * Clear the physical columns a wider Structure previously wrote but the
+   * current layout no longer addresses. `container.size` covers `height` full
+   * nine-column rows, so only the tail of each row can be stale (a height
+   * change creates a new container instead).
+   */
+  #clearUnmappedColumns(layout: ResolvedGuiLayout): void {
+    const container = this.#container;
+    const cache = this.#writeCache;
+    if (!container || !cache) {
+      return;
+    }
+    for (let row = 0; row < layout.height; row += 1) {
+      for (let column = layout.width; column < PHYSICAL_COLUMNS; column += 1) {
+        const physicalSlot = row * PHYSICAL_COLUMNS + column;
+        if (physicalSlot >= container.size || !cache.shouldWrite(physicalSlot, undefined)) {
+          continue;
+        }
+        try {
+          // The layout has no logical slot for this index, so the reported
+          // slot is the physical one.
+          container.setItem(physicalSlot, undefined);
+        } catch (error) {
+          this.#report(error, "setItem", physicalSlot);
+          continue;
+        }
+        cache.markWritten(physicalSlot, undefined);
+      }
+    }
   }
 
   async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {
@@ -2615,6 +2753,7 @@ export class Window {
     this.#expectedCloseContainer = undefined;
     this.#layout = undefined;
     this.#writeCache = undefined;
+    this.#renderedWidth = undefined;
     this.#screenRequested = false;
     this.#refreshPending = false;
     this.#fullRefreshQueued = false;
