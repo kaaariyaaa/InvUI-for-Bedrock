@@ -84,6 +84,7 @@ async function load(base) {
 
 const { Item, ItemBuilder } = await load("../src/item");
 const {
+  INVENTORY_SNAPSHOT_VERSION,
   InventoryLink,
   InventoryLinkMoveRejectedError,
   VirtualInventory,
@@ -370,6 +371,239 @@ test("InventoryLink reads/writes the linked slot and forwards only its changes",
   inventory.setItem(1, undefined);
   assert.equal(seen.length, 3);
   assert.equal(seen[2], undefined);
+});
+
+const plainItemCodec = {
+  encode: (item) => ({
+    typeId: item.typeId,
+    amount: item.amount,
+    nameTag: item.nameTag ?? "",
+    lore: item.lore,
+  }),
+  decode: (value) =>
+    new ItemBuilder(value.typeId, value.amount)
+      .setName(value.nameTag)
+      .setLoreLines(...value.lore)
+      .build(),
+};
+
+test("VirtualInventory round-trips occupied slots through JSON with a codec", () => {
+  const inventory = new VirtualInventory(4);
+  inventory.setItem(
+    0,
+    new ItemBuilder("minecraft:stone", 3).setName("Rock").addLoreLines("line").build(),
+  );
+  inventory.setItem(2, new ItemBuilder("minecraft:diamond").build());
+
+  const snapshot = inventory.serialize(plainItemCodec);
+  assert.equal(snapshot.version, INVENTORY_SNAPSHOT_VERSION);
+  assert.equal(snapshot.size, 4);
+  assert.deepEqual(snapshot.slots.map((entry) => entry.slot), [0, 2]);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot);
+
+  const restored = VirtualInventory.deserialize(
+    JSON.parse(JSON.stringify(snapshot)),
+    plainItemCodec,
+  );
+  assert.equal(restored.size, 4);
+  assert.equal(restored.getItem(0).typeId, "minecraft:stone");
+  assert.equal(restored.getItem(0).amount, 3);
+  assert.equal(restored.getItem(0).nameTag, "Rock");
+  assert.deepEqual(restored.getItem(0).lore, ["line"]);
+  assert.equal(restored.getItem(1), undefined);
+  assert.equal(restored.getItem(2).typeId, "minecraft:diamond");
+  assert.equal(restored.getItem(3), undefined);
+});
+
+test("serialize calls encode with a clone and rejects undefined output", () => {
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, new ItemBuilder("minecraft:stone", 2).setName("original").build());
+
+  inventory.serialize({
+    encode: (item) => {
+      item.nameTag = "changed";
+      item.amount = 9;
+      return { typeId: item.typeId, amount: item.amount };
+    },
+    decode: (value) => new ItemBuilder(value.typeId, value.amount).build(),
+  });
+  assert.equal(inventory.getItem(0).amount, 2);
+  assert.equal(inventory.getItem(0).nameTag, "original");
+
+  assert.throws(
+    () =>
+      inventory.serialize({
+        encode: () => undefined,
+        decode: () => new ItemBuilder("minecraft:stone").build(),
+      }),
+    TypeError,
+  );
+});
+
+test("serialize rejects values JSON.stringify would silently change or lose", () => {
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, new ItemBuilder("minecraft:stone").build());
+  const codecReturning = (value) => ({
+    encode: () => value,
+    decode: () => new ItemBuilder("minecraft:stone").build(),
+  });
+  const circular = {};
+  circular.self = circular;
+
+  // Arrays: JSON ignores symbols and extra own keys but still serializes every
+  // index, and a getter index would run its accessor during cloning.
+  const withSymbol = [1];
+  withSymbol[Symbol("extra")] = 2;
+  const withHiddenKey = [1];
+  Object.defineProperty(withHiddenKey, "extra", { value: 2, enumerable: false });
+  let getterCalls = 0;
+  const withAccessorIndex = [1];
+  Object.defineProperty(withAccessorIndex, 0, {
+    get() {
+      getterCalls += 1;
+      return 1;
+    },
+  });
+
+  const rejected = [
+    { typeId: "minecraft:stone", extra: undefined }, // key dropped
+    { typeId: "minecraft:stone", amount: Number.NaN }, // -> null
+    { typeId: "minecraft:stone", lore: ["line", , "tail"] }, // hole -> null
+    { typeId: "minecraft:stone", lore: withSymbol }, // symbol dropped
+    { typeId: "minecraft:stone", lore: withHiddenKey }, // extra key dropped
+    { typeId: "minecraft:stone", lore: withAccessorIndex }, // accessor runs
+    { typeId: "minecraft:stone", toJSON: () => ({}) }, // invoked
+    circular, // JSON.stringify throws
+  ];
+  for (const value of rejected) {
+    assert.throws(() => inventory.serialize(codecReturning(value)), TypeError);
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test("serialize deep-clones the encoded value", () => {
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, new ItemBuilder("minecraft:stone").build());
+  const shared = { typeId: "minecraft:stone", amount: 3, lore: [] };
+
+  const snapshot = inventory.serialize({
+    encode: () => shared,
+    decode: (value) => new ItemBuilder(value.typeId, value.amount).build(),
+  });
+  shared.amount = 9;
+  shared.lore.push("changed");
+
+  assert.equal(snapshot.slots[0].item.amount, 3);
+  assert.deepEqual(snapshot.slots[0].item.lore, []);
+});
+
+test("serialize clones every occupied slot before the codec can mutate the inventory", () => {
+  const inventory = new VirtualInventory(3);
+  inventory.setItem(0, new ItemBuilder("minecraft:apple", 1).build());
+  inventory.setItem(2, new ItemBuilder("minecraft:diamond", 7).build());
+
+  const snapshot = inventory.serialize({
+    encode: (item) => {
+      if (item.typeId === "minecraft:apple") {
+        inventory.setItem(0, undefined);
+        inventory.setItem(2, new ItemBuilder("minecraft:coal", 1).build());
+      }
+      return { typeId: item.typeId, amount: item.amount };
+    },
+    decode: (value) => new ItemBuilder(value.typeId, value.amount).build(),
+  });
+
+  assert.deepEqual(
+    snapshot.slots.map((entry) => [entry.slot, entry.item.typeId, entry.item.amount]),
+    [
+      [0, "minecraft:apple", 1],
+      [2, "minecraft:diamond", 7],
+    ],
+  );
+});
+
+test("deserialize rejects slot entries with a missing or non-JSON item", () => {
+  const codec = {
+    encode: () => ({}),
+    decode: (value) => new ItemBuilder(value.typeId, value.amount).build(),
+  };
+  const snapshot = (slots) => ({ version: INVENTORY_SNAPSHOT_VERSION, size: 1, slots });
+
+  assert.throws(() => VirtualInventory.deserialize(snapshot([{ slot: 0 }]), codec), /item/);
+
+  let decodeCalls = 0;
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(
+        snapshot([{ slot: 0, item: { typeId: "minecraft:stone", amount: Number.NaN } }]),
+        {
+          encode: () => ({}),
+          decode: () => {
+            decodeCalls++;
+            return new ItemBuilder("minecraft:stone").build();
+          },
+        },
+      ),
+    TypeError,
+  );
+  assert.equal(decodeCalls, 0);
+});
+
+test("deserialize validates the whole snapshot before decoding or writing", () => {
+  let decodeCalls = 0;
+  const codec = {
+    encode: () => {
+      throw new Error("not used");
+    },
+    decode: (value) => {
+      decodeCalls++;
+      return new ItemBuilder(value.typeId, value.amount).build();
+    },
+  };
+  const snapshot = (overrides) => ({
+    version: INVENTORY_SNAPSHOT_VERSION,
+    size: 2,
+    slots: [{ slot: 0, item: { typeId: "minecraft:stone", amount: 1 } }],
+    ...overrides,
+  });
+
+  assert.throws(
+    () => VirtualInventory.deserialize(snapshot({ version: 999 }), codec),
+    /version/,
+  );
+  assert.throws(
+    () => VirtualInventory.deserialize(snapshot({ size: -1 }), codec),
+    RangeError,
+  );
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(
+        snapshot({
+          slots: [
+            { slot: 0, item: { typeId: "minecraft:stone", amount: 1 } },
+            { slot: 0, item: { typeId: "minecraft:diamond", amount: 1 } },
+          ],
+        }),
+        codec,
+      ),
+    /duplicate/,
+  );
+  assert.throws(
+    () => VirtualInventory.deserialize(snapshot({ slots: [{ slot: 2, item: {} }] }), codec),
+    RangeError,
+  );
+  assert.equal(decodeCalls, 0);
+
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(snapshot(), {
+        encode: () => {
+          throw new Error("not used");
+        },
+        decode: () => ({ typeId: 1 }),
+      }),
+    TypeError,
+  );
 });
 
 test("InventoryLink rejects moves before touching either inventory", () => {

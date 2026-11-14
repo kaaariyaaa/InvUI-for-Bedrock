@@ -26,7 +26,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 入力ブリッジ | **未実装**。JSON UI の画面接続もない。`src/input.ts` に実験的なチャット通知パーサと snapshot 検証があるが、公開エントリからは export せず、チャットイベントにも接続していない |
 | クリック通知・アイテム保護・JSON UI 連携 | **未実装**。itemChange 検出時の危険通知・再描画停止・close 要求は `Window` にあるが、保護でもクリック処理でもない。`Window.handleClick()` は button mode の Item のみを実行する |
 | アイテムの用途分類（`Item.getMode()` / `setMode()`） | **実装済み（Node.js テスト済み）**。`display` / `button` を分類し、未指定はハンドラーの有無から推測する。分類とハンドラー実行ガードのみで、実機のアイテム保護ではない |
-| 差分描画 | **スロット単位の差分なし**。状態更新と明示 `refresh()` は全スロットを再評価・再描画する。要素の更新通知だけが該当スロットを再描画する。理由と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照 |
+| 差分描画 | **provider の評価は全スロット、`setItem()` は「空→空」だけ省略**。状態更新と明示 `refresh()` は全スロットの provider を再評価するが、Container がすでに空のスロットを空で上書きする書き込みだけをスキップする（Window・Container ごとの `SlotWriteCache`）。要素の更新通知だけが該当スロットを再描画する。前提と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照 |
 | 開いている Window の GUI 差し替え（`Window.setUpperGui()`） | **実装済み（Node.js テスト済み、実機未検証）**。Container サイズと state schema が同じ GUI だけを、Container・画面を維持したまま差し替えて再描画する。サイズ違いはエラーハンドラーへ報告して現在の GUI を維持し、schema 違いは `WindowStateSchemaChangedError` を報告して close する（fail closed）。詳細は「[開いている Window の GUI 差し替えと非同期プレースホルダー](#開いている-window-の-gui-差し替えと非同期プレースホルダー)」を参照 |
 | 非同期アイテムのプレースホルダー（`Item.setPlaceholder()` / `Item.builder().setPlaceholder()`） | **実装済み（Node.js テスト済み、実機未検証）**。placeholder を指定すると、非同期 provider の解決を待たずに placeholder を表示し、完了後に同じスロットを結果で更新する。未指定なら従来どおり解決まで待つ。表示の差し替えだけで、実機のアイテム保護ではない |
 | 周期更新（`updatePeriodically()`） | **実装済み（Node.js テスト済み、実機未検証）**。Item を表示している開いた Window がある間だけ `system.runInterval()` で実行し、最後の購読解除または `close()` で停止する |
@@ -51,7 +51,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 
 - **レイアウト**: `Structure`（最大 9×6、Unicode 1 コードポイント = 1 スロット）、`Gui.normal()` / `Gui.paged()` / `Gui.scroll()` / `Gui.tab()`、`PagedGui.itemsBuilder()`（Java版互換の別名）、`Markers.CONTENT_LIST_SLOT_HORIZONTAL` / `VERTICAL`、`GuiLink` による子 GUI の投影。ページ・行・タブは `GuiState` として外から渡し、GUI インスタンス自身は状態を持ちません。
 - **アイテム**: `Item`、`ItemBuilder`、`Item.simple()`、`Item.builder()`、クリックハンドラーの登録と呼び出し順序、`Item.getMode()` / `setMode()` による `display` / `button` 分類（未指定はハンドラーの有無から推測、`setMode` はハンドラーを追加・削除しない）まで。`display` の Item はハンドラーを保持していても実行しません。ただし分類はメタデータと `Item` レベルのガードに留まり、JSON UI 側のアイテム保護（設計 7.2 / 10.1）ではありません。`updatePeriodically(ticks)` は、その Item を表示している開いた Window が 1 つ以上ある間だけ `system.runInterval()` に登録し、最後の Window が閉じるか購読を解除すると `clearRun()` で停止します。1 Item につき 1 インターバルで、再購読すると周期の位相はリセットされます。スケジューラの登録失敗は `console.error` に記録され、Item は明示更新では引き続き描画されます。クリックを実機イベントから届ける仕組み（InputBridge / JSON UI）は未実装です。`Item.setPlaceholder(stack)` / `Item.builder().setPlaceholder(stack)` は非同期 provider の実行中に表示する `ItemStack` を設定します（clone して保持し、`undefined` で解除）。placeholder 未指定の非同期 provider は従来どおり解決まで待ち、指定時は途中で placeholder を表示して完了後に同じスロットを更新します。placeholder は表示だけの差し替えで、実機のアイテム保護ではありません。
-- **インベントリ**: メモリ上の `VirtualInventory`（`Inventory` インターフェース実装）。`InventoryLink` はリンク先スロットの読み書きと購読のみ提供し、**別インベントリへの移動は実装していません**。
+- **インベントリ**: メモリ上の `VirtualInventory`（`Inventory` インターフェース実装）。`serialize()` / `VirtualInventory.deserialize()` は、呼び出し側が渡す明示的な `InventoryItemCodec` を介して JSON 可能なスナップショットへ変換・復元します（`ItemStack` の全状態は列挙できないため既定 codec は提供しません）。codec の `encode()` の戻り値とスナップショットは strict な JSON 検証と deep clone を通り、`serialize()` は最初の `encode()` より前に全占有 slot を clone して固定します。`deserialize()` は `item` が欠落した slot エントリを空 slot として扱わず拒否します。`InventoryLink` はリンク先スロットの読み書きと購読のみ提供し、**別インベントリへの移動は実装していません**。
 - **状態**: `StateManager`。`player` / `shared` のスコープ、`window` / `session` / `persistent` の保存期間、スキーマ不一致の拒否。永続化には注入した `StateStore` が必要です。**`StateManager.migrate()` による明示的な移行は実装済み**ですが、`acquire()` が旧 version/schema を自動変換することはありません。破損レコードは自動では退避・復旧せず、破損時は `StateCorruptionError` を投げてレコードを残します。削除は `StateManager.remove()` で明示的に行います。Bedrock 用には `BedrockWorldStateStore`（ワールドの動的プロパティを使用）を公開しています。
 - **Window**: `Window.builder()` の設定、状態の取得・更新、`close()`、クリックのルーティング（`Window.handleClick()`）まで。`handleClick(slot)` は button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、close・再オープン・ページ/タブ変更をまたいだクリックは破棄されます。状態更新・GUI 変更・明示 `refresh()` は全スロットを再評価して描画し、要素の更新通知だけが該当スロットを再描画します。**画面を開く経路は未検証のため既定で拒否されます。** アダプタが任意フック `subscribeClose` / `subscribeItemChange` を実装していれば、`Window` は open 前に購読し、close イベントを close ハンドラーへ、itemChange を `WindowItemChangeDangerError` の通知・再描画停止・`close()` 要求として扱います。close ハンドラーの実行中に再 open すると新しい generation が始まり、それ以降の旧 generation の close ハンドラーは通知されず、再 open 後にそのハンドラーが投げた例外も新 generation には配送されません。既定の `minecraftVirtualContainerAdapter` も `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読してこのフックへ流しますが、Node.js テストで確認しただけで実機未検証です。close 理由は `VirtualContainerCloseReason` から `WindowCloseReason` へ明示的に変換し、未知の理由は `ServerClosed` として通知します。`Window.close(reason)` の `reason` は呼び出し側が渡す値のままです。どちらのイベントも `after` なので、購読した時点で close・アイテム変更はすでに起きており、防ぐことも元のアイテムへ戻すこともできません。itemChange はクリック通知でも保護でもありません。死亡・退出・shutdown・スクリプト再読み込み時の後始末や再オープンは実装していません。GUI の構造変更（種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI）で state schema が合わなくなった場合、`Window` はエラーハンドラーへ `WindowStateSchemaChangedError`（`INVUI_STATE_SCHEMA_CHANGED`）を報告し、再描画を停止して close します。同じ通知中に走った `setState()` は同じエラーで拒否され、以後の `setState()` は開いていない Window として失敗します。内容変更（`setContent`）は schema を変えないため、通常どおり描画だけ更新します。`setUpperGui(gui)` は開いている Window の upper GUI を、Container と画面を維持したまま同じサイズ・同じ state schema に限って差し替え、再描画します。サイズが違う場合はエラーハンドラーへ `guiChange` として報告して現在の GUI を維持し、schema が違う場合は `WindowStateSchemaChangedError` を報告して close します（fail closed）。close が実機で成功するかは未検証です。
 
@@ -63,19 +63,21 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 - **実機ライフサイクル**: 既定の `minecraftVirtualContainerAdapter` は `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window`（open 前に購読し、close または失敗した open で解除）が close ハンドラーと itemChange の危険通知に流します。ただし Node.js テストで確認しただけで実機未検証であり、どちらも `after` イベントなので close・アイテム変更を防ぐ保護ではありません。`system.beforeEvents.shutdown` は購読しておらず、死亡・退出・shutdown・再読み込み時の後始末や再オープンも実装していません。`Window` の `status` 遷移、状態ハンドルの解放、`close()` の明示呼び出しはありますが、既定の `open()` は拒否されたままで、既定の open 経路では購読は張られません。
 - **入力**: `Window.handleClick(slot)` は呼び出し側が論理スロットを直接渡す API です。button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、待機中に close・再オープン・ページ変更があったクリックや、display に変わったスロットのクリックはハンドラーを呼ばずに破棄されます。Bedrock のイベントからスロットを特定して呼ぶ経路（InputBridge / JSON UI / `button.send`）はなく、左右・Shift・ダブルクリックの区別もありません。
   `src/input.ts` には設計 10.4 の `!invui:<session-id>:<slot-index>:<sequence>` を解釈する純粋パーサと、呼び出し側が渡す Window snapshot（open・owner・session・slot mode・lastSequence）を照合する `validateInputNotification()` がありますが、**`src/index.ts` からは export せず、`world.beforeEvents.chatSend` などのイベントにも接続していません**。したがって実機のクリック通知としては動きません。パース結果は認証ではなく、送信者が同じ文字列を手入力できます。検証は呼び出し側が実行時に最新の snapshot を渡す前提で、呼び出し側が時刻と最小間隔を指定する純粋な `checkInputRateLimit()` はありますが、イベントには接続していません。時刻ベースの期限とページ/generation token は未対応です。古い画面の入力の識別は呼び出し側の generation 検査に依存します。チャット送信からの入力経路は、実機で `button.send` の挙動を確認するまで正式機能にしません。
-- **差分描画**: 状態更新と明示 `refresh()` は、要素参照が変わっていなくても全スロットの provider を再評価して `setItem()` します。Item の provider が状態に依存して同じ Item でも別の表示を返す場合があること、Bedrock の `ItemStack` を全 component まで比較して同値判定することを避けたためです。要素の更新通知だけが該当スロットを再描画します。詳細と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照してください。レイアウトサイズが変わった場合、表示中の Window は再オープンが必要で、`refresh()` はエラーを報告するだけです。
+- **差分描画**: 状態更新と明示 `refresh()` は、要素参照が変わっていなくても全スロットの provider を再評価します。Item の provider が状態に依存して同じ Item でも別の表示を返す場合があること、Bedrock の `ItemStack` を全 component まで比較して同値判定することを避けたためです。**`setItem()` を省略するのは、その Container に対して直前に自分で空を書いたスロットを空で上書きする場合だけ**です（空→空のみ、表示アイテムはスキップしません。詳細は「[差分描画の限界](#差分描画の限界状態更新)」）。要素の更新通知だけが該当スロットを再描画します。詳細と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照してください。レイアウトサイズが変わった場合、表示中の Window は再オープンが必要で、`refresh()` はエラーを報告するだけです。
 - **周期更新**: `Item.updatePeriodically()` は実装済みですが、実機未検証です。Bedrock の `system.runInterval()` に接続するのは、その Item を表示している開いた Window がある間だけで、Window を開く前や最後の Window を閉じた後は実行されません。1 Item につき 1 インターバルで、購読の張り替えで周期の位相がリセットされます。スケジューラの登録に失敗した場合は `console.error` に記録され、自動の再試行はありません。
 - **永続ストア**: `StateManager` は注入された同期 `StateStore` に JSON を読み書きします。`STATE_STORAGE_VERSION` と schema の不一致は `StateConflictError`、壊れた JSON や不正な `guiState` は `StateCorruptionError` で失敗し、レコードは変更しません。**`StateManager.migrate()` による明示的な移行は実装済み**ですが、`acquire()` が旧 version/schema を自動変換することはありません。破損レコードを退避して自動復旧する処理は実装していません（明示的な削除は `StateManager.remove()`）。外部 `StateStore` の `setItem()` が途中で失敗して部分的な書き込みが残っても、`StateManager` はそれを検出・修復しません（ストア実装の原子性に依存します）。Window の schema は GUI 種別・Structure 行・スクロール設定・タブと `GuiLink` の子 GUI を再帰的に含む識別子で、循環参照は拒否されます。
 
 ## 差分描画の限界（状態更新）
 
-状態更新時に「変わったスロットだけ」を描く最適化はしていません。`setState()`、GUI の内容変更、明示 `refresh()` は、要素の参照が同じでも全スロットの provider を再評価して描画します。
+状態更新時に「変わったスロットだけ」を描く最適化はしていません。`setState()`、GUI の内容変更、明示 `refresh()` は、要素の参照が同じでも全スロットの provider を再評価します。書き込みだけは、その Container がすでに空のスロットを空で上書きする場合に限って省略します。
 
 - **理由**: Item の provider は `GuiState` を読んで表示を変えられます。スロットの要素インスタンスが同じでも、状態が変われば provider の戻り値も変わります。また Bedrock の `ItemStack` は component や lore を含み、全項目の同値比較を安全に行えません。要素参照や ItemStack の値で差分を取ると、古い表示を残す可能性があります。
-- **コスト**: 状態を 1 回変えるたびに、表示スロット数ぶんの provider 呼び出しと `container.setItem()` が走ります。provider は全スロット分を同期的に開始して並列に解決するため、1 つの遅い provider が他の開始をブロックすることはありませんが、そのバッチ全体の完了は待ちます。高頻度の状態更新は負荷になります。
+- **コスト**: 状態を 1 回変えるたびに、全スロットの provider 呼び出しと、空でないスロット（および空と未記録のスロット）への `container.setItem()` が走ります。provider は全スロット分を同期的に開始して並列に解決するため、1 つの遅い provider が他の開始をブロックすることはありませんが、そのバッチ全体の完了は待ちます。高頻度の状態更新は負荷になります。
 - **古い非同期結果**: 状態変更・GUI 変更・新しい描画バッチのたびに render epoch を進め、スロットごとの token と generation も検査します。変更前に開始した provider の結果は、後から解決しても書き込まれません。
 - **要素の更新通知**: `Item.notifyWindows()` や `InventoryLink` の変更通知は、購読しているスロットだけを再描画します。レイアウト変更時は新しいレイアウトに購読を張り替えてから描画するため、移動先のスロットへ通知が届きます。
 - **レイアウトサイズの変更**: 表示中の Window では `refresh()` がエラーを報告するだけで、サイズは変わりません。再オープンが必要です。`open()` の解決中にサイズが変わった場合は、画面を表示する前に Container を作り直します。
+- **空→空の書き込み省略**: 直前に自分で空を書いた物理スロットを、次の描画でも空にする場合だけ `setItem()` をスキップします（`SlotWriteCache`）。記録は `setItem()` が例外を投げずに返った後だけ行い、失敗した書き込みは次の描画で再試行します。キャッシュは Container の作成（`open()` 中のサイズ変更を含む）で新しくなり、close の後始末と Container の差し替えで破棄されます。古い描画結果・古い generation・レイアウト変更後の結果は書き込み自体が破棄されるため、キャッシュにも記録されません。空でない値の書き込みは決してスキップしないので、表示アイテムが出ない・消えることはありません。`setUpperGui()` の後も物理スロットの実際の内容についての記録として有効です。
+- **書き込みキャッシュの前提と限界**: キャッシュは「その Container に書くのはこの Window だけ」という前提で、空→空の書き込みだけを省きます。そのため、itemChange を転送しないアダプタ（`subscribeItemChange` 未実装）や `window.container` を直接書き換える外部コードがあると、本来空にするスロットに外部のアイテムが残る可能性があります（表示のずれであり、この省略によるアイテムの消失・複製はありません）。自分の player の itemChange は再描画停止と close でキャッシュを破棄し、別 player の itemChange（この Window は無視して描画を続ける）ではキャッシュ全体を破棄します。実機未検証です。
 
 ## 開いている Window の GUI 差し替えと非同期プレースホルダー
 
@@ -149,6 +151,33 @@ states.migrate(
 - Window の state schema は GUI 種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI を再帰的に含む JSON 文字列から作る識別子です。Window を開いた後にこの構造が変わると、その Window は `WindowStateSchemaChangedError` を報告して close し、古い schema で新しい状態を保存しません。古い schema token のレコードは自動変換されず、移行する場合は `fromSchema` にその文字列を指定します。
 - `BedrockWorldStateStore` は、キーを `%:` の世代 prefix に続けて固定幅の `%XXXX` 形式でエンコードした動的プロパティ識別子を使います（安全な ASCII はそのまま、それ以外は 1 UTF-16 コード単位 = `%` + 16 進4桁）。`%:` は旧エンコーダが生成しないため、新旧の識別子空間は分離されます。識別子は 1024 文字、値は UTF-8 換算で 32,767 バイトを既定の上限として、書き込み前に拒否します（`maxIdentifierLength` / `maxValueLength` で変更可）。32,767 はコミュニティ情報に基づくローカルガードで、エンジンの実上限は未検証です。文字列以外の保存値も拒否します。
 - **以前の可変幅パーセントエンコード（例 `%E9`）で保存した動的プロパティは、このエンコーダでは読みません。** 現在の識別子が存在せず、旧エンコードの識別子に値がある場合、`LEGACY_IDENTIFIER_CONFLICT` で失敗し、旧エンコード側の値は返さず、どちらのプロパティも変更しません。旧エンコードは単射ではなく別キーの値と衝突し得るため、値をこのキーに帰属できません。手動で調査・移行してください。
+
+## インベントリのシリアライズ（任意・実機非依存）
+
+`VirtualInventory` は、永続化のために明示的な `InventoryItemCodec` で JSON 可能なスナップショットへ変換できます（設計 4.3 / 9.6）。Bedrock の `ItemStack` は component・dynamic property・タグなどを一つの値として全列挙できないため、既定の codec はありません。保持する情報は呼び出し側が codec で決めます。
+
+```ts
+import { ItemBuilder, VirtualInventory, type InventoryItemCodec } from "invui-bedrock";
+
+interface PlainItem {
+  typeId: string;
+  amount: number;
+}
+
+const codec: InventoryItemCodec<PlainItem> = {
+  encode: (item) => ({ typeId: item.typeId, amount: item.amount }),
+  decode: (value) => new ItemBuilder(value.typeId, value.amount).build(),
+};
+
+const snapshot = inventory.serialize(codec); // 空スロットは含まない
+const restored = VirtualInventory.deserialize(snapshot, codec);
+```
+
+**codec は情報を落とし得ます。** `ItemStack` の全状態は列挙できないため、codec が保存対象にしない component・dynamic property・タグ・名前・lore などは失われます。復元されるのは codec が encode で書き出し、decode で戻せる情報だけであり、元の `ItemStack` と同一にはなりません。上の例は typeId と個数だけを保存するので、名前・lore・component などは失われます。何を保持するかは呼び出し側の明示的な選択です（既定 codec は提供しません）。必要な情報を codec に追加してください。
+
+`serialize()` は最初の `encode()` 呼び出しより前に全占有 slot の `ItemStack` を clone して固定するため、encode 中に codec がインベントリを変更しても、2 つの時点が混ざったスナップショットにはなりません。各 `encode()` の戻り値は strict な JSON 検証と deep clone を通します。`JSON.stringify` が黙って書き換える値（入れ子の `undefined`、`NaN` / `Infinity`、疎配列、配列の非インデックスキー、オブジェクトのシンボルキー・非列挙プロパティ・getter、`toJSON`、循環参照）は拒否します。
+
+`deserialize()` は、decode や書き込みを始める前にスナップショット全体を strict な JSON として検証・deep clone します。そのため decode が呼び出し側のスナップショットを変更できず、不正なスナップショットから部分的に復元されたインベントリを返すこともありません。検証は snapshot の version・size・slot 範囲・重複 slot に加え、各 slot エントリが `slot` と `item` の両方を持つことを含みます。`item` を欠いたエントリは空 slot と解釈せず拒否します。decode の戻り値は `clone()` を持つ `ItemStack` として検証し、不正なら拒否します。実機に依存しないロジックですが、実機での永続化は未検証です。
 
 ## 必要環境
 
@@ -352,6 +381,7 @@ InvUI-for-Bedrock/
 │   ├── gui.ts                    # Structure / Gui / GuiLink / レイアウト計算
 │   ├── item.ts                   # Item / ItemBuilder / クリックハンドラー / 周期更新
 │   ├── periodic.ts               # system.runInterval を使う周期スケジューラ（内部）
+│   ├── render-cache.ts           # 空→空の setItem を省略する書き込みキャッシュ（Window 内部）
 │   ├── inventory.ts              # VirtualInventory / InventoryLink（移動は拒否）
 │   ├── input.ts                  # 設計 10.4 の実験的パーサ（非公開・イベント未接続）
 │   ├── state.ts                  # StateManager（scope / lifetime / 永続化 / migrate）
@@ -365,7 +395,7 @@ InvUI-for-Bedrock/
 │   ├── periodic.test.mjs         # 周期更新の開始・停止
 │   ├── bedrock-store.test.mjs    # 動的プロパティ・StateManager 連携
 │   ├── state.test.mjs            # 状態管理・migration・破損時の挙動
-│   ├── window.test.mjs           # Window と実アダプタの拒否経路・イベント購読・state schema
+│   ├── window.test.mjs           # Window と実アダプタの拒否経路・イベント購読・state schema・書き込み省略
 │   ├── window-diff.test.mjs      # 状態変更時の全スロット再評価
 │   ├── package.test.mjs          # パッケージ境界の検査
 │   └── manual-bedrock/
