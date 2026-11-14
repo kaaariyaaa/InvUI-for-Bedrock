@@ -3003,6 +3003,42 @@ test("notifies subscribers after changes and isolates listener errors", () => {
   handle.release();
 });
 
+test("state errors reach the log when no reporter is configured (design 14.1)", () => {
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args);
+  try {
+    // No onError: a throwing listener must not vanish silently.
+    const manager = new StateManager();
+    const handle = manager.acquire({ ownerId: "p" });
+    handle.subscribe(() => {
+      throw new Error("listener boom");
+    });
+    handle.set({ page: 1 });
+    handle.release();
+    assert.equal(logs.length, 1);
+    assert.match(String(logs[0][1]), /listener boom/);
+
+    // A throwing reporter must not swallow the error it was given.
+    logs.length = 0;
+    const broken = new StateManager(null, {
+      onError: () => {
+        throw new Error("reporter boom");
+      },
+    });
+    const brokenHandle = broken.acquire({ ownerId: "p" });
+    brokenHandle.subscribe(() => {
+      throw new Error("listener boom");
+    });
+    brokenHandle.set({ page: 1 });
+    brokenHandle.release();
+    assert.equal(logs.length, 1);
+    assert.match(String(logs[0][1]), /reporter boom/);
+  } finally {
+    console.error = original;
+  }
+});
+
 test("a listener that releases its handle does not skip other listeners", () => {
   const manager = new StateManager();
   const handle = manager.acquire({ ownerId: "p" });
