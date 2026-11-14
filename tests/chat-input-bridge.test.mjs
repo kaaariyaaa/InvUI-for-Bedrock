@@ -47,13 +47,21 @@ function makeWindow(options = {}) {
     get maxActive() {
       return maxActive;
     },
-    async handleClick(slot) {
+    async _inputClick(slot) {
       clicks.push(slot);
       active += 1;
       maxActive = Math.max(maxActive, active);
       try {
-        const result = options.onClick ? await options.onClick(slot, window) : true;
-        return result === undefined ? true : result;
+        const result = options.onClick ? await options.onClick(slot, window) : "clicked";
+        // Test doubles return the Window's explicit outcome; a boolean is
+        // mapped to clicked/discarded so old-style stubs keep working.
+        if (result === true || result === undefined) {
+          return "clicked";
+        }
+        if (result === false) {
+          return "discarded";
+        }
+        return result;
       } finally {
         active -= 1;
       }
@@ -464,12 +472,12 @@ test("rejects an invalid repeat-limit interval at construction", () => {
 });
 
 test("consumes the sequence when a routed click fails, preventing a duplicate handler run", async () => {
-  // `Window.handleClick()` catches a throwing handler, reports it, and returns
-  // false. That is not a discarded click: the handler already ran, so the same
+  // A Window reports `failed` when the click reached a handler but threw. That
+  // is not a discarded click: the handler already ran, so the same
   // notification must not be replayed into it.
   const modes = Array.from({ length: 54 }, () => "display");
   modes[7] = "button";
-  const window = makeWindow({ onClick: async () => false });
+  const window = makeWindow({ onClick: async () => "failed" });
   const { bridge } = makeBridge([window], { slotModes: () => modes });
 
   assert.deepEqual(await bridge.dispatch("!invui:window-1:7:1", "player-1"), {
@@ -485,22 +493,15 @@ test("consumes the sequence when a routed click fails, preventing a duplicate ha
 });
 
 test("keeps a truly discarded click retryable", async () => {
-  // The Window discarded the click because the slot stopped being a button
-  // before execution; no handler ran, so the notification may be retried once
-  // the same button is current again.
-  let modes = Array.from({ length: 54 }, () => "display");
+  // The Window discarded the click before any handler ran, so the notification
+  // may be retried even though the slot is still a button.
+  const modes = Array.from({ length: 54 }, () => "display");
   modes[7] = "button";
-  const window = makeWindow({
-    onClick: async () => {
-      modes = Array.from({ length: 54 }, () => "display");
-      return false;
-    },
-  });
+  const window = makeWindow({ onClick: async () => "discarded" });
   const { bridge } = makeBridge([window], { slotModes: () => modes });
 
   assert.equal((await bridge.dispatch("!invui:window-1:7:1", "player-1")).clicked, false);
 
-  modes[7] = "button";
   const retried = await bridge.dispatch("!invui:window-1:7:1", "player-1");
   assert.equal(retried.ok, true, "a discarded click must not consume the sequence");
   assert.equal(retried.clicked, false);

@@ -4520,6 +4520,83 @@ test("a throwing click handler consumes the chat sequence so a replay cannot run
   window.close();
 });
 
+test("a click discarded by a failing layout resolve stays retryable", async () => {
+  const viewer = { id: "chat-resolve", name: "Resolve" };
+  const clicks = [];
+  const adapter = new InMemoryTestAdapter();
+  const button = Item.builder()
+    .setItemProvider(() => stack("minecraft:button"))
+    .addClickHandler(async (click) => {
+      clicks.push(click.slot);
+    })
+    .build();
+  const gui = Gui.normal({ structure: ["ab"], ingredients: { b: button } });
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+  await window.open();
+
+  // The bridge's slot probe reads the cached layout, so only the execution-time
+  // re-resolve fails. The Window discards the click before any handler runs.
+  const resolve = gui.resolve.bind(gui);
+  gui.resolve = () => {
+    throw new Error("provider failed");
+  };
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, [], "a failing resolve must not run a handler");
+
+  gui.resolve = resolve;
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1], "a discarded click must not consume the sequence");
+
+  window.close();
+});
+
+test("a handler that fails after changing the layout still consumes the sequence", async () => {
+  const viewer = { id: "chat-layout-fail", name: "LayoutFail" };
+  const runs = [];
+  const adapter = new InMemoryTestAdapter();
+  const second = Item.builder()
+    .setItemProvider(() => stack("minecraft:second"))
+    .addClickHandler(() => {
+      runs.push("second");
+    })
+    .build();
+  let window;
+  const first = Item.builder()
+    .setItemProvider(() => stack("minecraft:first"))
+    .addClickHandler(() => {
+      runs.push("first");
+      // A handler may swap the screen before throwing: the layout generation
+      // changes, but the click already ran and must still consume the sequence.
+      window.setUpperGui(Gui.normal({ structure: ["ab"], ingredients: { b: second } }));
+      throw new Error("handler failed after swapping the screen");
+    })
+    .build();
+  window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(Gui.normal({ structure: ["ab"], ingredients: { b: first } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+  await window.open();
+
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(runs, ["first"]);
+
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(runs, ["first"], "the failed handler must not run a second time");
+
+  window.close();
+});
+
 test("chat input never routes one viewer's line into another viewer's Window", async () => {
   const viewer = { id: "chat-owner", name: "Owner" };
   const other = { id: "chat-other", name: "Other" };

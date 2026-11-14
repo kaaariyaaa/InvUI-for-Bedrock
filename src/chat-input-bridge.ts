@@ -84,6 +84,16 @@ const ALL_BUTTON: readonly InputSlotMode[] = Object.freeze(
  */
 const DEFAULT_MIN_INTERVAL_MS = 100;
 
+/**
+ * Outcome of routing one click into a Window, reported by the Window itself.
+ * `clicked` means a handler completed, `failed` means the click reached the
+ * handler path but it threw, and `discarded` means the Window rejected the
+ * click before any handler ran (closed, changed layout/page, stale slot, or a
+ * failing re-resolve). The distinction is what keeps the sequence policy
+ * correct: a discarded click may be retried, a failed one must not.
+ */
+export type ChatInputClickOutcome = "clicked" | "discarded" | "failed";
+
 /** The shape of `Window` this bridge depends on. */
 export interface ChatInputWindow {
   readonly id: string;
@@ -96,7 +106,11 @@ export interface ChatInputWindow {
   readonly _inputSessionId?: string;
   readonly viewer: { readonly id: string };
   readonly isOpen: boolean;
-  handleClick(slot: number): Promise<boolean>;
+  /**
+   * Routes a click and reports whether a handler was invoked. Callers that
+   * only need success/failure use the public `Window.handleClick()` instead.
+   */
+  _inputClick(slot: number): Promise<ChatInputClickOutcome>;
   /**
    * Optional modes of the Window's current layout. The automatic Window wiring
    * supplies this; when it is missing or returns null/throws, no slot is
@@ -143,12 +157,11 @@ export type ChatInputDispatchResult =
       readonly ok: true;
       readonly notification: InputNotification;
       /**
-       * `false` means the notification passed every bridge check and
-       * `Window.handleClick()` was called, but no handler completed: the Window
-       * either discarded it (closed/changed slot/layout) or a handler threw and
-       * the Window reported the error. A discarded click's sequence stays
-       * retryable; a failed routed click consumes it so the handler cannot run
-       * twice.
+       * `false` means the notification passed every bridge check and was routed
+       * to the Window, but no handler completed: the Window either discarded it
+       * before invoking one (closed/changed slot/layout) or a handler threw. A
+       * discarded click's sequence stays retryable; a failed routed click
+       * consumes it so the handler cannot run twice.
        */
       readonly clicked: boolean;
     }
@@ -344,35 +357,20 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
       policy: { minIntervalMs },
       ...(options.maxQueue === undefined ? {} : { maxQueue: options.maxQueue }),
       execute: async (notification) => {
-        // Capture the open cycle and generation: a close/reopen or a layout
-        // change while this click is in flight must not advance the new
-        // session's sequence state when this click finally completes.
+        // Capture the open cycle: a close/reopen while this click is in flight
+        // starts a new session, and this click must not overwrite its
+        // sequence state when it finally completes.
         const cycle = state.cycle;
-        const generation = state.generation;
-        const clicked = (await window.handleClick(notification.slot)) === true;
-        state.clicks.set(notification, clicked);
+        const outcome = await window._inputClick(notification.slot);
+        state.clicks.set(notification, outcome === "clicked");
         if (state.cycle !== cycle) {
           return;
         }
-        if (clicked) {
-          state.lastSequence = notification.sequence;
-          return;
-        }
-        // `handleClick()` returns false both for a click it discarded before
-        // invoking a handler (stale page/slot, closed window) and for a handler
-        // that ran and threw. Only the first may be retried: replaying the
-        // second would run the same handler twice, which can duplicate an item
-        // move even though the first call failed. A false is treated as a
-        // failed routed click only while the same button is still current; a
-        // discard changed the generation, slot mode, or open state, so its
-        // notification stays retryable.
-        const latest = snapshot(window, state);
-        if (
-          latest !== null &&
-          latest.open &&
-          latest.generation === generation &&
-          latest.slotModes[notification.slot] === "button"
-        ) {
+        // A click that reached a handler consumes the sequence even when the
+        // handler failed: replaying the same notification could repeat its
+        // side effects. A discarded click never ran a handler, so its sequence
+        // stays retryable.
+        if (outcome !== "discarded") {
           state.lastSequence = notification.sequence;
         }
       },
