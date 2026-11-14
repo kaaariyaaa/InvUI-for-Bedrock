@@ -638,6 +638,20 @@ test("packed package contents and consumer type check", async (t) => {
     assert.match(help.stdout, /invui-bedrock — setup helper/);
     assert.match(help.stdout, /\binit\b/);
 
+    // npm installs `bin` as a node_modules/.bin symlink. Node resolves the
+    // main-module symlink before evaluating it, so an entry guard that compares
+    // process.argv[1] with import.meta.url literally silently does nothing when
+    // invoked through the installed shim (npx invui-bedrock). Exercise that
+    // exact path. Windows uses .cmd shims, which this test does not model.
+    if (process.platform !== "win32") {
+      const linkedBin = path.join(consumerDir, "node_modules", ".bin", "invui-bedrock");
+      fs.mkdirSync(path.dirname(linkedBin), { recursive: true });
+      fs.symlinkSync(path.relative(path.dirname(linkedBin), cli), linkedBin);
+      const linkedVersion = runOrFail(process.execPath, [linkedBin, "--version"], { cwd: tmp });
+      assertSucceeded(linkedVersion, "installed bin --version");
+      assert.equal(linkedVersion.stdout.trim(), `invui-bedrock ${packedPackage.version}`);
+    }
+
     const behaviorPack = path.join(tmp, "behavior_pack");
     const resourcePack = path.join(tmp, "resource_pack");
     fs.mkdirSync(path.join(behaviorPack, "scripts"), { recursive: true });
