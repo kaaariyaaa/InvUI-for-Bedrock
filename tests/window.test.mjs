@@ -4497,6 +4497,29 @@ test("an open Window auto-connects chatSend to its own button slot", async () =>
   assert.deepEqual(clicks, [1]);
 });
 
+test("a throwing click handler consumes the chat sequence so a replay cannot run it twice", async () => {
+  const viewer = { id: "chat-failing", name: "Failing" };
+  const clicks = [];
+  const window = chatButtonWindow(viewer, clicks, {
+    onClick: async () => {
+      throw new Error("handler failed after a side effect");
+    },
+  });
+  await window.open();
+
+  // Window.handleClick() catches and reports the handler error, then returns
+  // false. The handler already ran, so the same sequence must not be replayed.
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1], "the failed handler must not run a second time");
+
+  window.close();
+});
+
 test("chat input never routes one viewer's line into another viewer's Window", async () => {
   const viewer = { id: "chat-owner", name: "Owner" };
   const other = { id: "chat-other", name: "Other" };
