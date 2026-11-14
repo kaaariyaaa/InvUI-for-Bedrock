@@ -12,7 +12,7 @@
 - `PlayerCursorInventoryComponent` / `playerCursorItemGrab` を使う経路は、**タッチでカーソルが使われず**、slot / container も通知されないため、全入力方式を満たしません。カーソル復元は採用しません（[CURSOR-INPUT-NOTES.md](CURSOR-INPUT-NOTES.md)）。
 - **マーカーアイテム方式**（button slot に使い捨てアイテムを置き、通常クリックで動いたことを itemChange で受ける）は、自動・タッチ可能な候補ですが、**button slot の見た目がマーカーになり、プレイヤーが持ち出せ、入力抑制なしでは他人のアイテムを置かれる**ため、設計 10.1 / 10.8 の「標準表示・取り出し不可・非破壊」を満たしません。実装していません（第 5 節 V-4）。
 
-§12 で、残っていた抜け道（コンテナ規則・入力権限・DDUI のアイテム描画・ホットバー選択）が公式型の範囲で塞がっていることを追加確認しています。
+§12 で、残っていた抜け道（コンテナ規則・入力権限・DDUI のアイテム描画・ホットバー選択）について、公式型で否定できるものと、記述がなくて可否不明のものを整理しています。
 
 現時点で「実装済み」なのは、`World.beforeEvents.chatSend` を受けて `!invui:<session-id>:<slot>:<sequence>` を `Window.handleClick()` へ流す**受信経路のみ**です（Node.js テスト済み、実機未検証）。これはクリックの証明でも認証でもありません。
 
@@ -34,7 +34,7 @@ samples の版は **UI 構造の参照元**であり、実行に必要なゲー�
 | Bedrock Wiki も `button.send` を **Chat 画面固有**の hardcoded button ID として列挙する | <https://wiki.bedrock.dev/json-ui/json-ui-documentation#hardcoded-button-ids> | チェスト画面での成立を前提にしない |
 | `button_mappings` は `from_button_id` / `to_button_id` / `mapping_type` などの対応だけで、**引数や文字列を渡す書式がない** | `ui_common.json:44-101`（`common.button`）。samples 全体の `button_mappings` に payload 用のキーなし | 押下 slot をボタン ID に埋めたり、session / sequence を mapping で渡したりできない |
 | chat の text box は `#message_text_box` と `#message_text_box_content` に依存する | `chat_screen.json:378-390`、`ui_common.json:1371-1428`（`text_edit_box_label` の content binding） | 後者は Wiki で **Chat 画面固有の hardcoded binding**。他画面で同じ内容が供給される保証はない |
-| `edit_box` に固定文字の初期値プロパティはない。samples の `edit_box` は `ui_common.json:1519` の 1 種類だけで、`"text"` を持たない | `ui_common.json:1519-1780` | JSON UI だけで本文を事前入力する書式は確認できない。`text` を足すのは発明 binding |
+| samples の範囲では、`edit_box` に固定文字の初期値プロパティは見つからない。`edit_box` は `ui_common.json:1519` の 1 種類だけで、`"text"` を持たない | `ui_common.json:1519-1780` | JSON UI だけで本文を事前入力する書式は確認できない。`text` を足すのは発明 binding |
 | 通常クリックは `button.container_take_all_place_all`、ドロップキーは `button.drop_one` に対応する | `ui_common.json:4817-4955`（`container_slot_button_prototype`）。`button.menu_inventory_drop` → `button.drop_one` は 4925-4926 | アイテム変化を起こす経路は実在する。ただし表示アイテムを動かす |
 | `container_items` はグリッドの collection 名で、`#collection_index` のような実行時 binding を本文へ変換する仕組みは確認できない | `chest_screen.json:24-45`、`data_driven_container_screen.json:15-42` | slot 番号を自動で本文へ入れる経路は確認できない |
 | `data_driven_container_screen.json` は data-driven **ブロック**用で、chest 画面を継承しないと明記されている | 同ファイル冒頭コメント | `VirtualContainer` がこの画面を使うかは未確定。既定接続はこのパネルを対象にしているだけ |
@@ -137,7 +137,7 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 | `PlayerCraftRecipeAfterEvent` / `PlayerUseNameTagAfterEvent` / `PortalActivateAfterEvent` / `PackSettingChangeAfterEvent` / `SoundCompletedAfterEvent` | それぞれの対象操作の after イベント | **不可**。チェスト画面の通常クリックでは発生しない |
 | `MessageReceiveAfterEvent` | client → server のメッセージ。`player` / `id` / `message` | **不可**。型定義のコメントに「This event is an internal implementation detail, and is otherwise not currently functional」と明記されている。JSON UI からこの id/message を送る書式も確認できない |
 | `Player.postClientMessage` / `World.broadcastClientMessage` | server → client のメッセージ送信 | **不可**。逆向きであり、クリックの受信には使えない |
-| `ContainerRules` | `allowedItems` / `bannedItems` / `weightLimit` などでコンテナ操作を制限 | **不可**。アイテム移動を拒否できても、クリックイベントを発生させない |
+| `ContainerRules` | `allowedItems` / `bannedItems` / `weightLimit` などでコンテナ操作を制限 | **不明**。作成時に規則を渡す口はないが、`containerRules` の各項目は readonly ではなく、型の上では取得後の変更が可能。実行時に反映されるか、拒否時にイベントが届くかは未検証（§12.1） |
 | `ItemLockMode.slot` | アイテムをその slot から動かせない | **未検証の候補**。通常クリックで `VirtualContainerItemChangeAfterEvent` が同じ内容で届くなら、復元不要のクリック源になり得る。ただし設計7.2 により、ロックを表示スロットの読み取り専用化には使えない。陽性でもクリック源としてだけ検討する。専用プローブを追加した（10 節） |
 
 ### 9.2 JSON UI samples の再確認
@@ -146,7 +146,7 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 - 新しい hardcoded button ID は増えていない。`button.slot0`〜`button.slot9` はホットバー選択、`button.drop_one` / `button.drop_all` はアイテム移動、`button.container_*` はスロット操作で、**汎用の「script へ値を送る」ボタンはない**。
 - `text_edit_box` に初期文字を入れる `text` プロパティは samples に存在せず、`common.text_edit_box` も `text_box_name` と content binding だけを使う。**根拠のない binding を追加しない**方針を維持する。
 - `button_mappings` は `from_button_id` / `to_button_id` / `mapping_type` / `scope` だけで、引数や動的な文字列を渡せない。
-- `data_driven_container_screen.json` の `item_grid` は `container_items` を使うが、collection index を chat 本文や button ID へ変換する書式はない。
+- `data_driven_container_screen.json` の `item_grid` は `container_items` を使うが、collection index を chat 本文や button ID へ変換する書式は samples の範囲では見つからない。
 - 公式 samples の範囲で、**UI → Script API の汎用クリック通知は依然として存在しない**。
 
 ### 9.3 唯一の直接クリック API: `@minecraft/server-ui` の `CustomForm`（設計10の対象外）
@@ -183,26 +183,30 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 
 ## 12. 2026-11-15 追加調査: 残っていた抜け道の確認（実装なし）
 
-§1 / §9 の結論を覆す経路が残っていないか、固定版の型（`node_modules/@minecraft/server/index.d.ts`、`@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の npm tarball）と samples `v1.26.70.23-preview` を追加で確認しました。**新しく実装できる経路は見つかりませんでした。** 代わりに、「まだ可能性があるように見えていた候補」が公式型の範囲で塞がっていることを確認しました。**この節によるコード変更はありません。**
+§1 / §9 の結論を覆す経路が残っていないか、固定版の型（`node_modules/@minecraft/server/index.d.ts`、`@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の npm tarball）と samples `v1.26.70.23-preview` を追加で確認しました。**この範囲では、新しく実装できる安全な経路は見つかりませんでした。** ただし「型・samples に記述がない」ことは不可能の証明ではないため、以下では**型の列挙で否定できるもの**と、**記述がないだけで可否が不明なもの**を分けます。**この節によるコード変更はありません。**
 
-### 12.1 塞がっていることを確認した候補
+### 12.1 候補ごとの確認結果
 
 | 候補 | 確認した内容 | 根拠 |
 |---|---|---|
-| コンテナ規則で移動を拒否し、その拒否イベントをクリック源にする | `VirtualContainerOptions` は `size` と `title` だけ。`Container.containerRules` は読み取り専用で setter がなく、`VirtualContainerManager.create()` も規則を受け取らない。**VirtualContainer に `ContainerRules` を設定する手段がない**ため、「移動を拒否させて itemChange だけ受け取る」案は型の上で成立しない（拒否時のイベント有無を試す土台がない） | d.ts 31086-31102（options）、8119（`readonly containerRules?`）、28403 以降（`ContainerRules` interface）、25535 以降（manager） |
-| 入力権限でチェスト画面のアイテム操作を止める | `InputPermissionCategory` は Camera / Movement / LateralMovement / Sneak / Jump / Mount / Dismount / MoveForward / MoveBackward / MoveLeft / MoveRight のみ。**inventory / GUI 操作に対応するカテゴリはない** | d.ts 2200-2260 |
-| DDUI で標準チェストのスロット表示を再現する | `@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の `index.d.ts` に **`ItemStack` が 1 回も出てこない**。`CustomForm` の要素は button / label / header / divider / dropdown / toggle / slider / textField / image / multiButtonRow / spacer だけで、アイテムアイコン・個数・ツールチップを表示する要素もオプションもない。§9.3 の「54 ボタンは実用的でない」に加えて、**そもそもアイテムを描画できない** | server-ui 365-698、1634-1836 |
+| コンテナ規則で移動を拒否し、その拒否イベントをクリック源にする | `VirtualContainerOptions` は `size` と `title` だけで、`VirtualContainerManager.create()` に規則を渡す口はない。`Container.containerRules` も `readonly` なので再代入できない。**ただし `readonly` が禁じるのはプロパティの再代入だけで、`ContainerRules` の各項目（`allowedItems` / `bannedItems` / `allowNestedStorageItems` / `weightLimit`）は readonly ではなく、取得したオブジェクトの配列操作や真偽値の書き換えは型検査を通る。** VirtualContainer の `containerRules` が実行時に存在するか、その変更が反映されるか、拒否時にイベントが届くかは公式型に記述がない。したがって「型の上で成立しない」とは言えず、**可否は不明（未検証）** | d.ts 31086-31102（options）、8119（`readonly containerRules?`）、28403-28432（`ContainerRules` interface）、25535-25553（manager） |
+| 入力権限でチェスト画面のアイテム操作を止める | `InputPermissionCategory` の列挙は Camera / Movement / LateralMovement / Sneak / Jump / Mount / Dismount / MoveForward / MoveBackward / MoveLeft / MoveRight の 11 種類で閉じている。**inventory / GUI 操作に対応するカテゴリは型にない** | d.ts 2200-2276 |
+| DDUI で標準チェストのスロット表示を再現する | `@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の `index.d.ts` に **`ItemStack` を受け取る要素・オプションはない**。`CustomForm` の要素は button / label / header / divider / dropdown / toggle / slider / textField / image / multiButtonRow / spacer だけで、個数・ツールチップ付きのアイテムスタックを表示する要素はない。**ただし `image(src, pack)` はパック内の画像を表示できるため、アイコン画像としてなら描ける可能性があり、「ItemStack の記述がない」ことは描画不能の証明ではない。** 標準チェスト表示を型の範囲で再現する手段は見つからないが、可否は不明 | server-ui 365-698、1634-1836 |
 | ホットバー選択変更を全スロットのクリック通知にする | `PlayerHotbarSelectedSlotChangeAfterEvent` の購読オプション `HotbarEventOptions` は `allowedSlots`（0〜8）だけで、**入力源（実キー / GUI ボタン）を区別する項目がない**。`Player.selectedSlotIndex` は書き込み可能（restricted-execution では読み取り専用）なので「クリック後に選択を戻して連打を検出する」案は型の上では書けるが、held item が実際に切り替わること、script からの書き込みが同じイベントを再発火するかは未確認。**実機根拠なしに実装しない** | d.ts 20587-20648、29575-29584、19304 |
-| チェスト画面で `button.slot_N` を受ける | `button.slot_0`〜`button.slot_9` への number key 対応は `inventory_screen_common`（`ui_common.json` 6838 以降）と loom / trade_2 / stonecutter / furnace / inventory_screen(_pocket) / hud にあり、**`chest_screen.json` にはない**。クリックから `button.slot_N` を出す overlay を作っても、チェスト画面側に受け口がある保証はない | `ui_common.json` 6838-6990、`chest_screen.json` 全体 |
+| チェスト画面で `button.slot_N` を受ける | `button.slot_0`〜`button.slot_9` への number key 対応は `inventory_screen_common`（`ui_common.json` 6838 以降）と loom / trade_2 / stonecutter / furnace / inventory_screen(_pocket) / hud にあり、**`chest_screen.json` には見つからない**。これは samples に記述がないという記録であり、未文書の binding や overlay 側の受け口の不存在を断定しない。チェスト画面側に受け口がある保証もない | `ui_common.json` 6838-6990、`chest_screen.json` 全体 |
 
-### 12.2 変更がないことも再確認
+### 12.2 変更がないことも再確認（samples / 型に見つからない記録）
+
+以下は「公式 samples / 固定版の型の範囲で確認できた」という記録で、記述がないことは不可能の証明ではありません。
 
 - `MessageReceiveAfterEvent` は「A specific currently-internal event used for passing messages from client to server」、購読側の `ServerMessageAfterEventSignal` は「not currently fully implemented, and should not be used」。§9.1 の評価は変わらない（d.ts 18820、23532 付近）。
-- `button.send` は samples の `chat_screen.json`（4 箇所）と `dev_console_screen.json`（1 箇所）だけ。
-- `edit_box` は `ui_common.json` の `common.text_edit_box`（1519）と `common.transparent_text_edit_box`（1947）の 2 種類だけで、どちらも初期文字列プロパティを持たない。`text_control` は文字表示用の control 参照で、内容の初期化ではない。
-- samples の UI JSON に command / scriptevent を実行する書式はない（`"command"` は command_block のコメントのみ）。
+- `button.send` は samples の範囲では `chat_screen.json`（4 箇所）と `dev_console_screen.json`（1 箇所）だけ。
+- `edit_box` は samples の範囲では `ui_common.json` の `common.text_edit_box`（1519）と `common.transparent_text_edit_box`（1947）の 2 種類だけで、どちらも初期文字列プロパティを持たない。`text_control` は文字表示用の control 参照で、内容の初期化ではない。
+- samples の UI JSON には command / scriptevent を実行する書式が見つからない（`"command"` は command_block のコメントのみ）。
 - `Store` 系・`button.copy_*` 系の hardcoded ID はクリップボードかストアで、サーバーへ値を送る経路ではない。
 
 ### 12.3 結論
 
-追加で実装できる安全な経路はありません。残っている唯一の lead は §11 の **CLICK-LOCK-01**（`ItemLockMode.slot` のアイテムを通常クリックしたときに `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか）で、これは型・samples では決着せず、使い捨てワールドでの実機観測が必要です。**この結果が出るまで、コアにクリック経路を実装しないでください。**
+公式型・samples で確認した範囲では、追加で実装できる安全な経路は見つかっていません。ただし、**型が禁止していないが実行時挙動が未確認の候補は残っています**：`containerRules` の項目変更が実行時に効くか（拒否イベントが届くか）と、`Player.selectedSlotIndex` の script 書き込みがホットバーイベントを再発火するかです。これらは「不可能」ではなく「不明」です。型・samples では決着しないため、使い捨てワールドでの実機観測が必要です。
+
+残っている lead のうち、§11 の **CLICK-LOCK-01**（`ItemLockMode.slot` のアイテムを通常クリックしたときに `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか）が最初に試すべきものです。**これらの結果が出るまで、コアにクリック経路を実装しないでください。**
