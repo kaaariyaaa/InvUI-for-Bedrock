@@ -11,6 +11,7 @@
  * - 既存ファイルを上書きせず、競合時は差分を出して中断すること
  * - 失敗時に部分適用を残さないこと
  * - 未検証の隔離プローブであり、置くだけでは有効にならないと表示すること
+ * - manifest.json のルートがオブジェクトでない場合はクラッシュせず検査エラーにし、導入しないこと
  * - Resource Pack manifest に type: "resources" のモジュールがない場合は検査エラーにし、導入しないこと
  * - generate-resource-pack が init とは別に、新しい出力先へ同梱5ファイルを生成し、
  *   接続 2 ファイルを _ui_defs.json に登録済みにすること
@@ -269,6 +270,65 @@ test('壊れた manifest.json は失敗し、パックは変更しない', () =>
 
     assert.equal(result.status, 1);
     assert.match(result.both, /manifest\.json/);
+    assert.deepEqual(snapshot(behaviorPack), before.behavior);
+    assert.deepEqual(snapshot(resourcePack), before.resource);
+  });
+});
+
+test('manifest.json のルートがオブジェクトでない場合は検査エラーにし、導入もしない', () => {
+  for (const [label, text] of [
+    ['null', 'null'],
+    ['配列', '[]'],
+  ]) {
+    withFixture(({ behaviorPack, resourcePack }) => {
+      fs.writeFileSync(path.join(resourcePack, 'manifest.json'), `${text}\n`);
+      const before = { behavior: snapshot(behaviorPack), resource: snapshot(resourcePack) };
+
+      const inspect = runCli([
+        'init',
+        '--behavior-pack',
+        behaviorPack,
+        '--resource-pack',
+        resourcePack,
+        '--json',
+      ]);
+      assert.equal(inspect.status, 1, `${label}: ${inspect.both}`);
+      const report = JSON.parse(inspect.stdout);
+      const check = report.checks.find(
+        (entry) => entry.area === 'resource-pack' && entry.id === 'manifest.root',
+      );
+      assert.ok(check, `${label}: manifest.root の検査がない`);
+      assert.equal(check.level, 'error', `${label}: ${check.message}`);
+      assert.deepEqual(snapshot(behaviorPack), before.behavior, `${label}: Behavior Pack が変更された`);
+
+      const install = runCli([
+        'init',
+        '--resource-pack',
+        resourcePack,
+        '--install-resource-pack',
+        '--json',
+      ]);
+      assert.equal(install.status, 1, `${label}: ${install.both}`);
+      const installReport = JSON.parse(install.stdout);
+      assert.equal(installReport.resourcePackInstall.status, 'blocked', label);
+      assert.equal(installReport.resourcePackInstall.files.length, 0, label);
+      assert.deepEqual(snapshot(resourcePack), before.resource, `${label}: パックが変更された`);
+    });
+  }
+
+  withFixture(({ behaviorPack, resourcePack }) => {
+    fs.writeFileSync(path.join(behaviorPack, 'manifest.json'), 'null\n');
+    const before = { behavior: snapshot(behaviorPack), resource: snapshot(resourcePack) };
+
+    const result = runCli(['init', '--behavior-pack', behaviorPack, '--resource-pack', resourcePack, '--json']);
+
+    assert.equal(result.status, 1, result.both);
+    const report = JSON.parse(result.stdout);
+    const check = report.checks.find(
+      (entry) => entry.area === 'behavior-pack' && entry.id === 'manifest.root',
+    );
+    assert.ok(check, 'Behavior Pack 側の manifest.root 検査がない');
+    assert.equal(check.level, 'error', check.message);
     assert.deepEqual(snapshot(behaviorPack), before.behavior);
     assert.deepEqual(snapshot(resourcePack), before.resource);
   });

@@ -193,7 +193,20 @@ function inspectPack(root, area) {
   }
   addCheck(checks, area, 'manifest.exists', 'ok', 'manifest.json を読み込みました');
 
-  const header = manifest && typeof manifest === 'object' ? manifest.header : undefined;
+  // JSON としては読めてもルートがオブジェクトでない manifest は無効。
+  // null のままプロパティを読むと TypeError で CLI が落ちるため、ここで止める。
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    addCheck(
+      checks,
+      area,
+      'manifest.root',
+      'error',
+      'manifest.json のルートがオブジェクトではありません。manifest の形式を確認してください',
+    );
+    return checks;
+  }
+
+  const header = manifest.header;
   if (!header || typeof header !== 'object') {
     addCheck(checks, area, 'manifest.header', 'error', 'manifest.header がありません');
   } else if (Array.isArray(header.min_engine_version)) {

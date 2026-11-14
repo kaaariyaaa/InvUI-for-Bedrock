@@ -362,7 +362,7 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 ### CLI が行うこと
 
-- `manifest.json` の存在と JSON としての読み込みを検査する。
+- `manifest.json` の存在と JSON としての読み込みを検査する。JSON として読めてもルートがオブジェクトでない（`null` や配列など）場合は検査エラーにし、`--install-resource-pack` を指定しても書き込まない。
 - Behavior Pack の script モジュール、`entry` の有無、`@minecraft/server` への dependency を確認する。
 - Resource Pack の `manifest.modules` に `type: "resources"` のモジュールがあるか確認する。ない場合は Minecraft がパックとして読み込めないため検査エラーとし、`--install-resource-pack` を指定しても書き込まない。
 - Resource Pack の `ui/` ディレクトリと、既存の `chest_screen.json` / `invui.json` / `invui_connect*.json` / `_ui_defs.json` の有無を報告する。
