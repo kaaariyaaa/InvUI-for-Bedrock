@@ -156,6 +156,7 @@ test('manifest.json は新規 UUID・beta 依存・危険警告を持つ', () =>
   assert.match(manifest.header.description, /no restore/);
   assert.match(manifest.header.description, /NOT saved/);
   assert.match(manifest.header.description, /never store valuables/);
+  assert.match(manifest.header.description, /stay locked in your inventory/);
 
   assert.equal(manifest.modules.length, 1);
   const scriptModule = manifest.modules[0];
@@ -195,6 +196,7 @@ test('main.js は観測のみで、復元・クリック実行・JSON UI を含�
   assert.match(source, /minecraft:paper/);
   assert.match(source, /system\.runTimeout/);
   assert.match(source, /AUTOCLOSE/);
+  assert.match(source, /stay stuck in the player's inventory/);
   assert.doesNotMatch(source, /\bhandleClick\s*\(/);
   assert.doesNotMatch(source, /button\.send|button\.drop_one/);
   assert.doesNotMatch(
@@ -212,6 +214,9 @@ test('README は陽性/陰性の解釈と限界を明示する', () => {
   assert.match(readme, /復元[\s\S]*一切行いません/);
   assert.match(readme, /Shift クリック/);
   assert.match(readme, /実機未検証/);
+  assert.match(readme, /インベントリに残る可能性/);
+  assert.match(readme, /持ち出せてしまったら/);
+  assert.match(readme, /lockMode` は意図的に除外/);
 });
 
 test('README は設計7.2の制約を明記する', () => {

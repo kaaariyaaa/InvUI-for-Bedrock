@@ -18,14 +18,17 @@
  * This probe does not implement a click path. It only observes and logs:
  *
  * - no JSON UI, no chat payload, no button mapping
- * - no `Container.setItem` / cursor clear / restore in any event handler
+ * - no `Container.setItem` / cursor clear / restore in the itemChange or
+ *   close handlers (only the pre-open fill writes)
  * - no `handleClick`; the event is not turned into an action
  * - items are `minecraft:stick` / `minecraft:paper` only
  * - nothing in the VirtualContainer is saved; closing or reloading discards it
  *
  * DANGER: `VirtualContainerItemChangeAfterEvent` is an `after` event. It cannot
  * prevent a move and cannot restore the previous stack without the duplication
- * risk this probe deliberately avoids. Use only in a throwaway world.
+ * risk this probe deliberately avoids. A stack taken out of the container may
+ * keep its lock and stay stuck in the player's inventory. Use only in a
+ * throwaway world.
  *
  * Install: see ../README.md. Commands:
  *

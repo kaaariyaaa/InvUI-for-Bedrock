@@ -2,7 +2,7 @@
   "format_version": 2,
   "header": {
     "name": "InvUI locked-click probe - DISPOSABLE TEST WORLD ONLY",
-    "description": "DISPOSABLE TEST WORLD ONLY. Observes whether a normal click on an ItemLockMode.slot item in a VirtualContainer raises VirtualContainerItemChangeAfterEvent. Observation only: no JSON UI, no restore, no click handler. Items are minecraft:stick and minecraft:paper only. NOT saved; never store valuables.",
+    "description": "DISPOSABLE TEST WORLD ONLY. Observes whether a normal click on an ItemLockMode.slot item in a VirtualContainer raises VirtualContainerItemChangeAfterEvent. Observation only: no JSON UI, no restore, no click handler. Items are minecraft:stick and minecraft:paper only. NOT saved; never store valuables. A taken item may stay locked in your inventory.",
     "uuid": "c980bbce-7652-4920-97a1-c5e3376a2428",
     "version": [0, 1, 0],
     "min_engine_version": [1, 26, 70]

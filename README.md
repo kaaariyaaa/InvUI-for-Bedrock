@@ -435,6 +435,7 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 - `VirtualContainer` が chest 画面を使うかのマーカープローブ（単体 RP・ラベルのみ）: [tests/manual-bedrock/chest-resource-pack/README.md](tests/manual-bedrock/chest-resource-pack/README.md)
 - `data_driven_container` 画面の判定プローブ: [tests/manual-bedrock/data-driven-resource-pack/README.md](tests/manual-bedrock/data-driven-resource-pack/README.md)
 - チェスト画面のボタン押下が `!invui:` チャット通知を生むかの未検証観察プローブ（単体 RP・自動 payload なし・通常チェストにも影響し得る・使い捨てワールド専用・他の RP と同時併用しない）: [tests/manual-bedrock/button-send-resource-pack/README.md](tests/manual-bedrock/button-send-resource-pack/README.md)
+- `ItemLockMode.slot` のアイテムを通常クリックしたときに itemChange が届くかの観測プローブ（復元・クリック実行なし・stick / paper のみ・使い捨てワールド専用）。陽性でも設計7.2 により read-only 制御の根拠にしない: [tests/manual-bedrock/locked-click-probe/README.md](tests/manual-bedrock/locked-click-probe/README.md)
 
 CLI の安全側の動作は、次のコマンドで自動確認できます（`npm test` にも含まれます）。
 
