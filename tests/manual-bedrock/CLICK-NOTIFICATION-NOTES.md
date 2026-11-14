@@ -12,6 +12,8 @@
 - `PlayerCursorInventoryComponent` / `playerCursorItemGrab` を使う経路は、**タッチでカーソルが使われず**、slot / container も通知されないため、全入力方式を満たしません。カーソル復元は採用しません（[CURSOR-INPUT-NOTES.md](CURSOR-INPUT-NOTES.md)）。
 - **マーカーアイテム方式**（button slot に使い捨てアイテムを置き、通常クリックで動いたことを itemChange で受ける）は、自動・タッチ可能な候補ですが、**button slot の見た目がマーカーになり、プレイヤーが持ち出せ、入力抑制なしでは他人のアイテムを置かれる**ため、設計 10.1 / 10.8 の「標準表示・取り出し不可・非破壊」を満たしません。実装していません（第 5 節 V-4）。
 
+§12 で、残っていた抜け道（コンテナ規則・入力権限・DDUI のアイテム描画・ホットバー選択）が公式型の範囲で塞がっていることを追加確認しています。
+
 現時点で「実装済み」なのは、`World.beforeEvents.chatSend` を受けて `!invui:<session-id>:<slot>:<sequence>` を `Window.handleClick()` へ流す**受信経路のみ**です（Node.js テスト済み、実機未検証）。これはクリックの証明でも認証でもありません。
 
 ## 2. 対象版
@@ -178,3 +180,29 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 5. **CLICK-DDUI-01**（設計変更を許す場合だけ）: `CustomForm` で 9 / 27 ボタンのメニューを表示し、PC / タッチ / コントローラーでコールバックとレイアウトを確認する。標準チェスト表示の代替にはならないことを記録する。
 
 **1 が陽性になるまで、コアにクリック経路を実装しないでください。** 1 が陰性なら、2 の 9 値制限と入力抑制を実機で確認し、それも陰性なら設計10は「標準チェスト表示を保った自動クリックは実現できない」として、`Window.handleClick(slot)` の明示 API と手入力プローブだけを残します。
+
+## 12. 2026-11-15 追加調査: 残っていた抜け道の確認（実装なし）
+
+§1 / §9 の結論を覆す経路が残っていないか、固定版の型（`node_modules/@minecraft/server/index.d.ts`、`@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の npm tarball）と samples `v1.26.70.23-preview` を追加で確認しました。**新しく実装できる経路は見つかりませんでした。** 代わりに、「まだ可能性があるように見えていた候補」が公式型の範囲で塞がっていることを確認しました。**この節によるコード変更はありません。**
+
+### 12.1 塞がっていることを確認した候補
+
+| 候補 | 確認した内容 | 根拠 |
+|---|---|---|
+| コンテナ規則で移動を拒否し、その拒否イベントをクリック源にする | `VirtualContainerOptions` は `size` と `title` だけ。`Container.containerRules` は読み取り専用で setter がなく、`VirtualContainerManager.create()` も規則を受け取らない。**VirtualContainer に `ContainerRules` を設定する手段がない**ため、「移動を拒否させて itemChange だけ受け取る」案は型の上で成立しない（拒否時のイベント有無を試す土台がない） | d.ts 31086-31102（options）、8119（`readonly containerRules?`）、28403 以降（`ContainerRules` interface）、25535 以降（manager） |
+| 入力権限でチェスト画面のアイテム操作を止める | `InputPermissionCategory` は Camera / Movement / LateralMovement / Sneak / Jump / Mount / Dismount / MoveForward / MoveBackward / MoveLeft / MoveRight のみ。**inventory / GUI 操作に対応するカテゴリはない** | d.ts 2200-2260 |
+| DDUI で標準チェストのスロット表示を再現する | `@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` の `index.d.ts` に **`ItemStack` が 1 回も出てこない**。`CustomForm` の要素は button / label / header / divider / dropdown / toggle / slider / textField / image / multiButtonRow / spacer だけで、アイテムアイコン・個数・ツールチップを表示する要素もオプションもない。§9.3 の「54 ボタンは実用的でない」に加えて、**そもそもアイテムを描画できない** | server-ui 365-698、1634-1836 |
+| ホットバー選択変更を全スロットのクリック通知にする | `PlayerHotbarSelectedSlotChangeAfterEvent` の購読オプション `HotbarEventOptions` は `allowedSlots`（0〜8）だけで、**入力源（実キー / GUI ボタン）を区別する項目がない**。`Player.selectedSlotIndex` は書き込み可能（restricted-execution では読み取り専用）なので「クリック後に選択を戻して連打を検出する」案は型の上では書けるが、held item が実際に切り替わること、script からの書き込みが同じイベントを再発火するかは未確認。**実機根拠なしに実装しない** | d.ts 20587-20648、29575-29584、19304 |
+| チェスト画面で `button.slot_N` を受ける | `button.slot_0`〜`button.slot_9` への number key 対応は `inventory_screen_common`（`ui_common.json` 6838 以降）と loom / trade_2 / stonecutter / furnace / inventory_screen(_pocket) / hud にあり、**`chest_screen.json` にはない**。クリックから `button.slot_N` を出す overlay を作っても、チェスト画面側に受け口がある保証はない | `ui_common.json` 6838-6990、`chest_screen.json` 全体 |
+
+### 12.2 変更がないことも再確認
+
+- `MessageReceiveAfterEvent` は「A specific currently-internal event used for passing messages from client to server」、購読側の `ServerMessageAfterEventSignal` は「not currently fully implemented, and should not be used」。§9.1 の評価は変わらない（d.ts 18820、23532 付近）。
+- `button.send` は samples の `chat_screen.json`（4 箇所）と `dev_console_screen.json`（1 箇所）だけ。
+- `edit_box` は `ui_common.json` の `common.text_edit_box`（1519）と `common.transparent_text_edit_box`（1947）の 2 種類だけで、どちらも初期文字列プロパティを持たない。`text_control` は文字表示用の control 参照で、内容の初期化ではない。
+- samples の UI JSON に command / scriptevent を実行する書式はない（`"command"` は command_block のコメントのみ）。
+- `Store` 系・`button.copy_*` 系の hardcoded ID はクリップボードかストアで、サーバーへ値を送る経路ではない。
+
+### 12.3 結論
+
+追加で実装できる安全な経路はありません。残っている唯一の lead は §11 の **CLICK-LOCK-01**（`ItemLockMode.slot` のアイテムを通常クリックしたときに `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか）で、これは型・samples では決着せず、使い捨てワールドでの実機観測が必要です。**この結果が出るまで、コアにクリック経路を実装しないでください。**
