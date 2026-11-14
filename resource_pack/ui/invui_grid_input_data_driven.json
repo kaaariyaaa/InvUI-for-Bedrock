@@ -1,0 +1,34 @@
+{
+  "namespace": "data_driven_container",
+  "desktop_panel": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_front",
+        "value": [
+          {
+            "invui_grid_input_warning@invui_grid_input_probe.invui_grid_input_warning": {},
+            "invui_grid_input_note@invui_grid_input_probe.invui_grid_input_note": {}
+          }
+        ]
+      }
+    ]
+  },
+  "panel_top_half": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_grid_input_root@invui_grid_input_probe.invui_grid_input_root": {
+              "anchor_from": "top_left",
+              "anchor_to": "top_left",
+              "offset": [7, 10]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
