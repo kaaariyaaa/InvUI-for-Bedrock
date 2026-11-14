@@ -411,10 +411,11 @@ export class Item {
   updatePeriodically(ticks: number): this {
     assertTicks(ticks);
     this.periodTicks = ticks;
-    if (this.cancelPeriodic !== undefined) {
-      this.stopPeriodic();
-      this.startPeriodic();
-    }
+    // Restart an active interval with the new period, and start one when the
+    // Item is already displayed but had no period yet (startPeriodic no-ops
+    // when nothing subscribes).
+    this.stopPeriodic();
+    this.startPeriodic();
     this.notifyWindows();
     return this;
   }

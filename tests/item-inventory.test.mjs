@@ -315,6 +315,24 @@ test("resubscribing restarts periodic updates and period changes take effect", (
   assert.equal(system.runs.size, 1);
 });
 
+test("setting a period on an already displayed Item starts periodic updates", () => {
+  let count = 0;
+  const item = Item.simple(new ItemBuilder("minecraft:stone"));
+  const unsubscribe = item.subscribe(() => count++);
+  assert.equal(system.runs.size, 0, "an Item without a period schedules nothing");
+
+  item.updatePeriodically(20);
+  assert.equal(system.runs.size, 1, "the displayed Item starts ticking");
+  assert.equal([...system.runs.values()][0].ticks, 20);
+  assert.equal(count, 1, "setting the period also notifies once");
+
+  fireTick();
+  assert.equal(count, 2, "the scheduled tick notifies");
+
+  unsubscribe();
+  assert.equal(system.runs.size, 0, "hiding the Item still stops the timer");
+});
+
 test("Item.EMPTY resolves to no stack", async () => {
   assert.equal(await Item.EMPTY.resolve(undefined), undefined);
 });
