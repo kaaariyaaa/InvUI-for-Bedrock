@@ -117,3 +117,63 @@ V-4 は「button slot に使い捨てマーカーを置けば、通常クリッ�
 - [edit-box-resource-pack/](edit-box-resource-pack/README.md)
 - [chest-resource-pack/](chest-resource-pack/README.md)
 - [data-driven-resource-pack/](data-driven-resource-pack/README.md)
+
+## 9. 2026-11-15 再調査: 1.26.70 beta の全イベントと JSON UI の再確認
+
+設計10の実装経路を探すため、`@minecraft/server` `2.13.0-beta.1.26.70-preview.24` の `index.d.ts` と `bedrock-samples` のタグ `v1.26.70.23-preview` を**全イベント・全 hardcoded button ID・binding 名**まで再確認しました。前回の結論（標準チェスト表示を保ったまま、非破壊・自動・slot 区別・全入力対応の経路は確認できない）は変わりません。追加で確認した API と、新しい候補を以下に記録します。
+
+### 9.1 新規・変更された Script API イベントの評価
+
+| API | 内容 | クリック源に使えるか |
+|---|---|---|
+| `VirtualContainerCloseAfterEvent.items` | 画面が閉じた時点の全スロット内容。`player` / `reason` はあるが slot はない | **不可**。閉じたことしか分からず、どの slot を押したかを示さない |
+| `BlockContainerOpenedAfterEvent` / `EntityContainerOpenedAfterEvent` | コンテナが開かれた after イベント。`openSource` はあるが、**開いたプレイヤーを持たない**（block / entity 側のイベント） | **不可**。クリックでもなく、プレイヤーも slot も特定できない |
+| `PlayerInventoryItemChangeAfterEvent` | `player` / `inventoryType`（Hotbar / Inventory）/ `slot` / before / after。after | **不可**。VirtualContainer の slot ではなく、カーソルも含まない。クリックでアイテムを動かすと破壊的 |
+| `PlayerHotbarSelectedSlotChangeAfterEvent` | `player` / `previousSlotSelected` / `newSlotSelected`（0〜8）/ `itemStack`。after | **条件付き候補**。JSON UI のボタンを `button.slot_N` へ mapping すればホットバー選択が変わる可能性がある。ただし **9 値しかなく、mapping がクリックで発火するかは未検証**。プレイヤーの通常の 1〜9 キー入力とも区別できない |
+| `PlayerInputModeChangeAfterEvent` | 入力デバイスの種類の変更だけ | **不可**。slot もクリックもない |
+| `PlayerInputPermissionCategoryChangeAfterEvent` | 入力権限カテゴリの変更 | **不可**。UI クリックではない |
+| `PlayerCraftRecipeAfterEvent` / `PlayerUseNameTagAfterEvent` / `PortalActivateAfterEvent` / `PackSettingChangeAfterEvent` / `SoundCompletedAfterEvent` | それぞれの対象操作の after イベント | **不可**。チェスト画面の通常クリックでは発生しない |
+| `MessageReceiveAfterEvent` | client → server のメッセージ。`player` / `id` / `message` | **不可**。型定義のコメントに「This event is an internal implementation detail, and is otherwise not currently functional」と明記されている。JSON UI からこの id/message を送る書式も確認できない |
+| `Player.postClientMessage` / `World.broadcastClientMessage` | server → client のメッセージ送信 | **不可**。逆向きであり、クリックの受信には使えない |
+| `ContainerRules` | `allowedItems` / `bannedItems` / `weightLimit` などでコンテナ操作を制限 | **不可**。アイテム移動を拒否できても、クリックイベントを発生させない |
+| `ItemLockMode.slot` | アイテムをその slot から動かせない | **未検証の候補**。通常クリックで `VirtualContainerItemChangeAfterEvent` が同じ内容で届くなら、復元不要のクリック源になる。専用プローブを追加した（10 節） |
+
+### 9.2 JSON UI samples の再確認
+
+- `button.send` は `chat_screen.json` と `dev_console_screen.json` にだけ現れる。**他の画面で動く保証はなく、slot / session / sequence を本文へ自動で入れる binding もない**（前回と同じ）。
+- 新しい hardcoded button ID は増えていない。`button.slot0`〜`button.slot9` はホットバー選択、`button.drop_one` / `button.drop_all` はアイテム移動、`button.container_*` はスロット操作で、**汎用の「script へ値を送る」ボタンはない**。
+- `text_edit_box` に初期文字を入れる `text` プロパティは samples に存在せず、`common.text_edit_box` も `text_box_name` と content binding だけを使う。**根拠のない binding を追加しない**方針を維持する。
+- `button_mappings` は `from_button_id` / `to_button_id` / `mapping_type` / `scope` だけで、引数や動的な文字列を渡せない。
+- `data_driven_container_screen.json` の `item_grid` は `container_items` を使うが、collection index を chat 本文や button ID へ変換する書式はない。
+- 公式 samples の範囲で、**UI → Script API の汎用クリック通知は依然として存在しない**。
+
+### 9.3 唯一の直接クリック API: `@minecraft/server-ui` の `CustomForm`（設計10の対象外）
+
+`@minecraft/server-ui` `2.5.0-beta.1.26.70-preview.24` には DDUI の `CustomForm` があり、`button(label, onClick)`、`image(src, pack, { onClick })`、`multiButtonRow`（最大 3 個）を提供します。**クリックはコールバックで直接 Script API に届き、slot を呼び出し側が持つため、非破壊・自動・slot 区別・全入力対応という点だけを見れば設計10の要件を満たします。**
+
+ただし、これは `VirtualContainer` のチェスト画面ではありません。
+
+- 標準チェストのアイテム表示（9×6 グリッド、アイテムアイコン、個数、ツールチップ）を維持できない。
+- `VirtualContainer` の `Container` / itemChange / close イベントと接続されない。
+- 設計 0.1 の「GUI 基盤は `VirtualContainer`」、10.1 の「視覚上は標準のチェストアイテム表示を維持する」に反する。
+
+したがって **設計10の代替にはならない**。標準チェスト表示を諦めてよい別プロダクト判断がある場合だけ、`CustomForm` をクリック源にする選択肢があります。その場合も 54 ボタンの一覧は実用的なチェスト UI ではないため、9 / 27 スロット程度のメニュー用途に限定されます。
+
+## 10. 追加した実機プローブ（ロック済みアイテム）
+
+[`locked-click-probe/`](locked-click-probe/README.md) を追加しました。`ItemLockMode.slot` のアイテムを VirtualContainer に置き、**通常クリックで `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか**だけを観測します。
+
+- 復元・`setItem`・カーソル操作・クリック実行は**一切しません**。
+- JSON UI / Resource Pack / `button.send` を含みません。
+- アイテムは `minecraft:stick` / `minecraft:paper` だけです。
+- 陽性なら、復元不要で slot 付きのクリック源になる可能性があります。陰性なら、ロックはクリック源に使えないと確定できます。
+
+## 11. 実機テストの次の順序
+
+1. **CLICK-LOCK-01**: [`locked-click-probe/`](locked-click-probe/README.md) を単独の使い捨てワールドで実行する。`slot` / `inventory` / `plain`、9 / 27 / 54、PC / タッチ / コントローラーで、通常クリック 1 回あたりの `ITEM_CHANGE` と `kind` を記録する。**最初に試すべき候補**（標準チェスト表示を維持でき、復元もチャットも不要）。
+2. **CLICK-HOTBAR-01**: 9 スロットの透明ボタン overlay で、各ボタンの `button.menu_select` を `button.slot_N`（N=0〜8）へ mapping し、`PlayerHotbarSelectedSlotChangeAfterEvent` がクリックで発火するかを見る。発火しても 9 値だけであり、通常の 1〜9 キー入力との区別が必要。実装候補にする前に、入力抑制と誤発火を確認する。
+3. **CLICK-SEND-01/02**: 既存の `button-send-resource-pack/` / `edit-box-resource-pack/` で、VirtualContainer 画面の `button.send` と `edit_box` の成立を確認する。成立しても、slot / session / sequence の自動生成経路はないため、手入力プローブ以上にはならない。
+4. **CLICK-CURSOR-01**: `CURSOR-INPUT-NOTES.md` のカーソル経路を再確認する。タッチ非対応と after 復元の危険が残るため、採用しない場合の比較用。
+5. **CLICK-DDUI-01**（設計変更を許す場合だけ）: `CustomForm` で 9 / 27 ボタンのメニューを表示し、PC / タッチ / コントローラーでコールバックとレイアウトを確認する。標準チェスト表示の代替にはならないことを記録する。
+
+**1 が陽性になるまで、コアにクリック経路を実装しないでください。** 1 が陰性なら、2 の 9 値制限と入力抑制を実機で確認し、それも陰性なら設計10は「標準チェスト表示を保った自動クリックは実現できない」として、`Window.handleClick(slot)` の明示 API と手入力プローブだけを残します。

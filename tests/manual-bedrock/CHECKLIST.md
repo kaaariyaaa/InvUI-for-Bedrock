@@ -109,6 +109,21 @@
 
 > CLICK-* が不合格の場合、クリック機能を「提供済み」として README やリリースノートに書かない。
 
+### D2. 新規候補（ロック済みアイテム / ホットバー選択）
+
+`D` の chat 通知経路とは別に、1.26.70 beta のイベントを使う候補です。**未実施であり、陽性でもクリック機能の完成ではありません。** 使い捨てワールドだけで行います。
+
+| ID | 手順 | 合格条件 | 結果 | 根拠・メモ |
+|---|---|---|---|---|
+| CLICK-LOCK-01 | [`locked-click-probe/`](locked-click-probe/README.md) を単独で導入し、`!lockprobe open 9 slot 1200` の画面で通常クリックする（PC） | `ITEM_CHANGE kind=SAME_ITEM_CANDIDATE` が 1 回だけ出て、スロットの内容・個数が変わらない。出ない場合は陰性として記録 | | |
+| CLICK-LOCK-02 | 同じ操作をタッチ / コントローラーで行う | CLICK-LOCK-01 と同じ結果。入力方式ごとに記録する | | |
+| CLICK-LOCK-03 | ロック済みスロットで Shift クリック / ドロップ / ドラッグ / 配置を行う | 通常クリックと区別できる、またはロックが全操作を拒否する。アイテムが増減しない | | |
+| CLICK-HOTBAR-01 | 9 スロットの overlay で、各ボタンの `button.menu_select` を `button.slot_N`（N=0〜8）へ mapping し、クリックする | `PlayerHotbarSelectedSlotChangeAfterEvent` がクリックで発火する。通常の 1〜9 キー入力と区別できる。9 値の制限を記録する | | |
+
+> CLICK-LOCK-01/02 が陽性でも、`beforeItemStack` / `itemStack` だけで通常クリックと他の操作を区別できるとは限らない。CLICK-LOCK-03 と併せて判定する。CLICK-HOTBAR-01 は 9 値しかなく、入力抑制なしでは通常のホットバー入力と競合する。
+
+> CLICK-* が不合格の場合、クリック機能を「提供済み」として README やリリースノートに書かない。
+
 ---
 
 ## E. `InventoryLink` の安全試験（`C` 合格後に最後に実施）
