@@ -152,6 +152,26 @@ Windows の Preview では、1.21.120 以降の GDK 版の保存先が安定版�
 - **通知文字列はプレイヤーが手入力できるため偽装可能。** `sender` も含め、session / slot / sequence の妥当性検証はしない。このプローブは受信の有無と内容の記録だけを行い、click action / `handleClick` / スロット操作 / アイテム移動を一切実行しない（設計書 10.5 の入力安全性）。
 - このパックは JSON UI を含まないため、実機で `button.send` がこの prefix を送るか（そもそもチェスト画面で成立するか）は確認できない。手入力でも同じ観測経路を通るので、ログの有無は本物のクリック経路の証明にならない。
 
+### 3.5 `event.container` の同一参照の観測
+
+close / itemChange の `event.container` が `virtualContainerManager.create()` の戻り値と**同一参照**かを、真偽値として記録だけします。実機でイベントごとに別インスタンス（ラッパー）が届く可能性を確かめるための観測であり、**この観測経路は実機未実行**で、結果が `true` / `false` のどちらになるかはまだ取得していません。
+
+観測方法:
+
+- コンソールに `CONTAINER_IDENTITY kind=close|itemChange size=N sameRef=true|false` を出す。値が変わったときだけ出す（毎イベントは出さない）。
+- 各イベント行にも付く: `CLOSE ... containerSameRef=...` / `DANGER ITEM_CHANGE ... containerSameRef=...`。
+- `!invui dump` に `IDENTITY size=N closeSameRef=... itemChangeSameRef=...` を出す。
+
+値の意味:
+
+| 値 | 意味 |
+|---|---|
+| `true` | そのイベントの `event.container` が `create()` の戻り値と同一参照だった |
+| `false` | 同一参照ではなかった（実機で別インスタンスが届いた、という観測結果） |
+| `(未観測)` | そのイベントがまだ届いていない（**unknown。`false` ではない**。判定材料がない） |
+
+`false` / `(未観測)` でも close の pending 解除・会計・警告・STOP 判定は止めません。以前は `event.container !== container` で早期 return していたため、別参照ならこれらが静かに止まっていました。現在は `{ containers: [container] }` の購読フィルタで対象コンテナに限定されているとみなして処理を続行し、真偽値の記録だけを行います。したがって「`false` が出た」は不具合ではなく観測結果であり、「`(未観測)`」はイベント未到達です。この区別は、close が来ない原因が `UserBusy` なのか購読ミスなのかを切り分けるために使います。
+
 ## 4. 手動試験
 
 各項目は **合格 / 不合格 / 未実施 / N/A** で記録する。1 つでもアイテムの複製・消失を確認したら中止する。

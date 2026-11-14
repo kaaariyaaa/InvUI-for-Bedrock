@@ -5,6 +5,8 @@
  * - VirtualContainer の基本表示 (create / open / close / getViewers)
  * - virtualContainerClose の reason 観測
  * - virtualContainerItemChange の観測（画面からの操作だけで発生するか）
+ * - close / itemChange イベントの event.container が manager.create() の戻り値と同一参照か
+ *   （`containerSameRef` / `IDENTITY` として真偽値を記録する。結果は実機未実行＝未取得）
  * - button.send → チャット通知の受信観測（専用 prefix だけ cancel し、受信ログを残す。click は実行しない）
  *
  * 危険警告:
@@ -28,6 +30,9 @@
  *   合計個数を突き合わせ、会計不一致を検知したら STOP して以降の open / fill を拒否する。
  * - button.send の通知文字列はプレイヤーが手入力できるため偽装可能。このプローブは受信の観測だけを
  *   行い、click action / handleClick / スロット操作は一切実行しない（設計書 10.5 の入力安全性）。
+ * - event.container と manager.create() の戻り値の同一参照観測は実機未実行。真偽値を記録するだけで、
+ *   実機での結果はまだ無い。同一参照でなくても処理は続行する（早期 return で pending 解除・会計・
+ *   警告が静かに止まるのを避けるため。イベントは { containers } 購読で対象コンテナに限定済みとみなす）。
  *
  * 依存:
  * - @minecraft/server 2.13.0-beta (manifest の dependency)
@@ -54,7 +59,9 @@ const lastSizeByPlayer = new WeakMap();
 /**
  * コンテナごとの会計。fill と itemChange の差分から「コンテナ内にあるはずの個数」を維持し、
  * 実スロットの走査結果と比較する。itemChange の取りこぼし・消失・複製の検知に使う。
- * @type {Map<import("@minecraft/server").VirtualContainer, {size: number, expected: Map<string, number>, changeWarned: boolean}>}
+ * identity は close / itemChange の event.container が create() の戻り値と同一参照だったかの
+ * 最新値（未観測は undefined）。判定結果は実機未取得。
+ * @type {Map<import("@minecraft/server").VirtualContainer, {size: number, expected: Map<string, number>, changeWarned: boolean, identity: {close: boolean | undefined, itemChange: boolean | undefined}}>}
  */
 const ledgers = new Map();
 
@@ -157,14 +164,14 @@ function subscribeContainer(container, size) {
 
   world.afterEvents.virtualContainerClose.subscribe(
     (event) => {
-      if (event.container !== container) return;
+      const containerSameRef = recordContainerIdentity(ledger, "close", event.container, container);
       // close イベントで表示未確認の open を解除する。次に同じ size を開けるのはこの後。
       const pending = pendingOpenPlayers.get(container);
       if (pending) removePendingOpener(pending, event.player);
       const hasItems = Array.isArray(event.items);
       const items = hasItems ? event.items : [];
       const nonEmptySlots = items.filter((item) => item !== undefined).length;
-      const line = `CLOSE size=${size} reason=${event.reason} player=${playerLabel(event.player)} nonEmptySlots=${nonEmptySlots}`;
+      const line = `CLOSE size=${size} reason=${event.reason} player=${playerLabel(event.player)} containerSameRef=${containerSameRef} nonEmptySlots=${nonEmptySlots}`;
       log(line);
 
       // close 時点の全内容を残す。空きは明示的に (empty) とし、個数は種別ごとに合計する。
@@ -201,10 +208,10 @@ function subscribeContainer(container, size) {
 
   world.afterEvents.virtualContainerItemChange.subscribe(
     (event) => {
-      if (event.container !== container) return;
+      const containerSameRef = recordContainerIdentity(ledger, "itemChange", event.container, container);
       const before = describeStack(event.beforeItemStack);
       const after = describeStack(event.itemStack);
-      const line = `DANGER ITEM_CHANGE size=${size} slot=${event.slot} player=${playerLabel(event.player)} ${before} -> ${after}`;
+      const line = `DANGER ITEM_CHANGE size=${size} slot=${event.slot} player=${playerLabel(event.player)} containerSameRef=${containerSameRef} ${before} -> ${after}`;
       log(line);
       log(
         "DANGER 画面からの操作を検知した。投入物は画面外へ出る・消える可能性があり、複製も未検証。" +
@@ -238,10 +245,38 @@ function subscribeContainer(container, size) {
 function ledgerFor(container, size) {
   let ledger = ledgers.get(container);
   if (!ledger) {
-    ledger = { size, expected: new Map(), changeWarned: false };
+    ledger = {
+      size,
+      expected: new Map(),
+      changeWarned: false,
+      identity: { close: undefined, itemChange: undefined },
+    };
     ledgers.set(container, ledger);
   }
   return ledger;
+}
+
+/**
+ * close / itemChange イベントの event.container が manager.create() の戻り値と同一参照かを記録する。
+ *
+ * 実機ではイベントごとに別インスタンス（ラッパー）で来る可能性がある。以前は `!==` で早期 return
+ * していたため、その場合は close の pending 解除・会計・警告が静かに止まっていた。ここでは
+ * 真偽値を記録するだけに留め、購読の { containers: [container] } フィルタで対象コンテナに
+ * 限定されているとみなして処理を続行する。値が変わったときだけログし、毎イベントの重複を避ける。
+ * 注意: この観測は実機未実行であり、結果（真偽のどちらになるか）は未取得。
+ * @returns {boolean} event.container が create() の戻り値と同一参照なら true
+ */
+function recordContainerIdentity(ledger, kind, eventContainer, createdContainer) {
+  const sameRef = eventContainer === createdContainer;
+  if (ledger.identity[kind] !== sameRef) {
+    ledger.identity[kind] = sameRef;
+    log(`CONTAINER_IDENTITY kind=${kind} size=${ledger.size} sameRef=${sameRef}`);
+  }
+  return sameRef;
+}
+
+function formatSameRef(value) {
+  return value === undefined ? "(未観測)" : String(value);
 }
 
 function describeStack(stack) {
@@ -442,6 +477,10 @@ function printHelp(player) {
   reply(
     player,
     "§c[危険] §fSTOP の会計はコンテナ内の typeId/amount 合計だけです。プレイヤーインベントリ側で増えた複製・増加は検知できません。合計個数を目視で突き合わせてください。",
+  );
+  reply(
+    player,
+    "close / itemChange の event.container が create() の戻り値と同一参照かを `containerSameRef`（各イベント）と `IDENTITY`（`!invui dump`）に真偽値で記録します。(未観測) はイベント未到達。同一参照でなくても処理は続行します。結果は実機未取得です。",
   );
   reply(
     player,
@@ -665,6 +704,11 @@ function handleDump(player) {
 
   reply(player, `DUMP size=${size} viewers=${viewers} items=${items.join(", ") || "(empty)"}`);
   const ledger = ledgerFor(container, size);
+  reply(
+    player,
+    `IDENTITY size=${size} closeSameRef=${formatSameRef(ledger.identity.close)} ` +
+      `itemChangeSameRef=${formatSameRef(ledger.identity.itemChange)}`,
+  );
   reply(
     player,
     `ACCOUNTING size=${size} expected=${formatCounts(ledger.expected) || "(none)"} ` +

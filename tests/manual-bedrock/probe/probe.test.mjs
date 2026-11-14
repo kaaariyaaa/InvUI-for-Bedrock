@@ -10,6 +10,8 @@
  * - 同一 size の共有コンテナで複数画面を開かないための open ガード（閲覧者・pending・getViewers 失敗）
  * - fill は閲覧者がいなくても pending（open 後 close イベント前）なら拒否し、close 後のみ書き込む
  * - `!invui:` prefix の通知だけを cancel し、観測ログだけ出して click を実行しないこと
+ * - close / itemChange の event.container が create() の戻り値と同一参照かを真偽値で記録し、
+ *   別参照でも既存の close / itemChange 処理が止まらないこと
  * - Resource Pack / JSON UI を同梱していないこと
  *
  * 実機の表示・close reason・itemChange を検証するものではない。
@@ -124,14 +126,14 @@ function loadProbe(options = {}) {
       return cancelled;
     },
     /** 画面からのスロット変更を模擬する（before/after は typeId と amount だけ見る）。 */
-    fireItemChange({ slot, before, after, who = player }) {
+    fireItemChange({ slot, before, after, who = player, eventContainer = container }) {
       for (const handler of events.virtualContainerItemChange) {
-        handler({ container, slot, beforeItemStack: before, itemStack: after, player: who });
+        handler({ container: eventContainer, slot, beforeItemStack: before, itemStack: after, player: who });
       }
     },
     /** close イベントを模擬する。items は現在のスロット内容のスナップショット。 */
-    fireClose({ reason, who = player, omitItems = false } = {}) {
-      const event = { container, reason, player: who };
+    fireClose({ reason, who = player, omitItems = false, eventContainer = container } = {}) {
+      const event = { container: eventContainer, reason, player: who };
       if (!omitItems) event.items = items.slice();
       for (const handler of events.virtualContainerClose) handler(event);
     },
@@ -206,6 +208,10 @@ test('main.js は対象 API と使い捨てアイテム方針を保持する', (
   assert.match(source, /!invui stop/);
   assert.match(source, /pendingOpenPlayers/);
   assert.match(source, /OPEN_REJECTED/);
+  assert.match(source, /CONTAINER_IDENTITY/);
+  assert.match(source, /containerSameRef/);
+  assert.match(source, /同一参照/);
+  assert.match(source, /実機未実行/);
   assert.match(source, /cursor 退避/);
   assert.match(source, /インベントリ側/);
   assert.match(source, /beforeEvents\.chatSend/);
@@ -231,6 +237,9 @@ test('README は貴重品・複数画面・cursor 退避・STOP の限界を明�
   assert.match(readme, /pending/);
   assert.match(readme, /cursor 退避/);
   assert.match(readme, /インベントリ側/);
+  assert.match(readme, /event\.container/);
+  assert.match(readme, /同一参照/);
+  assert.match(readme, /実機未実行/);
 });
 
 test('open の ticks 指定は server close を予約し、指定 tick 後に close() する', () => {
@@ -327,6 +336,52 @@ test('close イベントの player が別インスタンスでも id が同じ�
   const other = { id: 'player-2', name: 'Other', isValid: true, sendMessage() {} };
   probe.chat('!invui open 27', other);
   assert.equal(probe.openCalls(), 2);
+});
+
+test('event.container が create() の戻り値と同一参照かを真偽値で記録する', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27');
+  probe.fireClose({ reason: 'PlayerClosed' });
+
+  const logs = probe.logs.join('\n');
+  assert.match(logs, /CONTAINER_IDENTITY kind=close size=27 sameRef=true/);
+  assert.match(logs, /CLOSE size=27 .*containerSameRef=true/);
+
+  // itemChange 未到達のうちは未観測として区別する。
+  probe.chat('!invui dump');
+  assert.match(probe.messages.join('\n'), /IDENTITY size=27 closeSameRef=true itemChangeSameRef=\(未観測\)/);
+});
+
+test('event.container が別参照でも false を記録し、close / itemChange の処理を止めない', () => {
+  const probe = loadProbe();
+  probe.chat('!invui open 27');
+
+  // 実機でイベントごとに別インスタンス（ラッパー）が来る可能性を模擬する。
+  const wrapper = { title: 'InvUI probe 27' };
+  probe.fireClose({ reason: 'PlayerClosed', eventContainer: wrapper });
+
+  const closeLogs = probe.logs.join('\n');
+  assert.match(closeLogs, /CONTAINER_IDENTITY kind=close size=27 sameRef=false/);
+  assert.match(closeLogs, /CLOSE size=27 .*containerSameRef=false/);
+
+  // 早期 return で pending 解除と fill が止まっていないこと。
+  probe.chat('!invui fill');
+  assert.equal(probe.setItemCalls(), 4);
+
+  const moved = probe.items[0];
+  probe.items[0] = undefined;
+  probe.items[20] = moved;
+  probe.fireItemChange({ slot: 0, before: moved, after: undefined, eventContainer: wrapper });
+  probe.fireItemChange({ slot: 20, before: undefined, after: moved, eventContainer: wrapper });
+
+  const logs = probe.logs.join('\n');
+  assert.match(logs, /CONTAINER_IDENTITY kind=itemChange size=27 sameRef=false/);
+  assert.match(logs, /DANGER ITEM_CHANGE .*containerSameRef=false .*minecraft:stick x1 -> \(empty\)/);
+  assert.doesNotMatch(logs, /DANGER ACCOUNTING/);
+  assert.doesNotMatch(logs, /STOP/);
+
+  probe.chat('!invui dump');
+  assert.match(probe.messages.join('\n'), /IDENTITY size=27 closeSameRef=false itemChangeSameRef=false/);
 });
 
 test('専用 prefix の通知だけ cancel し、観測ログだけ出して click を実行しない', () => {
