@@ -3,9 +3,9 @@
 > [!WARNING]
 > **これは実機で未検証の実験用パックです。現在は既定で画面接続が有効になっています。**
 >
-> - `ui/_ui_defs.json` は `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` の 3 つを登録済みです。後者 2 つが `data_driven_container` の `desktop_panel` / `pocket_panel` に `invui_probe` のラベルと実験的 `button.send` 部品を差し込みます。**登録済みのため、パックを置けば接続が働く想定**です。ただし**実機未検証であり、接続・表示・入力のどれも保証しません**。
-> - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
-> - **アイテム保護・入力抑制・画面終了処理は未完成です。** 表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
+> - `ui/_ui_defs.json` は `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` の 3 つを登録済みです。後者 2 つが `data_driven_container` の `desktop_panel` / `pocket_panel` に警告ラベル、`invui_probe` のラベルと実験的 `button.send` 部品、および**透明ブロッカー**を差し込みます。**登録済みのため、パックを置けば接続が働く想定**です。ただし**実機未検証であり、接続・表示・入力のどれも保証しません**。
+> - 接続先は `data_driven_container` の 2 パネルです。**VirtualContainer を特定できないため、そのパネルを使うすべての画面（通常のコンテナや data-driven ブロックの画面を含み得る）に影響し得ます**。VirtualContainer だけに限定できません。VirtualContainer 画面がこのパネルを使っているかも未確定です。`chest_screen` は編集しませんが、通常画面への影響を排除できません。
+> - **透明ブロッカーは保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆う透明な `button` で、スロット系の入力を `button.invui_connect_blocked` へ付け替えるだけです。この ID を処理するスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリやホットバーは覆わず、controller・タッチ入力の遮断を保証しません**。フォーカスが下のスロットへ移る、JSON UI を経由しない操作、タッチの長押し・ドラッグなどは止まらない可能性があります。**アイテム保護・入力抑制・画面終了処理は未完成**で、ブロッカーによる遮断を保証しません。表示アイテムは取り出せる可能性があり、再描画との組み合わせで複製・消失が起き得ます（未検証）。`button.send` がチャットを送る保証もなく、スクリプト側の受信処理もありません。
 > - `ui/invui_controls.json` は**作成中の追加プローブ**です。完成扱いせず、動作確認や受け入れ判断に使わないでください。どの画面にも接続されておらず、`ui/_ui_defs.json` へも登録していません。CLI の導入対象でもありません。
 > - `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対応ゲーム版・パックの適用方法・読み込み順は確定していません。
 > - 他の Resource Pack との競合を検出・解消する機能はありません。他パックが同じ `invui_probe` / `invui_connect_probe` / `data_driven_container` 名前空間や同じ UUID を使っている場合も衝突し得ます。
@@ -24,7 +24,7 @@ resource_pack/
 └── ui/
     ├── _ui_defs.json      # ui/invui.json と接続 2 ファイルを登録済み
     ├── invui.json         # invui_probe 名前空間（可視ラベルと実験的 button.send 部品）
-    ├── invui_connect.json # 警告ラベル + invui_probe_root のラッパー
+    ├── invui_connect.json # 警告ラベル + 透明ブロッカー + invui_probe_root のラッパー
     ├── invui_connect_data_driven.json
     │                      # data_driven_container の desktop/pocket への modifications
     └── invui_controls.json # 作成中の追加プローブ（未登録・接続なし・CLI 対象外）
@@ -33,14 +33,30 @@ resource_pack/
 ## 既定で有効な画面接続
 
 `ui/invui_connect_data_driven.json` は `data_driven_container.desktop_panel` と
-`pocket_panel` の `controls` 先頭へ、次の 2 つを `insert_front` で差し込みます。
+`pocket_panel` の `controls` 先頭へ次の 2 つを `insert_front` で、末尾へ透明ブロッカーを
+`insert_back` で差し込みます。
 
-- `ui/invui_connect.json` の警告ラベル（「このパネルを使う全画面に適用され得る」ことを画面内に表示）
+- `ui/invui_connect.json` の警告ラベル（「このパネルを使う全画面に適用され得る」ことと、ブロッカーの限界を画面内に表示）
 - `ui/invui.json` の `invui_probe_root`（ラベルと実験的 `button.send` 部品）
+- `invui_connect_probe.grid_blocker`（透明な `button`。ホバー・押下時だけ赤く色づく）
+
+ブロッカーは `desktop_panel` では `offset [7, 10]` / `size [162, "100%-24px"]`、
+`pocket_panel` では `anchor_from: top_middle` / `anchor_to: top_left` / `offset [0, 27]` /
+`size ["50%", "100%-27px"]` でコンテナ側グリッド付近を覆います。`button.menu_select`、
+`button.menu_ok`、`button.menu_secondary_select`、`button.controller_select`、
+`button.menu_auto_place`、`button.controller_secondary_select`、`button.menu_inventory_drop`、
+`button.menu_inventory_drop_all` を `$pressed_button_name`（`button.invui_connect_blocked`）へ
+付け替えます。この ID を購読・処理するスクリプトは同梱していません。
 
 `chest_screen` は編集しません。ただし **VirtualContainer だけを識別する仕組みはなく**、
 同じパネルを使う通常画面にも表示され得ます。`_ui_defs.json` への登録は接続を有効にするための
 ものであり、表示・入力・アイテム保護が動くことを意味しません。
+
+**ブロッカーの適用範囲は限定できません。** 覆った範囲では表示専用スロットだけでなく
+**ボタンや inventory slot も押せなくなる可能性**があります。逆に、プレイヤー側の
+インベントリ・ホットバーはブロッカーの範囲外で、controller のフォーカス移動、タッチの
+長押し・ドラッグ、JSON UI を経由しないゲーム側処理は止まらない可能性があります。
+**完全な保護ではなく、遮断を保証しません。** アイテム保護は依然として未実装です。
 
 ## `ui/invui_controls.json`（作成中・未検証）
 
@@ -67,7 +83,9 @@ node resource_pack/experimental/connect-data-driven/check.mjs
 別の Resource Pack へ持ち出す場合の手順・警告・観察の解釈は
 [`experimental/connect-data-driven/README.md`](experimental/connect-data-driven/README.md)
 を参照してください。適用範囲は `data_driven_container` の 2 パネルを使う**全画面**であり、
-使い捨てワールド専用・アイテム保護なしという制約は変わりません。
+透明ブロッカーも同じ範囲へ挿入されます。使い捨てワールド専用・アイテム保護なしという制約は
+変わりません。ブロッカーはボタンや inventory slot も抑制し得ますが、プレイヤー側や
+controller・タッチ入力を含む完全な保護ではなく、遮断を保証しません。
 
 ## 新規パックの生成（接続込み）
 
@@ -78,8 +96,9 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 出力先は未作成である必要があります。生成される manifest の UUID は毎回新しくなります。
 CLI は同梱テンプレートから `manifest.json`、`ui/_ui_defs.json`、`ui/invui.json`、
 `ui/invui_connect.json`、`ui/invui_connect_data_driven.json` を生成し、生成物の
-`_ui_defs.json` は接続 2 ファイルを登録済みです。つまり生成物は**接続が既定で有効**ですが、
-実機未検証であり、`data_driven_container` のパネルを使う全画面に影響し得ます。使い捨てワールド専用です。
+`_ui_defs.json` は接続 2 ファイルを登録済みです。つまり生成物は**接続が既定で有効**で、
+透明ブロッカーも含まれますが、実機未検証であり、`data_driven_container` のパネルを使う
+全画面に影響し得ます。ブロッカーは保護ではなく、遮断を保証しません。使い捨てワールド専用です。
 
 ## CLI での導入
 
@@ -122,9 +141,10 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 ## 導入後に手動で検討すること（すべて未検証）
 
 1. 既存の Resource Pack へ導入した場合は、その `ui/_ui_defs.json` の `ui_defs` へ `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` を追加する（既存ファイルのバックアップと差分確認は利用者が行う。CLI は 3 ファイルを配置するが登録はしない）。
-2. 対象画面でラベル・ボタン・警告ラベルが表示されるか確認する。**`data_driven_container` のパネルを使う全画面に影響し得る**ため、VirtualContainer 以外（通常チェスト等）での表示も記録する。
-3. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。保護・入力抑制・終了処理は未実装であり、`button.send` 部品からチャット送信が成立するかも未確認です。
-4. `ui/invui_controls.json` は作成中のため、完成後に別途検証する。現時点の手順・部品名・挙動を確定したものとして扱わない。
+2. 対象画面でラベル・ボタン・警告ラベルが表示されるか確認する。**`data_driven_container` のパネルを使う全画面に影響し得る**ため、VirtualContainer 以外（通常チェスト等）での表示も記録する。**VirtualContainer 画面がこのパネルを使っているかは未確定**であり、表示の有無だけで適用先を断定しない。
+3. 透明ブロッカーの範囲（desktop: `offset [7, 10]` / `size [162, "100%-24px"]`、pocket: 右半分）で、ホバー・押下時に赤く色づくか、**通常クリックが止まるか**、**ボタンや inventory slot まで押せなくなっていないか**を入力方式ごとに記録する。プレイヤー側・ホットバーはブロッカーの範囲外であり、controller・タッチ入力は未検証である。赤く色づいてもアイテムが動く場合は、上重ねでは遮断できないという結果として扱う。
+4. クリック通知・アイテム保護・画面の終了処理を、実機イベントとあわせて検証する。アイテム保護・画面終了処理・スクリプト側の入力処理は未実装であり、ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、`button.send` 部品からチャット送信が成立するかも未確認です。**ブロッカーがあることを保護の合格根拠にしないでください。**
+5. `ui/invui_controls.json` は作成中のため、完成後に別途検証する。現時点の手順・部品名・挙動を確定したものとして扱わない。
 
 画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
 
@@ -133,7 +153,8 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 ## 既知の制約
 
 - 対象ゲーム版、`@minecraft/server` の版、Experimental API の有効状態をこのテンプレートだけでは保証できません。
-- 接続は既定で有効ですが、**実機未検証**です。`data_driven_container` の 2 パネルを使う**全画面に影響し得て**、VirtualContainer だけに限定できません。通常画面への影響も排除できません。
+- 接続は既定で有効ですが、**実機未検証**です。`data_driven_container` の 2 パネルを使う**全画面に影響し得て**、VirtualContainer だけに限定できません。VirtualContainer 画面が同パネルを使っているかは未確定で、通常画面への影響も排除できません。
+- **透明ブロッカーは保護ではなく、遮断を保証しません。** 覆った範囲ではボタンや inventory slot も抑制し得ますが、プレイヤー側のインベントリ・ホットバーは範囲外で、controller のフォーカス移動、タッチの長押し・ドラッグ、JSON UI を経由しない操作は止まらない可能性があります。押下先の `button.invui_connect_blocked` を処理するスクリプトもありません。
 - **アイテム保護・入力抑制・画面終了処理は未完成**です。表示アイテムの取り出し、再描画による複製・消失、チャット送信の成否は未検証です。
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。

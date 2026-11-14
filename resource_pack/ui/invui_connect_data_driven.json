@@ -13,6 +13,24 @@
       }
     ]
   },
+  "panel_top_half": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_connect_desktop_blocker@invui_connect_probe.grid_blocker": {
+              "anchor_from": "top_left",
+              "anchor_to": "top_left",
+              "offset": [7, 10],
+              "size": [162, "100%-24px"]
+            }
+          }
+        ]
+      }
+    ]
+  },
   "pocket_panel": {
     "modifications": [
       {
@@ -21,6 +39,20 @@
         "value": [
           {
             "invui_connect_pocket@invui_connect_probe.invui_connect_probe_pocket": {}
+          }
+        ]
+      },
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_connect_pocket_blocker@invui_connect_probe.grid_blocker": {
+              "anchor_from": "top_middle",
+              "anchor_to": "top_left",
+              "offset": [0, 27],
+              "size": ["50%", "100%-27px"]
+            }
           }
         ]
       }

@@ -6,9 +6,9 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 > **ベータ / 実機未検証**
 >
 > - バージョンは `0.1.0-beta.1`。**npm には未公開**です。`npm install invui-bedrock` はまだ使えません。
-> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は**既定で有効**です。`minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` から `VirtualContainer` の作成・`VirtualContainer.open()`、`Window.close()` から `VirtualContainer.close()` を呼びます（すべて実機未検証）。実機ライフサイクルの後始末（死亡・退出・shutdown・再読み込み）と入力ブリッジは未実装です。クリック通知、アイテム保護、`InventoryLink` のアイテム移動は未実装または未検証です。JSON UI 連携は `resource_pack/` が既定で `data_driven_container` のパネルへ差し込む未検証のものだけで、VirtualContainer の識別・入力抑制・アイテム保護はありません。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`src/input.ts` の実験的な入力パーサは公開エントリから export せず、チャットイベントにも接続していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js テストで経路を確認しただけで実機未検証です。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` 経路でも購読は張られますが、保護にはなりません。
+> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は**既定で有効**です。`minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` から `VirtualContainer` の作成・`VirtualContainer.open()`、`Window.close()` から `VirtualContainer.close()` を呼びます（すべて実機未検証）。実機ライフサイクルの後始末（死亡・退出・shutdown・再読み込み）と入力ブリッジは未実装です。クリック通知、アイテム保護、`InventoryLink` のアイテム移動は未実装または未検証です。JSON UI 連携は `resource_pack/` が既定で `data_driven_container` のパネルへ差し込む未検証のものだけで、VirtualContainer の識別はありません。既定の接続はグリッドへ透明ブロッカーも差し込みますが、実機未検証であり、ボタンや inventory slot への影響、プレイヤー側や controller 入力の遮断を保証しません（アイテム保護ではありません）。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`src/input.ts` の実験的な入力パーサは公開エントリから export せず、チャットイベントにも接続していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js テストで経路を確認しただけで実機未検証です。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` 経路でも購読は張られますが、保護にはなりません。
 > - **既定で実画面を開くため、アイテムの複製・消失リスクが既定で有効です。** 画面にはクリック通知もアイテム保護もなく、実機未検証です。表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、プレイヤーが取り出せます。取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます。試す場合は「[実機画面は既定で開く（使い捨てワールドで）](#実機画面は既定で開く使い捨てワールドで)」の条件だけに従ってください。
-> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js テスト済みです。**状態更新時の描画はスロット差分ではなく全スロット再評価、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API までで、自動移行・自動の破損退避は未実装**です。クリック入力を実機イベントへつなぐ仕組みは未実装です。実験的な入力パーサと snapshot 検証はありますが、非公開・イベント未接続です。`resource_pack/` は既定で `data_driven_container` の `desktop_panel` / `pocket_panel` へ接続する未検証テンプレートで、`chest_screen` は編集していません。ただし VirtualContainer を識別する仕組みがなく、同パネルを使う他の data-driven 画面にも影響し得ます。
+> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js テスト済みです。**状態更新時の描画はスロット差分ではなく全スロット再評価、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API までで、自動移行・自動の破損退避は未実装**です。クリック入力を実機イベントへつなぐ仕組みは未実装です。実験的な入力パーサと snapshot 検証はありますが、非公開・イベント未接続です。`resource_pack/` は既定で `data_driven_container` の `desktop_panel` / `pocket_panel` へ接続する未検証テンプレートで、`chest_screen` は編集していません。既定の接続はグリッドへ透明ブロッカーも挿入しますが、遮断の成否は実機未検証で、VirtualContainer 画面を使っているかは未確定です。VirtualContainer を識別する仕組みがなく、同パネルを使う他の画面にも影響し得ます。
 > - この README は、実装済みの範囲と未完成・未検証の機能を区別して記載します。未検証の機能を「完成・動作確認済み」として扱わないでください。
 
 ## 現在の状態
@@ -42,7 +42,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 合否チェックリスト（[CHECKLIST.md](tests/manual-bedrock/CHECKLIST.md)） | あり |
 | 利用イメージ（[examples/README.md](examples/README.md)） | 設計スケッチのみ。型検査は可能、実行は対象外 |
 | 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
-| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
+| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込み、末尾へ透明ブロッカー（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
 | npm 公開 | 未実施 |
 | ライセンス | 未設定 |
 
@@ -323,7 +323,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 | close / itemChange のアダプタ購読 | 既定アダプタが `afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読。Node.js テストで経路を確認済み・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない。`after` なので close・変更を防げない |
 | クリック通知（`button.send` → チャット候補を含む） | `src/input.ts` に純粋パーサと snapshot 検証のみ。公開エントリ非 export・イベント非接続・実機未検証。認証・rate limit・古い画面の入力の扱いは不十分 | 安全に利用不可。有効な機能として案内しない |
 | 表示専用・ボタン用スロットのアイテム保護 | 実装なし・実機未検証。`Item.getMode()` / `setMode()` は分類とハンドラー実行ガードのみ | 安全に利用不可。アイテム移動を許可しない |
-| JSON UI による入力抑制・画面識別 | `resource_pack/` は既定で `data_driven_container` の desktop/pocket パネルへ接続するが実機未検証。VirtualContainer を識別する仕組み・入力抑制・アイテム保護は未実装 | 同パネルを使う他の data-driven 画面にも表示・入力が干渉し得る。安全に利用不可 |
+| JSON UI による入力抑制・画面識別 | `resource_pack/` は既定で `data_driven_container` の desktop/pocket パネルへ接続し、透明ブロッカーを重ねるが実機未検証。VirtualContainer を識別する仕組みはなく、遮断が成立する保証もない | 同パネルを使う他の画面にも表示・入力が干渉し得る。ボタンや inventory slot も制限し得るが、プレイヤー側や controller 入力の遮断は保証されない。安全に利用不可 |
 | `InventoryLink` のアイテム移動 | 実装なし。`moveTo()` は常に例外 | 複製・消失の可能性を排除できないため無効 |
 | 左・右・Shift・ダブルクリックの区別 | 初期リリース非目標 | 通常クリックのみを設計対象とする |
 
@@ -333,15 +333,16 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 - **既定の実アダプタが実画面を開きます。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` は `world.virtualContainerManager.create()` で `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` は `VirtualContainer.close()` を呼びます。**実機で表示・close が成立するかは未検証**です。`close()` は要求時点で返り、実際の close イベントは別 tick になることがあるため、閉鎖直後の再 `open()` は失敗し得ます。
 - **クリック通知はありません。** Bedrock のイベントからスロットを特定して `Window.handleClick()` を呼ぶ経路（InputBridge / JSON UI / `button.send`）は未接続です。`Item` の `button` 分類はハンドラー実行ガードにすぎず、実機のクリックを届けません。クリックの取りこぼし・遅延入力・意図しないスロットへの適用を保証できません。
-- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。入力抑制はなく、`resource_pack/` の JSON UI 接続もアイテム保護ではないため、このリスクは既定で有効です。
+- **透明ブロッカーは保護の保証ではありません。** 既定の接続はグリッド上へ透明なボタン（`invui_connect_probe.grid_blocker`）を重ね、スロット系入力を `button.invui_connect_blocked` へ付け替えますが、受け側のスクリプトはありません。実機未検証であり、**ボタンや inventory slot も制限し得る**一方で、**プレイヤー側や controller 入力の遮断は保証しません**。アイテム保護でもありません。
+- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。既定接続の透明ブロッカーは実機未検証の試みで、プレイヤー側や controller 入力の遮断を保証しません。ボタンや inventory slot も制限し得る一方、アイテム保護ではありません。このリスクは既定で有効です。
 - **itemChange を検出しても保護はされません。** 既定の `minecraftVirtualContainerAdapter` は `subscribeItemChange` を実装して `world.afterEvents.virtualContainerItemChange` を購読しますが、これは Node.js テストで経路を確認しただけで実機未検証です。`after` イベントなので変更後の通知にすぎず、変更を取り消したり変更前のアイテムへ戻したりはできません。アダプタがイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。ただし close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。
-- **実験は使い捨てのテスト用ワールドだけで行ってください。** `resource_pack/` を入れると、`data_driven_container` のパネルを使う全画面に警告ラベルとボタンが重なり得ます（VirtualContainer 限定ではない）。進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
+- **実験は使い捨てのテスト用ワールドだけで行ってください。** `resource_pack/` を入れると、`data_driven_container` のパネルを使う全画面に警告ラベル・ボタン・透明ブロッカーが重なり得ます（VirtualContainer 限定ではない）。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得ます。進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
 
 ## Resource Pack テンプレート（実験用・未検証）
 
-`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
+`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込み、さらに末尾へ透明ブロッカー（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
 
-ただし **`VirtualContainer` を識別する仕組みはなく**、接続先のパネルを使う全画面（通常のコンテナや data-driven ブロックの画面を含み得る）に表示され得ます。そのため、他画面での入力干渉・表示の重なり・アイテム保護の欠如というリスクが残ります。**実機未検証であり、接続・表示・入力・アイテム保護のいずれも保証しません。** 他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。
+ただし **`VirtualContainer` を識別する仕組みはなく**、接続先のパネルを使う全画面（通常のコンテナや data-driven ブロックの画面を含み得る）に表示され得ます。そのため、他の画面での入力干渉・表示の重なり・アイテム保護の欠如というリスクが残ります。透明ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。VirtualContainer 画面を使っているかは未確定です。**実機未検証であり、接続・表示・入力の遮断・アイテム保護のいずれも保証しません。** 他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。
 
 - CLI の `--install-resource-pack` が追加するのは `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルです。既存の Resource Pack へ追加した場合、`ui/_ui_defs.json` への登録は自動では行われず、手動でマージするまで接続は有効になりません（CLI は登録状況を検査して不足を報告します）。`generate-resource-pack` の生成物は `_ui_defs.json` 込みの5ファイルで、接続が既定で有効です。
 - `ui/invui_controls.json` は作成中の追加プローブで、未登録・未接続・CLI 導入対象外です。完成扱いしないでください。
@@ -349,7 +350,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 - このテンプレートは `data_driven_container` 名前空間の `desktop_panel` / `pocket_panel` を変更します（`data_driven_container_screen.json` 自体は編集しません）。Mojang は同名前空間を変更しないことを期待し、後方互換性を保証していません。検証専用の実験にとどめ、正式機能や配布物の前提にしないでください（[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)）。
 - 既存 Resource Pack との競合を検出・解消する機能はありません。**使い捨てワールドで、バックアップを取ってから**検証してください。詳細は [resource_pack/README.md](resource_pack/README.md) を参照してください。
 
-Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックしたテストで確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・入力抑制・アイテム保護は動きません。
+Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックしたテストで確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・アイテム保護は動きません（既定接続の透明ブロッカーも遮断を保証しません）。
 
 ## 設計上の前提（実機未検証）
 
@@ -360,7 +361,7 @@ Resource Pack を使わなくても、コアの型・レイアウト計算・状
 - スクリプト再読み込み時に画面は閉じ、通常の終了イベントに依存した永続化はできない。
 - 状態の共有範囲は `player` / `shared`、保存期間は `window` / `session` / `persistent`。
 - 設計原則は影響を受けたスロットの差分反映だが、**現在の状態更新・明示 `refresh()` は全スロットを再評価する**（要素の更新通知のみ該当スロット）。理由と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照。
-- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける（`resource_pack/` の既定接続はこの原則の例外で、`data_driven_container` のパネルを使う他画面へ影響し得る。検証専用）。
+- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける（`resource_pack/` の既定接続はこの原則の例外で、`data_driven_container` のパネルを使う他の画面へ影響し得る。透明ブロッカーも同じ範囲に挿入され、検証専用）。
 - **Mojang は `data_driven_container_screen.json` と `data_driven_container` 名前空間を変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このため、この JSON / 名前空間の変更や、それに依存する入力・画面接続を前提にしません。`resource_pack/` の既定接続は同名前空間の 2 パネルへ差し込む検証専用の例外であり、正式機能の土台にはしません。[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)も、この変更を「どの画面が使われるか」の観察だけのために意図的に行う検証専用プローブです。`VirtualContainer` がこの画面を使うか自体も未確認です。
 - `@bedrock-core/ui` には依存しない。
 
