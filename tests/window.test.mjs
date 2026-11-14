@@ -4029,3 +4029,66 @@ test("a page change invalidates a notification queued for the previous page", as
 
   window.close();
 });
+
+test("a slot element swap on the same page invalidates a notification queued for the old element", async () => {
+  const viewer = { id: "chat-swap", name: "Swapper" };
+  const adapter = new InMemoryTestAdapter();
+  const gate = deferred();
+  const started = deferred();
+  const clicked = [];
+  const first = Item.builder()
+    .setItemProvider(() => stack("minecraft:first"))
+    .addClickHandler(async () => {
+      clicked.push("first");
+      started.resolve();
+      await gate.promise;
+    })
+    .build();
+  const second = Item.builder()
+    .setItemProvider(() => stack("minecraft:second"))
+    .addClickHandler(() => clicked.push("second"))
+    .build();
+  const gui = Gui.paged({
+    structure: ["."],
+    ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [first],
+  });
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+
+  emitChatSend(`!invui:${window.id}:0:1`, { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await started.promise;
+  assert.deepEqual(clicked, ["first"]);
+
+  // Queued behind the running click, still against the first element.
+  emitChatSend(`!invui:${window.id}:0:2`, { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+
+  // Same page/line/tab, but slot 0 now renders a different Item.
+  gui.setContent([second]);
+  await tick();
+
+  gate.resolve();
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(clicked, ["first"], "the queued click must not hit the new element");
+
+  emitChatSend(`!invui:${window.id}:0:3`, { id: viewer.id });
+  await flushChatInput();
+  assert.deepEqual(clicked, ["first", "second"]);
+
+  window.close();
+});

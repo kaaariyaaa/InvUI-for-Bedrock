@@ -533,6 +533,22 @@ const PHYSICAL_COLUMNS = 9;
  */
 export const MAX_OPEN_RENDER_PASSES = 100;
 
+/** True when both layouts render the same element at every logical slot. */
+function sameSlotElements(
+  left: readonly (SlotElement | null)[],
+  right: readonly (SlotElement | null)[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let slot = 0; slot < left.length; slot += 1) {
+    if (left[slot] !== right[slot]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function containerSizeOf(layout: ResolvedGuiLayout): number {
   return layout.height * PHYSICAL_COLUMNS;
 }
@@ -1780,14 +1796,16 @@ export class Window {
   #applyLayout(layout: ResolvedGuiLayout): void {
     const previous = this.#layout;
     this.#layout = layout;
-    // A page/line/tab change is a new clickable layout: notifications accepted
-    // against the previous one must not run against this one. Content-only
-    // re-renders keep the same page/line/tab and stay valid.
+    // A page/line/tab change or a different slot element mapping is a new
+    // clickable layout: notifications accepted against the previous one must
+    // not run against this one. Content-only re-renders that keep every slot
+    // element stay valid.
     if (
       previous &&
       (previous.page !== layout.page ||
         previous.line !== layout.line ||
-        previous.tab !== layout.tab)
+        previous.tab !== layout.tab ||
+        !sameSlotElements(previous.slots, layout.slots))
     ) {
       invalidateChatInputWindow(this);
     }

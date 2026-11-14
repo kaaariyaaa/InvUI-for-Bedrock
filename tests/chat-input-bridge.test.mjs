@@ -324,6 +324,75 @@ test("resets the sequence when a closed window reopens", async () => {
   assert.deepEqual(window.clicks, [7, 7]);
 });
 
+test("a click in flight across close/reopen does not consume the new cycle's sequence", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started;
+  const didStart = new Promise((resolve) => {
+    started = resolve;
+  });
+  const window = makeWindow({
+    onClick: async () => {
+      started();
+      await gate;
+      return true;
+    },
+  });
+  const { bridge } = makeBridge([window]);
+
+  const inFlight = bridge.dispatch("!invui:window-1:7:5", "player-1");
+  await didStart;
+
+  // Close and reopen while the old click still runs.
+  window.setOpen(false);
+  bridge.invalidate(window);
+  window.setOpen(true);
+
+  // Accepted by the new cycle, but queued behind the old in-flight click.
+  const fresh = bridge.dispatch("!invui:window-1:7:3", "player-1");
+  release();
+
+  assert.equal((await inFlight).clicked, true);
+  assert.equal(
+    (await fresh).ok,
+    true,
+    "the completed old click must not write the previous cycle's lastSequence",
+  );
+});
+
+test("a page invalidation during a click stays in the same open cycle", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started;
+  const didStart = new Promise((resolve) => {
+    started = resolve;
+  });
+  const window = makeWindow({
+    onClick: async () => {
+      started();
+      await gate;
+      return true;
+    },
+  });
+  const { bridge } = makeBridge([window]);
+
+  const inFlight = bridge.dispatch("!invui:window-1:7:5", "player-1");
+  await didStart;
+  // A page change invalidates the generation but not the open cycle.
+  bridge.invalidate(window);
+  release();
+
+  assert.equal((await inFlight).clicked, true);
+  assert.deepEqual(await bridge.dispatch("!invui:window-1:7:5", "player-1"), {
+    ok: false,
+    reason: "stale-sequence",
+  });
+});
+
 test("applies the caller-injected repeat limit", async () => {
   let now = 1000;
   const window = makeWindow();

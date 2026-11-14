@@ -141,6 +141,12 @@ export interface ChatInputBridge {
 }
 
 interface WindowBridgeState {
+  /**
+   * Open-cycle counter: bumped when a new open cycle starts, not on page/tab
+   * invalidation. A click in flight across a close/reopen must not write into
+   * the new cycle's sequence state.
+   */
+  cycle: number;
   generation: number;
   lastSeenOpen: boolean;
   lastSequence: number | undefined;
@@ -259,6 +265,7 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
     if (!state.lastSeenOpen) {
       // A new open cycle is a new input session: old sequences cannot be replayed.
       state.lastSeenOpen = true;
+      state.cycle += 1;
       state.generation += 1;
       state.lastSequence = undefined;
     }
@@ -281,6 +288,7 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
     }
 
     const state = {
+      cycle: 0,
       generation: 0,
       lastSeenOpen: false,
       lastSequence: undefined as number | undefined,
@@ -294,12 +302,16 @@ export function createChatInputBridge(options: ChatInputBridgeOptions): ChatInpu
       policy: { minIntervalMs },
       ...(options.maxQueue === undefined ? {} : { maxQueue: options.maxQueue }),
       execute: async (notification) => {
+        // Capture the open cycle: a close/reopen while this click is in flight
+        // starts a new session, and this click must not overwrite its
+        // sequence state when it finally completes.
+        const cycle = state.cycle;
         const clicked = (await window.handleClick(notification.slot)) === true;
         state.clicks.set(notification, clicked);
         // Only an actually routed click advances the sequence. A click the
         // Window discarded (stale page/slot) may be retried by a fresh
         // notification, but must not silently consume the next sequence.
-        if (clicked) {
+        if (clicked && state.cycle === cycle) {
           state.lastSequence = notification.sequence;
         }
       },
