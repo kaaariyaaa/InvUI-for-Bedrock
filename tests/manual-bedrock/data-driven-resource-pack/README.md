@@ -15,13 +15,16 @@
 
 ## 何をするか
 
-`bedrock-samples` preview 1.26.70.23（UI 構造の参照元。実行に必要なゲーム版ではない）の `resource_pack/ui/data_driven_container_screen.json`（`data_driven_container` 名前空間）の既存パネル名を借りて、**バニラ JSON を複製せず**、`modifications` で次の 2 点だけを追加します。
+`bedrock-samples` preview 1.26.70.23（UI 構造の参照元。実行に必要なゲーム版ではない）の `resource_pack/ui/data_driven_container_screen.json`（`data_driven_container` 名前空間）の既存パネル名を借りて、**バニラ JSON を複製せず**、`modifications` で次の 3 点だけを追加します。
 
 - 独自名前空間 `invui_probe` に黄色いラベルを 2 つ定義（`desktop_marker` / `pocket_marker`）。
-- `data_driven_container.desktop_panel` と `pocket_panel` の `controls` 先頭に、そのラベルを `insert_front` で差し込む。
+- 同じ名前空間に水色の `title_marker` を 1 つ定義。`text` は `$container_title` だけを使う。
+- `data_driven_container.desktop_panel` と `pocket_panel` の `controls` 先頭に、そのパネル用のラベルと `title_marker` を `insert_front` で差し込む。
+
+`$container_title` は、この画面の `container_label`（pocket は `container_header` の `$header_label` → `$container_title`）が既に使っている**画面変数**です。`title_marker` はその値をそのまま表示するだけで、新しい binding 名や架空の変数を追加していません。`VirtualContainer` のタイトルがこの変数へ入るかは実機未検証です（下記）。`title_marker` は生の値を表示し、`localize` は付けていません。通常チェストでは翻訳キー（例: `container.chest`）が出る可能性があり、翻訳表示は検証していません。 タイトルで `ignored` ゲートはかけていません。タイトルが解決されない場合にラベルごと消えて、パック読み込みの確認もできなくなるためです。
 
 ```
-ui/invui_probe.json              invui_probe 名前空間のラベル定義
+ui/invui_probe.json              invui_probe 名前空間のラベル定義（静的マーカー + $container_title）
 ui/invui_probe_data_driven.json  data_driven_container への modifications
 ui/_ui_defs.json                 上記 2 ファイルの登録（バニラの一覧に追記される想定。置き換えてしまう可能性は未検証）
 manifest.json                    resources モジュール
@@ -33,14 +36,16 @@ check.mjs                        JSON 構造チェック（実機の代替では
 1. 使い捨てワールドを複製し、バックアップを取る。
 2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要（ゲーム側の版表記は [API-NOTES.md](../API-NOTES.md) 第 8 節で確認）。samples の 1.26.70.23 は UI 構造の参照元にすぎない。Experimental を有効化する。
 3. 通常チェストでもラベルの有無を参考として記録する。ただし通常チェストは陽性対照ではない。
-4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。custom Window adapter や `Window.open()` を直接叩くテスト用コードは書かない（現行コアの実アダプタは `Window.open()` から `VirtualContainer.open()` を既定で呼ぶが、実機未検証で保護もない。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。
-5. 表示されたラベルの有無と、末尾が `.desktop` か `.pocket` かを記録する。
+4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。custom Window adapter や `Window.open()` を直接叩くテスト用コードは書かない（現行コアの実アダプタは `Window.open()` から `VirtualContainer.open()` を既定で呼ぶが、実機未検証で保護もない。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。この手順の raw probe はタイトルを `InvUI probe 27` に固定する。
+5. 表示されたラベルの有無、末尾が `.desktop` か `.pocket` か、`title_marker` に表示された文字列を記録する。
 
 ## 観察の解釈（いずれも推定）
 
 | 観察 | 推定される解釈 |
 |---|---|
 | `VirtualContainer` の画面にラベルが出た | その画面が `data_driven_container` 系列を使っている**可能性がある**（desktop / pocket も判別できるかもしれない）。ただし data-driven ブロックなど他の利用箇所でも出得るため、ラベルだけで VirtualContainer 専用とは言えない |
+| `title_marker` に `InvUI probe 27`（手順 4 のタイトル）が出た | そのパネルが、開いた `VirtualContainer` のタイトルを画面変数として受け取っている**可能性がある**。ラベルの有無だけより強い手がかりになるが、タイトル binding と `modifications` の適用は実機未検証で、断定ではない |
+| `title_marker` が空、`InvUI probe 27` 以外、または `$container_title` という文字列をそのまま表示した | その画面は別のコンテナのタイトルを受けている**かもしれない**。あるいは `$container_title` がこの位置へ伝播していない（変数名がそのまま出た場合は未解決）。タイトルだけでは陰性を断定できない |
 | ラベルが出ない | `data_driven_container` を使っていない**かもしれない**。**または** パック未適用・`modifications` 非対応・ラベルがレイアウトに隠れた。**1 回の陰性では何も断定できない** |
 | 通常チェストでもラベルが出た | `data_driven_container` が通常コンテナと共有されている**可能性がある**。VirtualContainer だけの識別には使えない |
 

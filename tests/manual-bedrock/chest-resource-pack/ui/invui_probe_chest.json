@@ -8,6 +8,9 @@
         "value": [
           {
             "invui_probe_desktop_marker@invui_probe.desktop_marker": {}
+          },
+          {
+            "invui_probe_desktop_title@invui_probe.title_marker": {}
           }
         ]
       }
@@ -21,6 +24,9 @@
         "value": [
           {
             "invui_probe_desktop_marker@invui_probe.desktop_marker": {}
+          },
+          {
+            "invui_probe_desktop_title@invui_probe.title_marker": {}
           }
         ]
       }

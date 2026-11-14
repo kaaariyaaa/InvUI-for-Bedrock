@@ -2,7 +2,7 @@
   "format_version": 2,
   "header": {
     "name": "InvUI data_driven_container screen probe (DISPOSABLE WORLD ONLY)",
-    "description": "Single-purpose probe: adds one visible label to the data_driven_container desktop/pocket panels so you can see whether VirtualContainer opens that screen. No interaction control, no item protection. Unverified in-game; use only in a disposable world.",
+    "description": "Single-purpose probe: adds visible labels and a $container_title readout to the data_driven_container desktop/pocket panels so you can see whether VirtualContainer opens that screen. No interaction control, no item protection. Unverified in-game; use only in a disposable world.",
     "uuid": "b7f3c1d2-5e48-4a91-9c6a-0d2f8e1b3a57",
     "version": [0, 1, 0],
     "min_engine_version": [1, 26, 70]
