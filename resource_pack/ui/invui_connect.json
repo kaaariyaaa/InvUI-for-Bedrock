@@ -1,0 +1,51 @@
+{
+  "namespace": "invui_connect_probe",
+  "invui_connect_probe_desktop": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "layer": 100,
+    "controls": [
+      {
+        "all_screens_marker": {
+          "type": "label",
+          "font_type": "smooth",
+          "layer": 102,
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 4],
+          "size": ["default", "default"],
+          "text": "InvUI EXPERIMENTAL: data_driven_container.desktop - applies to ALL screens using this panel, not only VirtualContainer",
+          "color": [1, 1, 0, 1],
+          "shadow": true
+        }
+      },
+      {
+        "invui_probe@invui_probe.invui_probe_root": {}
+      }
+    ]
+  },
+  "invui_connect_probe_pocket": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "layer": 100,
+    "controls": [
+      {
+        "all_screens_marker": {
+          "type": "label",
+          "font_type": "smooth",
+          "layer": 102,
+          "anchor_from": "top_left",
+          "anchor_to": "top_left",
+          "offset": [4, 4],
+          "size": ["default", "default"],
+          "text": "InvUI EXPERIMENTAL: data_driven_container.pocket - applies to ALL screens using this panel, not only VirtualContainer",
+          "color": [1, 1, 0, 1],
+          "shadow": true
+        }
+      },
+      {
+        "invui_probe@invui_probe.invui_probe_root": {}
+      }
+    ]
+  }
+}

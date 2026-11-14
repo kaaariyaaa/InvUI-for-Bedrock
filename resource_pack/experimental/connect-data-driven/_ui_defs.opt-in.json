@@ -1,0 +1,7 @@
+{
+  "ui_defs": [
+    "ui/invui.json",
+    "ui/invui_connect.json",
+    "ui/invui_connect_data_driven.json"
+  ]
+}

@@ -25,7 +25,8 @@ const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 /*
  * Stand-in for @minecraft/server. The package only imports ItemStack, world,
  * and system at runtime; every one of them is provided here so the packed ESM
- * can be evaluated outside Minecraft.
+ * can be evaluated outside Minecraft. VirtualContainer mirrors the parts of the
+ * real API an open Window touches: open/close plus the two afterEvents signals.
  */
 const minecraftServerMockSource = `
 export class ItemStack {
@@ -49,6 +50,33 @@ export class ItemStack {
   }
 }
 
+export const closeSubscribers = new Set();
+export const itemChangeSubscribers = new Set();
+
+export function emitVirtualContainerClose(event) {
+  for (const subscriber of [...closeSubscribers]) subscriber(event);
+}
+
+const closeSignal = {
+  subscribe(callback) {
+    closeSubscribers.add(callback);
+    return callback;
+  },
+  unsubscribe(callback) {
+    closeSubscribers.delete(callback);
+  },
+};
+
+const itemChangeSignal = {
+  subscribe(callback) {
+    itemChangeSubscribers.add(callback);
+    return callback;
+  },
+  unsubscribe(callback) {
+    itemChangeSubscribers.delete(callback);
+  },
+};
+
 export const world = {
   containers: [],
   virtualContainerManager: {
@@ -60,6 +88,8 @@ export const world = {
         size: options.size,
         title: options.title,
         items: new Map(),
+        openPlayers: [],
+        closedPlayers: [],
         setItem(slot, item) {
           if (!Number.isInteger(slot) || slot < 0 || slot >= this.size) {
             throw new RangeError("slot out of range");
@@ -74,10 +104,20 @@ export const world = {
           const item = this.items.get(slot);
           return item === undefined ? undefined : item.clone();
         },
+        open(player) {
+          this.openPlayers.push(player);
+        },
+        close(player) {
+          this.closedPlayers.push(player);
+        },
       };
       world.containers.push(container);
       return container;
     },
+  },
+  afterEvents: {
+    virtualContainerClose: closeSignal,
+    virtualContainerItemChange: itemChangeSignal,
   },
 };
 
@@ -183,6 +223,16 @@ export function openShop(player: Player, stateManager: StateManager): Window {
 }
 `;
 
+// Files the packed CLI reads from its own package root. `--install-resource-pack`
+// copies every one of them, so a tarball missing any of these breaks install.
+const bundledResourcePackFiles = [
+  "resource_pack/manifest.json",
+  "resource_pack/ui/_ui_defs.json",
+  "resource_pack/ui/invui.json",
+  "resource_pack/ui/invui_connect.json",
+  "resource_pack/ui/invui_connect_data_driven.json",
+];
+
 const consumerTsconfig = {
   compilerOptions: {
     target: "ES2022",
@@ -268,11 +318,7 @@ test("packed package contents and consumer type check", async (t) => {
 
     // The packed CLI resolves --install-resource-pack from its own package root,
     // so these template files must be part of the tarball, not just the repo.
-    for (const required of [
-      "resource_pack/manifest.json",
-      "resource_pack/ui/_ui_defs.json",
-      "resource_pack/ui/invui.json",
-    ]) {
+    for (const required of bundledResourcePackFiles) {
       assert.ok(packedSet.has(required), `missing packed resource pack file: ${required}`);
     }
 
@@ -322,11 +368,7 @@ test("packed package contents and consumer type check", async (t) => {
   fs.renameSync(packageDir, installedDir);
 
   await t.test("tarball carries the resource pack files byte-for-byte", () => {
-    for (const relativePath of [
-      "resource_pack/manifest.json",
-      "resource_pack/ui/_ui_defs.json",
-      "resource_pack/ui/invui.json",
-    ]) {
+    for (const relativePath of bundledResourcePackFiles) {
       const extracted = path.join(installedDir, relativePath);
       assert.ok(fs.existsSync(extracted), `tarball is missing ${relativePath}`);
       assert.deepEqual(
@@ -415,7 +457,6 @@ test("packed package contents and consumer type check", async (t) => {
       Markers,
       StateManager,
       Window,
-      WindowOpenRejectedError,
     } = await import(packageUrl);
 
     const clicks = [];
@@ -482,11 +523,42 @@ test("packed package contents and consumer type check", async (t) => {
     assert.equal(closed.length, 1);
     assert.equal(minecraft.system.runs.size, 0, "closing must cancel periodic updates");
 
-    // The production adapter must reject before creating any container.
-    const guarded = Window.builder().setViewer(viewer).setUpperGui(gui).build();
-    await assert.rejects(guarded.open(), WindowOpenRejectedError);
-    assert.equal(guarded.status, "created", "rejected open must not leave the window half-open");
-    assert.equal(minecraft.world.containers.length, 1, "real adapter must not create a container");
+    // The production adapter is enabled by default: open() shows the container
+    // through VirtualContainer.open(player), subscribes to the afterEvents
+    // signals, and close() forwards to VirtualContainer.close(player).
+    const closeReasons = [];
+    const realWindow = Window.builder()
+      .setViewer(viewer)
+      .setUpperGui(gui)
+      .addCloseHandler((reason) => closeReasons.push(reason))
+      .build();
+    const containersBefore = minecraft.world.containers.length;
+    assert.equal(minecraft.closeSubscribers.size, 0);
+
+    await realWindow.open();
+    assert.equal(realWindow.status, "open");
+    assert.equal(minecraft.world.containers.length, containersBefore + 1);
+    const realContainer = realWindow.container;
+    assert.equal(minecraft.world.containers.at(-1), realContainer);
+    assert.deepEqual(realContainer.openPlayers, [viewer]);
+    assert.equal(minecraft.closeSubscribers.size, 1, "open must subscribe to close events");
+    assert.equal(minecraft.itemChangeSubscribers.size, 1, "open must subscribe to item changes");
+
+    // The mock signal reaches the Window; an event for another player is ignored.
+    minecraft.emitVirtualContainerClose({
+      container: realContainer,
+      player: { id: "player-2", name: "Alex" },
+      reason: "PlayerDied",
+    });
+    assert.equal(realWindow.status, "open");
+
+    realWindow.close("PlayerClosed");
+    assert.equal(realWindow.status, "closed");
+    assert.deepEqual(realContainer.closedPlayers, [viewer]);
+    assert.deepEqual(closeReasons, ["PlayerClosed"]);
+    assert.equal(minecraft.closeSubscribers.size, 0, "close must unsubscribe from close events");
+    assert.equal(minecraft.itemChangeSubscribers.size, 0, "close must unsubscribe from item changes");
+    assert.equal(minecraft.system.runs.size, 0, "closing the real window cancels periodic updates");
   });
 
   await t.test("packed bin CLI runs", () => {
@@ -591,10 +663,9 @@ test("packed package contents and consumer type check", async (t) => {
     assert.equal(missingArgs.status, 1);
     assert.match(missingArgs.stderr, /--behavior-pack/);
 
-    // The opt-in probe must come from the packed resource_pack template and
-    // land in a valid Resource Pack without touching existing files.
-    const packedTemplate = path.join(installedDir, "resource_pack", "ui", "invui.json");
-    assert.ok(fs.existsSync(packedTemplate), "packed resource pack template is missing");
+    // The opt-in probe and connection files must come from the packed
+    // resource_pack template and land in a valid Resource Pack without
+    // touching existing files.
     const manifestBefore = fs.readFileSync(path.join(resourcePack, "manifest.json"), "utf8");
 
     const install = runOrFail(
@@ -615,27 +686,41 @@ test("packed package contents and consumer type check", async (t) => {
 
     const installReport = JSON.parse(install.stdout);
     assert.equal(installReport.resourcePackInstall.status, "installed");
+    // install ships the isolated probe plus both experimental connection files.
+    const installedUiFiles = [
+      "ui/invui.json",
+      "ui/invui_connect.json",
+      "ui/invui_connect_data_driven.json",
+    ];
     assert.deepEqual(
       installReport.resourcePackInstall.files.map((file) => [file.path, file.action]),
-      [["ui/invui.json", "created"]],
+      installedUiFiles.map((relativePath) => [relativePath, "created"]),
     );
+    assert.equal(installReport.resourcePackInstall.uiDefs.action, "not-modified");
 
-    const installedProbe = path.join(resourcePack, "ui", "invui.json");
-    assert.ok(fs.existsSync(installedProbe), "packed CLI did not install ui/invui.json");
-    assert.deepEqual(
-      fs.readFileSync(installedProbe),
-      fs.readFileSync(packedTemplate),
-      "installed probe must match the packed template",
-    );
-    assert.deepEqual(
-      fs.readFileSync(installedProbe),
-      fs.readFileSync(path.join(repoRoot, "resource_pack", "ui", "invui.json")),
-      "installed probe must match the repository template",
-    );
+    for (const relativePath of installedUiFiles) {
+      const installed = path.join(resourcePack, relativePath);
+      assert.ok(fs.existsSync(installed), `packed CLI did not install ${relativePath}`);
+      assert.deepEqual(
+        fs.readFileSync(installed),
+        fs.readFileSync(path.join(installedDir, "resource_pack", relativePath)),
+        `installed ${relativePath} must match the packed template`,
+      );
+      assert.deepEqual(
+        fs.readFileSync(installed),
+        fs.readFileSync(path.join(repoRoot, "resource_pack", relativePath)),
+        `installed ${relativePath} must match the repository template`,
+      );
+    }
     assert.equal(
       fs.readFileSync(path.join(resourcePack, "manifest.json"), "utf8"),
       manifestBefore,
       "install must not rewrite the Resource Pack manifest",
+    );
+    assert.equal(
+      fs.existsSync(path.join(resourcePack, "ui", "_ui_defs.json")),
+      false,
+      "install must not create ui/_ui_defs.json",
     );
   });
 });

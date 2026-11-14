@@ -317,6 +317,18 @@ for (const phrase of [
   /common_background_blocker/,
   /container_slot_button_prototype/,
   /陽性対照/,
+  // The per-slot selective suppression investigation must stay documented:
+  // samples expose no per-slot display/button/inventory mode, so no opt-in
+  // controls file may be added without a new, verified marker protocol.
+  /スロット単位の選択的抑制/,
+  /モード別の選択的抑制は samples だけでは実装できない/,
+  /display \/ button \/ inventory/,
+  /grid_position/,
+  /collection_index/,
+  /#item_id_aux/,
+  /#item_lock_in_slot/,
+  /opt-in controls ファイルは追加していません/,
+  /未成立の保護を「完成」として扱いません/,
 ]) {
   assert.match(readme, phrase, `README must mention ${phrase}`);
 }
@@ -326,7 +338,12 @@ for (const url of [
   "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/pocket_containers.json",
   "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/persona_popups.json",
   "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/persona_cast_character_screen.json",
+  "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/npc_interact_screen.json",
+  "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/store_common.json",
+  "https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/persona_SDL.json",
   "https://wiki.bedrock.dev/json-ui/json-ui-documentation",
+  "https://wiki.bedrock.dev/json-ui/json-ui-documentation#control",
+  "https://wiki.bedrock.dev/json-ui/json-ui-documentation#data-binding",
   "../probe/README.md",
 ]) {
   assert.ok(readme.includes(url), `README must cite ${url}`);

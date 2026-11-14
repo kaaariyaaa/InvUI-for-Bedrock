@@ -62,7 +62,7 @@
 
 `manifest.json` の `min_engine_version` は `[1, 26, 70]` の仮置きです。実際のゲーム版に合わせて変更してください。モジュール版とゲーム版の対応は [API-NOTES.md](../API-NOTES.md) の未検証点 1 として記録します。
 
-**`Window.open()` を許可するテスト用アダプタは不要です。** 現行コアの `Window.open()` 既定拒否は InvUI コアの話であり、このプローブはコアを読み込みません。画面は `VirtualContainer.open()` で直接開きます。
+**`Window.open()` を許可するテスト用アダプタは不要です。** 現行コアの実アダプタは既定で画面を開きます（`Window.open()` から `VirtualContainer.open()` を呼ぶ。実機未検証・アイテム保護なし）が、それは InvUI コアの話であり、このプローブはコアを読み込みません。画面は `VirtualContainer.open()` で直接開きます。
 
 ## 3. サーバーでの実行例
 

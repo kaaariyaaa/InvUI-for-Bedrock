@@ -45,7 +45,7 @@
         "note": {
           "type": "label",
           "size": ["100%", "default"],
-          "text": "Press to try button.send. Unverified: it may do nothing, and no script listens for it. Not attached to any screen.",
+          "text": "Press to try button.send. Unverified: it may do nothing, and no script listens for it. The default pack attaches this overlay to data_driven_container panels. Do not use outside a disposable world.",
           "color": [0.7, 0.7, 0.7],
           "shadow": false
         }

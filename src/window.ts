@@ -1,14 +1,19 @@
 /**
  * Window lifecycle (design chapter 8).
  *
- * SAFETY GATE: opening a screen in the real game is intentionally disabled.
- * Item-taking protection (JSON UI / InputBridge) and VirtualContainer click
- * handling are still unverified, so a real Minecraft screen could let a player
- * remove display items. `Window.open()` therefore refuses to run until the
- * caller supplies an explicit test adapter, and `WindowContainerAdapter` for
- * Minecraft always reports `canOpenScreens === false`.
+ * The real adapter is enabled by default: `canOpenScreens` is true and
+ * `openContainer`/`closeContainer` call `VirtualContainer.open(player)` /
+ * `close(player)`. This path has NOT been verified on a real device.
  *
- * `createContainer()` still uses the official
+ * Screen protection is detection only. `virtualContainerItemChange` is an
+ * `after` event, so a move the player performs through the screen has already
+ * happened when the handler runs: it cannot be prevented and the previous item
+ * cannot be restored. A display item taken through the screen can therefore be
+ * lost or duplicated (a later render can write it back). The Window reports
+ * `WindowItemChangeDangerError` and closes, which is best-effort. Until the
+ * manual verification in design 10 and 18.2 is complete, use a throwaway world.
+ *
+ * `createContainer()` uses the official
  * `world.virtualContainerManager.create()` so layout sizes and titles can be
  * checked against the documented 1..54 / 256-byte limits.
  */
@@ -107,11 +112,16 @@ function isSamePlayer(eventPlayer: Player | undefined, viewer: Player): boolean 
   }
 }
 
+/**
+ * Thrown from `open()` when the adapter has not opted into showing screens
+ * (`canOpenScreens === false`). The default Minecraft adapter reports true;
+ * this guard only refuses adapters that leave the flag off.
+ */
 export class WindowOpenRejectedError extends Error {
   readonly code = "INVUI_WINDOW_OPEN_UNVERIFIED";
 
   constructor(
-    message = "InvUI: Window.open() is disabled because screen item protection and click handling are unverified in the real game.",
+    message = "InvUI: Window.open() is disabled because the container adapter does not allow opening screens (canOpenScreens is false).",
   ) {
     super(message);
     this.name = "WindowOpenRejectedError";
@@ -179,9 +189,9 @@ export class WindowOpenRenderLimitError extends Error {
 /**
  * The boundary between Window and the Bedrock screen API.
  *
- * `canOpenScreens` must be true only for an isolated test adapter. It is the
- * explicit opt-in that keeps production code from opening an unverified
- * screen.
+ * `canOpenScreens` is the adapter's explicit opt-in: true means
+ * `openContainer`/`closeContainer` are implemented against a real screen.
+ * `Window.open()` refuses to run when it is false.
  */
 export interface WindowContainerAdapter {
   readonly canOpenScreens: boolean;
@@ -225,28 +235,40 @@ function toWindowCloseReason(reason: VirtualContainerCloseReason): WindowCloseRe
 }
 
 /**
- * Real Bedrock adapter. It can create virtual containers and observe the
- * official close/itemChange after events, but never shows or closes a screen:
- * that path is blocked until the manual verification in design 10 and 18.2 is
- * complete.
+ * Real Bedrock adapter, enabled by default. `openContainer` and
+ * `closeContainer` forward to `VirtualContainer.open(player)` and
+ * `close(player)`.
  *
- * The event hooks are detection, not protection. Both game events are `after`
- * events, so a close or item change has already happened when the handler runs;
- * subscribing cannot prevent it or restore the previous item.
+ * NOT VERIFIED ON A REAL DEVICE. The event hooks are detection, not
+ * protection: both game events are `after` events, so a close or item change
+ * has already happened when the handler runs; subscribing cannot prevent it or
+ * restore the previous item. A player can take a display item through the
+ * screen and a later render can write it back, duplicating it; an item the
+ * player removed can also be lost. The Window only reports
+ * `WindowItemChangeDangerError` and closes.
  */
 export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter {
-  readonly canOpenScreens = false;
+  readonly canOpenScreens = true;
 
   createContainer(options: VirtualContainerOptions): VirtualContainer {
     return world.virtualContainerManager.create(options);
   }
 
-  openContainer(_container: VirtualContainer, _viewer: Player): void {
-    throw new WindowOpenRejectedError();
+  /**
+   * Shows `container` to `viewer`. Not throwing only means the request was
+   * sent; the client can still decline it (the screen then closes with
+   * `UserBusy`).
+   */
+  openContainer(container: VirtualContainer, viewer: Player): void {
+    container.open(viewer);
   }
 
-  closeContainer(_container: VirtualContainer, _viewer: Player): void {
-    throw new WindowOpenRejectedError();
+  /**
+   * Requests the close of `viewer`'s screen. The close event may arrive on a
+   * later tick.
+   */
+  closeContainer(container: VirtualContainer, viewer: Player): void {
+    container.close(viewer);
   }
 
   /**
@@ -501,8 +523,9 @@ export class WindowBuilder {
   }
 
   /**
-   * Test-only injection point. Production code should leave the real adapter,
-   * whose `open()` always throws WindowOpenRejectedError.
+   * Replace the adapter that creates, shows, and closes the container. The
+   * default adapter shows real screens; `canOpenScreens` is its opt-in, and an
+   * adapter returning false makes `open()` throw WindowOpenRejectedError.
    */
   setContainerAdapter(adapter: WindowContainerAdapter): this {
     if (!adapter || typeof adapter.createContainer !== "function") {
@@ -640,6 +663,13 @@ export class Window {
   #refreshPending = false;
   /** Serializes async title changes so two regenerations cannot overlap. */
   #titleQueue: Promise<void> = Promise.resolve();
+  /**
+   * Bumped for every `setTitle` request. A queued change that can only store
+   * the title (the Window closed or reopened while it waited) is dropped when a
+   * later request already stored a newer title, so the stale one cannot
+   * overwrite it after the fact.
+   */
+  #titleVersion = 0;
   /** A state/GUI notification is waiting for the batched refresh microtask. */
   #fullRefreshQueued = false;
   /** One microtask serves every notification delivered in the same timing. */
@@ -688,8 +718,8 @@ export class Window {
   }
 
   /**
-   * Opens the Window. With the real adapter this always throws
-   * WindowOpenRejectedError before any Container is created or shown.
+   * Opens the Window. Throws WindowOpenRejectedError before any container is
+   * created when the adapter's `canOpenScreens` is false.
    *
    * A resolved promise does not guarantee `status === "open"`: a close event or
    * an explicit `close()` during opening (after the container exists but before
@@ -827,11 +857,13 @@ export class Window {
    * element subscriptions are kept, and neither the open nor the close handlers
    * run again for this internal reopen.
    *
-   * A closed Window only stores the title for the next `open()`. Changing it
-   * while `open()` is still running is rejected: the container may already
-   * exist with the previous title. Failures are reported through the error
-   * handler (`operation: "titleChange"`); if the old screen had to be closed
-   * already, the Window fails closed instead of leaving an unknown screen.
+   * A created or closed Window stores the title synchronously, so an `open()`
+   * called without awaiting `setTitle()` already uses it. An open Window
+   * regenerates asynchronously. Changing the title while `open()` is still
+   * running is rejected: the container may already exist with the previous
+   * title. Failures are reported through the error handler
+   * (`operation: "titleChange"`); if the old screen had to be closed already,
+   * the Window fails closed instead of leaving an unknown screen.
    */
   async setTitle(title: string): Promise<void> {
     if (typeof title !== "string") {
@@ -842,10 +874,20 @@ export class Window {
         `InvUI: Window ${this.id} cannot change its title while opening; await open() first.`,
       );
     }
+    const version = ++this.#titleVersion;
+    if (this.#status === "created" || this.#status === "closed") {
+      // No container exists, so storing now cannot disagree with a shown
+      // screen; a following open() must already see it.
+      this.#title = title;
+      return;
+    }
+    const generation = this.#generation;
     // Two overlapping regenerations would each close a container the other is
     // still using, so run them in call order. Equality is checked when the turn
     // arrives, after any earlier change, so "B" then "A" settles on "A".
-    const run = this.#titleQueue.then(() => this.#applyTitle(title));
+    const run = this.#titleQueue.then(() =>
+      this.#applyTitle(title, version, generation),
+    );
     this.#titleQueue = run.then(
       () => undefined,
       () => undefined,
@@ -853,23 +895,28 @@ export class Window {
     await run;
   }
 
-  async #applyTitle(title: string): Promise<void> {
+  async #applyTitle(
+    title: string,
+    version: number,
+    generation: number,
+  ): Promise<void> {
     if (title === this.#title) {
       return;
     }
-    if (this.#status === "opening") {
-      throw new Error(
-        `InvUI: Window ${this.id} cannot change its title while opening; await open() first.`,
-      );
-    }
     if (
+      generation !== this.#generation ||
       this.#status !== "open" ||
       this.#renderingHalted ||
       !this.#container ||
       !this.#layout ||
       !this.#stateHandle
     ) {
-      this.#title = title;
+      // No regeneration is possible (closed, reopening, or a newer
+      // generation): only store the title for the next open(). A later request
+      // may already have stored a newer title synchronously; the newest wins.
+      if (version === this.#titleVersion) {
+        this.#title = title;
+      }
       return;
     }
     await this.#reopenWithTitle(title);

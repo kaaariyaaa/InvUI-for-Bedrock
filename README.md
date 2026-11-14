@@ -6,9 +6,9 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 > **ベータ / 実機未検証**
 >
 > - バージョンは `0.1.0-beta.1`。**npm には未公開**です。`npm install invui-bedrock` はまだ使えません。
-> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は既定ではすべて拒否され、実機ライフサイクルの後始末（死亡・退出・shutdown・再読み込み）と入力ブリッジは未実装です。クリック通知、アイテム保護、JSON UI 連携、`InventoryLink` のアイテム移動も未実装または未検証です。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`src/input.ts` の実験的な入力パーサは公開エントリから export せず、チャットイベントにも接続していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js テストで経路を確認しただけで実機未検証です。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` は拒否されたままで、既定の open 経路では購読は張られません。
-> - **`Window.open()` は既定で拒否されますが、これは強制された安全境界ではありません。** 画面のアイテム保護とクリック処理が実機未検証のため、実アダプタ（`minecraftVirtualContainerAdapter`）は `canOpenScreens = false` を返し、`open()` は `WindowOpenRejectedError` を投げます。Container の作成・表示より前に拒否されます。`openContainer()` / `closeContainer()` も同じ例外を投げます。ただし公開 API の `WindowBuilder.setContainerAdapter()` に `canOpenScreens = true` を返すアダプタを渡せば、この既定拒否は迂回できます。実画面を開くと、保護未検証の表示アイテムを取り出して再描画させることで消失・複製事故につながる恐れがあります。実験は「[実機画面を開く実験は使い捨てワールドで](#実機画面を開く実験は使い捨てワールドで)」の条件でのみ行ってください。
-> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js テスト済みです。**状態更新時の描画はスロット差分ではなく全スロット再評価、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API までで、自動移行・自動の破損退避は未実装**です。クリック入力を実機イベントへつなぐ仕組みと JSON UI の画面接続は未実装です。実験的な入力パーサと snapshot 検証はありますが、非公開・イベント未接続です。`resource_pack/` には未検証の隔離テンプレートだけを同梱し、チェスト画面には接続していません。
+> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は**既定で有効**です。`minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` から `VirtualContainer` の作成・`VirtualContainer.open()`、`Window.close()` から `VirtualContainer.close()` を呼びます（すべて実機未検証）。実機ライフサイクルの後始末（死亡・退出・shutdown・再読み込み）と入力ブリッジは未実装です。クリック通知、アイテム保護、`InventoryLink` のアイテム移動は未実装または未検証です。JSON UI 連携は `resource_pack/` が既定で `data_driven_container` のパネルへ差し込む未検証のものだけで、VirtualContainer の識別・入力抑制・アイテム保護はありません。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`src/input.ts` の実験的な入力パーサは公開エントリから export せず、チャットイベントにも接続していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js テストで経路を確認しただけで実機未検証です。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` 経路でも購読は張られますが、保護にはなりません。
+> - **既定で実画面を開くため、アイテムの複製・消失リスクが既定で有効です。** 画面にはクリック通知もアイテム保護もなく、実機未検証です。表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、プレイヤーが取り出せます。取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます。試す場合は「[実機画面は既定で開く（使い捨てワールドで）](#実機画面は既定で開く使い捨てワールドで)」の条件だけに従ってください。
+> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js テスト済みです。**状態更新時の描画はスロット差分ではなく全スロット再評価、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API までで、自動移行・自動の破損退避は未実装**です。クリック入力を実機イベントへつなぐ仕組みは未実装です。実験的な入力パーサと snapshot 検証はありますが、非公開・イベント未接続です。`resource_pack/` は既定で `data_driven_container` の `desktop_panel` / `pocket_panel` へ接続する未検証テンプレートで、`chest_screen` は編集していません。ただし VirtualContainer を識別する仕組みがなく、同パネルを使う他の data-driven 画面にも影響し得ます。
 > - この README は、実装済みの範囲と未完成・未検証の機能を区別して記載します。未検証の機能を「完成・動作確認済み」として扱わないでください。
 
 ## 現在の状態
@@ -21,8 +21,8 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 自動テスト（`npm test`） | 成功する（Node.js 24.22.1 で確認）。Node.js のユニットテスト、周期更新、Bedrock ストア、CLI の安全側テスト、phase0 プローブの静的検査、パッケージ境界の検査。件数はテスト追加で変わるため固定値としては記載しない |
 | CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)） | GitHub Actions で `npm ci` / `npm run build` / `npm test` / `npm pack --dry-run` を実行 |
 | 実機テスト | **未実施** |
-| 実機画面の表示 | **既定では全拒否**。実アダプタは `canOpenScreens = false` で、`Window.open()` は Container 作成前に `WindowOpenRejectedError`。ただし `setContainerAdapter()` による迂回が可能（強制境界ではない） |
-| 実機ライフサイクル（close・死亡・退出・shutdown・再読み込み） | **イベント購読のみ（Node.js テスト済み、実機未検証）**。既定の `minecraftVirtualContainerAdapter` が `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window` が open 前に接続して close ハンドラーと itemChange の危険通知に流す。ただし `after` イベントなので close・アイテム変更を防ぐ保護ではなく、死亡・退出・shutdown・再読み込み時の後始末や再オープンは未実装。既定の `open()` は拒否されたままで、既定の open 経路では購読は張られない |
+| 実機画面の表示 | **既定で有効（実機未検証）**。実アダプタは `canOpenScreens = true` を返し、`Window.open()` が `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` が `VirtualContainer.close()` を呼ぶ。画面の表示可否・close 完了は実機未確認 |
+| 実機ライフサイクル（close・死亡・退出・shutdown・再読み込み） | **イベント購読のみ（Node.js テスト済み、実機未検証）**。既定の `minecraftVirtualContainerAdapter` が `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window` が open 前に接続して close ハンドラーと itemChange の危険通知に流す。`after` イベントなので close・アイテム変更を防ぐ保護ではなく、死亡・退出・shutdown・再読み込み時の後始末や再オープンは未実装 |
 | 入力ブリッジ | **未実装**。JSON UI の画面接続もない。`src/input.ts` に実験的なチャット通知パーサと snapshot 検証があるが、公開エントリからは export せず、チャットイベントにも接続していない |
 | クリック通知・アイテム保護・JSON UI 連携 | **未実装**。itemChange 検出時の危険通知・再描画停止・close 要求は `Window` にあるが、保護でもクリック処理でもない。`Window.handleClick()` は button mode の Item のみを実行する |
 | アイテムの用途分類（`Item.getMode()` / `setMode()`） | **実装済み（Node.js テスト済み）**。`display` / `button` を分類し、未指定はハンドラーの有無から推測する。分類とハンドラー実行ガードのみで、実機のアイテム保護ではない |
@@ -35,7 +35,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 永続ストアの破損復旧 | **自動復旧は未実装**。壊れた JSON や不正な `guiState` は `StateCorruptionError` で失敗し、レコードを自動では退避・削除・復旧しない。呼び出し側は `StateManager.remove()` で対象レコードを明示的に削除して初期状態からやり直せる |
 | Bedrock 用 `StateStore` | **実装済み（Node.js テスト済み、実機未検証）**。`BedrockWorldStateStore` がワールドの動的プロパティに保存する。非文字列、識別子の長さ超過、UTF-8 換算の値サイズ超過を保存前に拒否する |
 | `InventoryLink` のアイテム移動 | **無効固定**。`moveTo()` は常に `InventoryLinkMoveRejectedError` を投げる |
-| `Window.open()` | **既定拒否**。`WindowOpenRejectedError` を投げる |
+| `Window.open()` | **既定で実画面を開く（実機未検証）**。Container を作成し `VirtualContainer.open()` を呼ぶ。失敗は例外・エラーハンドラーで報告するが、実機での表示は未確認 |
 | 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。既定は読み取り専用の静的検査。`--install-resource-pack` を明示した場合だけ `ui/invui.json` を追加する |
 | CLI の自動テスト（[cli.test.mjs](tests/manual-bedrock/cli.test.mjs)） | 実行可能（`npm test` に含まれる） |
 | 実機テスト手順（[tests/manual-bedrock/README.md](tests/manual-bedrock/README.md)） | あり |
@@ -54,14 +54,14 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 - **アイテム**: `Item`、`ItemBuilder`、`Item.simple()`、`Item.builder()`、クリックハンドラーの登録と呼び出し順序、`Item.getMode()` / `setMode()` による `display` / `button` 分類（未指定はハンドラーの有無から推測、`setMode` はハンドラーを追加・削除しない）まで。`display` の Item はハンドラーを保持していても実行しません。ただし分類はメタデータと `Item` レベルのガードに留まり、JSON UI 側のアイテム保護（設計 7.2 / 10.1）ではありません。`updatePeriodically(ticks)` は、その Item を表示している開いた Window が 1 つ以上ある間だけ `system.runInterval()` に登録し、最後の Window が閉じるか購読を解除すると `clearRun()` で停止します。1 Item につき 1 インターバルで、再購読すると周期の位相はリセットされます。スケジューラの登録失敗は `console.error` に記録され、Item は明示更新では引き続き描画されます。クリックを実機イベントから届ける仕組み（InputBridge / JSON UI）は未実装です。`Item.setPlaceholder(stack)` / `Item.builder().setPlaceholder(stack)` は非同期 provider の実行中に表示する `ItemStack` を設定します（clone して保持し、`undefined` で解除）。placeholder 未指定の非同期 provider は従来どおり解決まで待ち、指定時は途中で placeholder を表示して完了後に同じスロットを更新します。placeholder は表示だけの差し替えで、実機のアイテム保護ではありません。
 - **インベントリ**: メモリ上の `VirtualInventory`（`Inventory` インターフェース実装）。`serialize()` / `VirtualInventory.deserialize()` は、呼び出し側が渡す明示的な `InventoryItemCodec` を介して JSON 可能なスナップショットへ変換・復元します（`ItemStack` の全状態は列挙できないため既定 codec は提供しません）。codec の `encode()` の戻り値とスナップショットは strict な JSON 検証と deep clone を通り、`serialize()` は最初の `encode()` より前に全占有 slot を clone して固定します。`deserialize()` は `item` が欠落した slot エントリを空 slot として扱わず拒否します。`InventoryLink` はリンク先スロットの読み書きと購読のみ提供し、**別インベントリへの移動は実装していません**。
 - **状態**: `StateManager`。`player` / `shared` のスコープ、`window` / `session` / `persistent` の保存期間、スキーマ不一致の拒否。永続化には注入した `StateStore` が必要です。**`StateManager.migrate()` による明示的な移行は実装済み**ですが、`acquire()` が旧 version/schema を自動変換することはありません。破損レコードは自動では退避・復旧せず、破損時は `StateCorruptionError` を投げてレコードを残します。削除は `StateManager.remove()` で明示的に行います。Bedrock 用には `BedrockWorldStateStore`（ワールドの動的プロパティを使用）を公開しています。
-- **Window**: `Window.builder()` の設定、状態の取得・更新、`close()`、クリックのルーティング（`Window.handleClick()`）まで。`handleClick(slot)` は button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、close・再オープン・ページ/タブ変更をまたいだクリックは破棄されます。状態更新・GUI 変更・明示 `refresh()` は全スロットを再評価して描画し、要素の更新通知だけが該当スロットを再描画します。**画面を開く経路は未検証のため既定で拒否されます。** アダプタが任意フック `subscribeClose` / `subscribeItemChange` を実装していれば、`Window` は open 前に購読し、close イベントを close ハンドラーへ、itemChange を `WindowItemChangeDangerError` の通知・再描画停止・`close()` 要求として扱います。close ハンドラーの実行中に再 open すると新しい generation が始まり、それ以降の旧 generation の close ハンドラーは通知されず、再 open 後にそのハンドラーが投げた例外も新 generation には配送されません。既定の `minecraftVirtualContainerAdapter` も `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読してこのフックへ流しますが、Node.js テストで確認しただけで実機未検証です。close 理由は `VirtualContainerCloseReason` から `WindowCloseReason` へ明示的に変換し、未知の理由は `ServerClosed` として通知します。`Window.close(reason)` の `reason` は呼び出し側が渡す値のままです。どちらのイベントも `after` なので、購読した時点で close・アイテム変更はすでに起きており、防ぐことも元のアイテムへ戻すこともできません。itemChange はクリック通知でも保護でもありません。死亡・退出・shutdown・スクリプト再読み込み時の後始末や再オープンは実装していません。GUI の構造変更（種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI）で state schema が合わなくなった場合、`Window` はエラーハンドラーへ `WindowStateSchemaChangedError`（`INVUI_STATE_SCHEMA_CHANGED`）を報告し、再描画を停止して close します。同じ通知中に走った `setState()` は同じエラーで拒否され、以後の `setState()` は開いていない Window として失敗します。内容変更（`setContent`）は schema を変えないため、通常どおり描画だけ更新します。`setUpperGui(gui)` は開いている Window の upper GUI を、Container と画面を維持したまま同じサイズ・同じ state schema に限って差し替え、再描画します。サイズが違う場合はエラーハンドラーへ `guiChange` として報告して現在の GUI を維持し、schema が違う場合は `WindowStateSchemaChangedError` を報告して close します（fail closed）。`setTitle(title)` は開いている Window のタイトルを、同じサイズの Container を新しく作って描画してから旧画面を閉じて開き直すことで変更します。state と購読は維持し、open/close ハンドラーは再実行しません。`open()` 実行中の変更は拒否し、旧画面を閉じた後に失敗した場合は Window を close します。close が実機で成功するかは未検証です。
+- **Window**: `Window.builder()` の設定、状態の取得・更新、`close()`、クリックのルーティング（`Window.handleClick()`）まで。`handleClick(slot)` は button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、close・再オープン・ページ/タブ変更をまたいだクリックは破棄されます。状態更新・GUI 変更・明示 `refresh()` は全スロットを再評価して描画し、要素の更新通知だけが該当スロットを再描画します。**画面を開く経路は既定で有効（実機未検証）。** アダプタが任意フック `subscribeClose` / `subscribeItemChange` を実装していれば、`Window` は open 前に購読し、close イベントを close ハンドラーへ、itemChange を `WindowItemChangeDangerError` の通知・再描画停止・`close()` 要求として扱います。close ハンドラーの実行中に再 open すると新しい generation が始まり、それ以降の旧 generation の close ハンドラーは通知されず、再 open 後にそのハンドラーが投げた例外も新 generation には配送されません。既定の `minecraftVirtualContainerAdapter` も `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読してこのフックへ流しますが、Node.js テストで確認しただけで実機未検証です。close 理由は `VirtualContainerCloseReason` から `WindowCloseReason` へ明示的に変換し、未知の理由は `ServerClosed` として通知します。`Window.close(reason)` の `reason` は呼び出し側が渡す値のままです。どちらのイベントも `after` なので、購読した時点で close・アイテム変更はすでに起きており、防ぐことも元のアイテムへ戻すこともできません。itemChange はクリック通知でも保護でもありません。死亡・退出・shutdown・スクリプト再読み込み時の後始末や再オープンは実装していません。GUI の構造変更（種別・Structure 行・スクロール設定・タブ・`GuiLink` の子 GUI）で state schema が合わなくなった場合、`Window` はエラーハンドラーへ `WindowStateSchemaChangedError`（`INVUI_STATE_SCHEMA_CHANGED`）を報告し、再描画を停止して close します。同じ通知中に走った `setState()` は同じエラーで拒否され、以後の `setState()` は開いていない Window として失敗します。内容変更（`setContent`）は schema を変えないため、通常どおり描画だけ更新します。`setUpperGui(gui)` は開いている Window の upper GUI を、Container と画面を維持したまま同じサイズ・同じ state schema に限って差し替え、再描画します。サイズが違う場合はエラーハンドラーへ `guiChange` として報告して現在の GUI を維持し、schema が違う場合は `WindowStateSchemaChangedError` を報告して close します（fail closed）。`setTitle(title)` は開いている Window のタイトルを、同じサイズの Container を新しく作って描画してから旧画面を閉じて開き直すことで変更します。state と購読は維持し、open/close ハンドラーは再実行しません。`open()` 実行中の変更は拒否し、旧画面を閉じた後に失敗した場合は Window を close します。close が実機で成功するかは未検証です。**画面を開く経路は既定で有効になりましたが、実機での表示・入力・アイテム保護は未検証です。**
 
 ## コアの未完成点（実コードで確認）
 
 「コア実装済み」は実機非依存の計算・状態遷移までを指します。次の項目は未完成、または実装済みでも制約・実機未検証が残ります。
 
-- **実機画面**: 実アダプタは `canOpenScreens = false` を返すため、`Window.open()` は状態取得・Container 作成より前に `WindowOpenRejectedError` で失敗します。`openContainer()` / `closeContainer()` も例外を投げます。既定の経路で実機画面は表示されませんが、`setContainerAdapter()` に任意のアダプタを渡せるため、これは強制された安全境界ではありません。
-- **実機ライフサイクル**: 既定の `minecraftVirtualContainerAdapter` は `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window`（open 前に購読し、close または失敗した open で解除）が close ハンドラーと itemChange の危険通知に流します。ただし Node.js テストで確認しただけで実機未検証であり、どちらも `after` イベントなので close・アイテム変更を防ぐ保護ではありません。`system.beforeEvents.shutdown` は購読しておらず、死亡・退出・shutdown・再読み込み時の後始末や再オープンも実装していません。`Window` の `status` 遷移、状態ハンドルの解放、`close()` の明示呼び出しはありますが、既定の `open()` は拒否されたままで、既定の open 経路では購読は張られません。
+- **実機画面**: 実アダプタは `canOpenScreens = true` を返し、`Window.open()` は Container を作成して `VirtualContainer.open()` を呼びます。`close()` は `VirtualContainer.close()` を呼びます。ただし**実機で画面が表示されるか、close がいつ完了するかは未検証**です。`close()` は閉鎖を要求した時点で返り、実際の close イベントは別 tick になることがあるため、直後の再 `open()` は前画面の閉鎖待ちで失敗し得ます。表示されたアイテムの取り出しを防ぐ仕組みはありません。
+- **実機ライフサイクル**: 既定の `minecraftVirtualContainerAdapter` は `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window`（open 前に購読し、close または失敗した open で解除）が close ハンドラーと itemChange の危険通知に流します。ただし Node.js テストで確認しただけで実機未検証であり、どちらも `after` イベントなので close・アイテム変更を防ぐ保護ではありません。`system.beforeEvents.shutdown` は購読しておらず、死亡・退出・shutdown・再読み込み時の後始末や再オープンも実装していません。`Window` の `status` 遷移、状態ハンドルの解放、`close()` の明示呼び出しはありますが、これらは実機の画面終了を保証しません。
 - **入力**: `Window.handleClick(slot)` は呼び出し側が論理スロットを直接渡す API です。button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、待機中に close・再オープン・ページ変更があったクリックや、display に変わったスロットのクリックはハンドラーを呼ばずに破棄されます。Bedrock のイベントからスロットを特定して呼ぶ経路（InputBridge / JSON UI / `button.send`）はなく、左右・Shift・ダブルクリックの区別もありません。
   `src/input.ts` には設計 10.4 の `!invui:<session-id>:<slot-index>:<sequence>` を解釈する純粋パーサと、呼び出し側が渡す Window snapshot（open・owner・session・slot mode・lastSequence）を照合する `validateInputNotification()` がありますが、**`src/index.ts` からは export せず、`world.beforeEvents.chatSend` などのイベントにも接続していません**。したがって実機のクリック通知としては動きません。パース結果は認証ではなく、送信者が同じ文字列を手入力できます。検証は呼び出し側が実行時に最新の snapshot を渡す前提で、呼び出し側が時刻と最小間隔を指定する純粋な `checkInputRateLimit()` はありますが、イベントには接続していません。時刻ベースの期限とページ/generation token は未対応です。古い画面の入力の識別は呼び出し側の generation 検査に依存します。チャット送信からの入力経路は、実機で `button.send` の挙動を確認するまで正式機能にしません。
 - **差分描画**: 状態更新と明示 `refresh()` は、要素参照が変わっていなくても全スロットの provider を再評価します。Item の provider が状態に依存して同じ Item でも別の表示を返す場合があること、Bedrock の `ItemStack` を全 component まで比較して同値判定することを避けたためです。**`setItem()` を省略するのは、その Container に対して直前に自分で空を書いたスロットを空で上書きする場合だけ**です（空→空のみ、表示アイテムはスキップしません。詳細は「[差分描画の限界](#差分描画の限界状態更新)」）。要素の更新通知だけが該当スロットを再描画します。詳細と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照してください。レイアウトサイズが変わった場合、表示中の Window は再オープンが必要で、`refresh()` はエラーを報告するだけです。
@@ -314,12 +314,12 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 このテストは、既定ではパックを変更しないこと、`--install-resource-pack` 指定時も `ui/invui.json` 以外を書き換えず既存ファイルを上書きしないこと、壊れた manifest で失敗することなどを確認します。実機の入力・表示・アイテム安全試験の代わりにはなりません。
 
-### 実機検証が終わるまで利用できない機能
+### 実機検証が終わるまで正式機能として扱わないもの
 
 | 機能 | 現状 | 扱い |
 |---|---|---|
-| `Window.open()` による画面表示 | 実装は既定拒否・実機未検証 | 既定の実アダプタでは常に `WindowOpenRejectedError`。ただし `setContainerAdapter()` で迂回でき、強制境界ではない |
-| close / itemChange のアダプタ購読 | 既定アダプタが `afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読。Node.js テストで経路を確認済み・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない。`after` なので close・変更を防げない。既定の `open()` は拒否のままで購読は張られない |
+| `Window.open()` による画面表示 | コード上は既定で有効・実機未検証 | 実アダプタは `canOpenScreens = true` で `VirtualContainer.open()` を呼ぶ。実機での表示・入力・アイテム保護は未確認のため、実在ワールドでの利用は推奨しない |
+| close / itemChange のアダプタ購読 | 既定アダプタが `afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読。Node.js テストで経路を確認済み・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない。`after` なので close・変更を防げない |
 | クリック通知（`button.send` → チャット候補を含む） | `src/input.ts` に純粋パーサと snapshot 検証のみ。公開エントリ非 export・イベント非接続・実機未検証。認証・rate limit・古い画面の入力の扱いは不十分 | 安全に利用不可。有効な機能として案内しない |
 | 表示専用・ボタン用スロットのアイテム保護 | 実装なし・実機未検証。`Item.getMode()` / `setMode()` は分類とハンドラー実行ガードのみ | 安全に利用不可。アイテム移動を許可しない |
 | JSON UI による入力抑制・画面識別 | 未検証の隔離プローブのみ・実機未検証 | チェスト画面へ未接続。通常チェストへの影響も未確認 |
@@ -328,11 +328,12 @@ node --test tests/manual-bedrock/cli.test.mjs
 
 設計書の合格条件（InvUI 画面だけに適用される、通常チェストが壊れない、表示アイテムを持ち出せない、通知が 1 回だけ届く、通知からプレイヤーとスロットを特定できる、アイテムが消失・複製しない、PC・タッチ・コントローラーで成立する、終了後の遅延入力が処理されない）を満たすまで、クリック機能を正式機能として公開しません。
 
-### 実機画面を開く実験は使い捨てワールドで
+### 実機画面は既定で開く（使い捨てワールドで）
 
-- **既定拒否は強制された安全境界ではありません。** 実アダプタの `canOpenScreens = false` と `WindowOpenRejectedError` は、呼び出し側を拘束するサンドボックスではありません。公開 API の `WindowBuilder.setContainerAdapter()` は任意の `WindowContainerAdapter` を受け付けます。`canOpenScreens = true` を返し、`world.virtualContainerManager.create()` と実画面の open を包んだアダプタを渡せば、`Window.open()` は実画面を表示します。
-- **消失・複製事故の恐れがあります。** 実画面では表示専用・ボタン用スロットのアイテム保護が未実装・未検証です。プレイヤーが保護未検証の表示アイテムを取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。クリック通知も未検証のため、入力の取りこぼし・遅延入力・意図しないスロットへの適用も保証できません。
-- **itemChange を検出しても保護はされません。** アダプタが `subscribeItemChange` を実装してイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。これはクリック通知ではなく、変更されたスロットを元のアイテムへ戻す保護でもありません。close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。既定の `minecraftVirtualContainerAdapter` も `subscribeItemChange` を実装して `world.afterEvents.virtualContainerItemChange` を購読しますが、これは Node.js テストで経路を確認しただけで実機未検証です。`after` イベントなので変更後の通知にすぎず、変更を取り消したり変更前のアイテムへ戻したりはできません。既定の `open()` は拒否されたままなので、既定の open 経路では購読が張られず、この経路は動きません。
+- **既定の実アダプタが実画面を開きます。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` は `world.virtualContainerManager.create()` で `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` は `VirtualContainer.close()` を呼びます。**実機で表示・close が成立するかは未検証**です。`close()` は要求時点で返り、実際の close イベントは別 tick になることがあるため、閉鎖直後の再 `open()` は失敗し得ます。
+- **クリック通知はありません。** Bedrock のイベントからスロットを特定して `Window.handleClick()` を呼ぶ経路（InputBridge / JSON UI / `button.send`）は未接続です。`Item` の `button` 分類はハンドラー実行ガードにすぎず、実機のクリックを届けません。クリックの取りこぼし・遅延入力・意図しないスロットへの適用を保証できません。
+- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。入力抑制も JSON UI もないため、このリスクは既定で有効です。
+- **itemChange を検出しても保護はされません。** 既定の `minecraftVirtualContainerAdapter` は `subscribeItemChange` を実装して `world.afterEvents.virtualContainerItemChange` を購読しますが、これは Node.js テストで経路を確認しただけで実機未検証です。`after` イベントなので変更後の通知にすぎず、変更を取り消したり変更前のアイテムへ戻したりはできません。アダプタがイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。ただし close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。
 - **実験は使い捨てのテスト用ワールドだけで行ってください。** 進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
 
 ## Resource Pack テンプレート（実験用・未検証）
@@ -345,7 +346,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 - このテンプレートは `data_driven_container` 名前空間を変更しません。同名前空間を変更する判定プローブは別ディレクトリにあり、Mojang が変更しないよう求める箇所を検証専用に変更するものです（[data-driven 判定プローブ](tests/manual-bedrock/data-driven-resource-pack/README.md)）。
 - 既存 Resource Pack との競合を検出・解消する機能はありません。**使い捨てワールドで、バックアップを取ってから**検証してください。詳細は [resource_pack/README.md](resource_pack/README.md) を参照してください。
 
-Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックしたテストで確認済み）。ただしクリック入力を必要とする Window は動作しません。既定の実アダプタでは `Window.open()` が拒否されるため、Resource Pack の有無にかかわらず画面は開きません（`setContainerAdapter()` で実画面を開くアダプタを渡した場合は除く）。
+Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックしたテストで確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・入力抑制・アイテム保護は動きません。
 
 ## 設計上の前提（実機未検証）
 
@@ -388,7 +389,7 @@ InvUI-for-Bedrock/
 │   ├── input.ts                  # 設計 10.4 の実験的パーサ（非公開・イベント未接続）
 │   ├── state.ts                  # StateManager（scope / lifetime / 永続化 / migrate）
 │   ├── bedrock-store.ts          # 動的プロパティを使う StateStore
-│   └── window.ts                 # Window（open は既定拒否）
+│   └── window.ts                 # Window（open は既定で実画面・実機未検証）
 ├── dist/                         # ビルド成果物（ESM + .d.ts、git 管理外）
 ├── tests/
 │   ├── gui.test.mjs
@@ -397,7 +398,7 @@ InvUI-for-Bedrock/
 │   ├── periodic.test.mjs         # 周期更新の開始・停止
 │   ├── bedrock-store.test.mjs    # 動的プロパティ・StateManager 連携
 │   ├── state.test.mjs            # 状態管理・migration・破損時の挙動
-│   ├── window.test.mjs           # Window と実アダプタの拒否経路・イベント購読・state schema・書き込み省略
+│   ├── window.test.mjs           # Window と実アダプタの open/close 経路・イベント購読・state schema・書き込み省略
 │   ├── window-diff.test.mjs      # 状態変更時の全スロット再評価
 │   ├── package.test.mjs          # パッケージ境界の検査
 │   └── manual-bedrock/
@@ -417,7 +418,7 @@ InvUI-for-Bedrock/
 └── InvUI_for_Bedrock_Design.md   # 全体設計書
 ```
 
-`LICENSE` はまだありません。`resource_pack/` は未検証の隔離テンプレートで、チェスト画面には接続していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタでは `Window.open()` が拒否されます。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
+`LICENSE` はまだありません。`resource_pack/` は未検証の隔離テンプレートで、チェスト画面には接続していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
 
 ## 対応バージョン
 

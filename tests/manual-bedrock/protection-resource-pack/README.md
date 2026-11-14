@@ -10,7 +10,7 @@
 > - **通常のチェスト系画面にも作用し、操作を妨げる可能性があります。** ブロッカーはバニラの `chest` / `pocket_containers` パネル定義へ差し込むため、通常のチェスト・エンダーチェスト・シュルカーボックス・樽、ポケット UI ではホッパー等でもコンテナ側の操作が止まる可能性があります（実機未検証）。**このパックを有効にしたワールドで「通常チェストの基準確認」を合格にできません。** 基準確認はパックを無効にした状態で別に行ってください。
 > - **通常ワールドのチェストを変更する実装ではありません。** このディレクトリの外（`resource_pack/`、コア、CLI の出力）には何も追加しません。通常ワールドへ配布・導入する前提の成果物ではありません。有効化したワールドでのみ作用します。
 > - **`chest_screen.json` を同梱・上書きしません。** 既存ファイルへ `modifications` で差し込むだけです。
-> - **スロット単位の部分一致はできません。** 表示専用スロットだけ、ボタンスロットだけを止める検証はできません。コンテナ側グリッド全体を 1 枚のボタンで覆います。プレイヤーインベントリ側・ホットバーは覆いません。
+> - **スロット単位の選択的抑制は、このパックでは未実装です。** 表示専用スロットだけ、ボタンスロットだけ、`inventory` スロットだけを止める検証はできません。コンテナ側グリッド全体を 1 枚のボタンで覆います。**JSON UI の samples にはスロットの display / button / inventory モードを読む binding がなく、モード別の選択は実装根拠を作れませんでした**（下記「スロット単位の選択的抑制を実装できない根拠」）。プレイヤーインベントリ側・ホットバーは覆いません。
 > - **InvUI 専用画面への限定はできません。** 画面タイトル等での識別は実装していません。ブロッカーは通常チェストに作用する可能性があり、`VirtualContainer` にも表示されるかは未確認です。ラベルが出ただけでは「InvUI 専用画面に適用できた」とは言えません。
 > - **陰性（アイテムが動かない）だけでは合格にしません。** パック未適用、`modifications` 非対応、ブロッカーが下に隠れた、別の要因で操作できなかった、などを区別する必要があります。下記「判定」のとおり、**緑ラベル**と**赤いホバー/押下表示**を陽性対照として併用してください。
 > - **アイテムを持ち出せた場合は即時中止**し、パックを無効化してください。表示専用アイテムや貴重品は使わないでください。コア側には「取り出し＋再描画による複製」の既知リスクがあり、このプローブはそれを検証・防止しません。
@@ -62,10 +62,36 @@ check.mjs                             JSON 構造チェック（実機の代替�
 - **ドラッグ・ドロップ・ダブルクリック相当が JSON UI のボタンマッピング経由かは確認していません。** ブロッカーはこれらも no-op へ割り当てていますが、ゲーム側が別経路で処理すれば通ります。
 - **画面識別をしていません。** InvUI 専用画面だけに適用する方法（設計書 10.7）は未確定であり、このパックは通常チェストにも同じブロッカーを出します。
 
+### スロット単位の選択的抑制を実装できない根拠（追加調査）
+
+「コンテナ側グリッドのうち display / button スロットだけを止め、inventory スロットは通す」という選択的抑制が JSON UI で実装できるかを、`v1.26.70.23-preview` の samples で再確認しました。結論は **「スロット単位の位置指定と上重ねは実装できるが、InvUI の display / button / inventory モードを JSON UI から識別する手段が samples にないため、モード別の選択的抑制は samples だけでは実装できない」** です。このため、この仮説用の **opt-in controls ファイルは追加していません**。未成立の保護を「完成」として扱いません。
+
+| 論点 | samples / JSON UI 仕様で確認できること | 判定 |
+|---|---|---|
+| スロット単位の位置指定 | `grid_position` は hardcoded grid の特定セルを対象にできる（[Control の仕様](https://wiki.bedrock.dev/json-ui/json-ui-documentation#control)）。`collection_index` は collection 内の index を取る。samples では [`npc_interact_screen.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/npc_interact_screen.json)、[`store_common.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/store_common.json)、[`persona_SDL.json`](https://github.com/Mojang/bedrock-samples/blob/v1.26.70.23-preview/resource_pack/ui/persona_SDL.json) が利用している | 可能 |
+| スロット単位の表示・有効切替 | collection binding で `#item_id_aux` / `#item_stack_count` / `#item_durability_*` / `#item_lock_in_slot` などを `#visible` / `#enabled` に束縛できる（[Data Binding](https://wiki.bedrock.dev/json-ui/json-ui-documentation#data-binding)） | データ次第で可能 |
+| display / button / inventory の識別 | `ui_common.json` の `container_item` は全セル共通のテンプレートで、`$button_ref` もセルごとの分岐を持たない。collection binding に「そのセルが display / button / inventory のどれか」を返す値はない | **不可** |
+| モードを JSON UI へ渡す手段 | samples にあるのはアイテム ID・aux・個数・耐久・ロック状態など。lore、NBT、Script API の動的プロパティを collection binding で読む例はない。ID / 個数 / 耐久をマーカーにすると表示が変わる（設計書 10.6） | **未確立** |
+| `#enabled` でアイテム操作が止まるか | samples は `#enabled` をボタンの有効 / 無効表示に使うが、`button.container_take_all_place_all` などの hardcoded ID がゲーム側で無効化される保証はない | **未検証** |
+| 上重ねが下のスロット入力を奪うか | 既存の中心的不確実性のまま。samples からは証明できない | **未検証** |
+
+補足:
+
+- `#item_lock_in_slot` は `ui_common.json` の `container_item_lock_overlay` が**ロック表示**に使う値であり、スロットの役割ではない。ロック状態をモードの代理にすると、見た目と操作の意味が変わる。
+- `grid_position` / `collection_index` を使えば「特定インデックスのスロットを覆う」ところまでは書ける。しかし **どのインデックスが display / button かを画面側が知る手段がない**ため、全スロットを覆う（= 既存のグリッド全体ブロッカーと同じ）か、サーバー側から何らかのマーカーを渡すかのどちらかになる。
+- マーカー方式も、`#enabled` / `#visible` がゲーム側のアイテム移動を実際に止めるか、上重ねがヒットテストを奪えるかが未検証。**「マーカーを付ければ保護できる」とは扱わない。**
+
+### 代替案（このプローブの範囲外）
+
+1. **マーカープロトコルの実験を別途行う**: display / button スロットのアイテムに、JSON UI が読める既存プロパティ（例: `#item_lock_in_slot`）でマーカーを付け、`#visible` / `#enabled` を切り替える opt-in controls を作る。ただし表示・操作意味への影響と、hardcoded container action の遮断可否を実機で確認するまで保護と呼ばない。
+2. **専用画面に寄せる**: 通常チェストの `container_items` を直接使わず、add-on が制御できる専用 UI にする。画面識別（設計書 10.7）と入力経路の検証が別途必要。
+3. **サーバー側の検出・事後処理**: `VirtualContainerItemChange` は変更後イベントなので事前抑止にならない。巻き戻しは複製・消失の危険があり、保護の完成とは扱わない。
+4. **グリッド全体ブロッカーのまま観察を続ける**: 現在のパック。ただし display / button と inventory が混在する画面では成立しない。
+
 ## 手順
 
 1. 使い捨てワールドを複製し、ワールドとパックのバックアップを取る。
-2. **パックを無効にした状態で**、通常チェストのアイテム移動を確認する（基準）。`VirtualContainer` を使う場合は、別途 [`../probe/`](../probe/README.md) の raw probe を Behavior Pack として導入し、`!invui open 27` を実行できる状態にする。**raw probe は InvUI コアを使わず `VirtualContainer.open()` を直接呼ぶため、テスト用アダプタも `Window.open()` を許可するコードも不要。** アダプタが必要なのは InvUI コアの画面を出す場合だけであり、現行コアの `Window.open()` 既定拒否はこの試験経路には関係しない。
+2. **パックを無効にした状態で**、通常チェストのアイテム移動を確認する（基準）。`VirtualContainer` を使う場合は、別途 [`../probe/`](../probe/README.md) の raw probe を Behavior Pack として導入し、`!invui open 27` を実行できる状態にする。**raw probe は InvUI コアを使わず `VirtualContainer.open()` を直接呼ぶため、`WindowContainerAdapter` も `Window.open()` を許可するコードも不要。** アダプタが関わるのは InvUI コアの画面を出す場合だけであり、現行コアの既定 open 経路（実アダプタが `Window.open()` から `VirtualContainer.open()` を呼ぶ。実機未検証・保護なし）はこの試験経路には関係しない。
 3. このディレクトリを development resource pack のフォルダに置き、ワールドで**このパックだけ**を有効化する。Windows の Preview では（1.21.120 以降の GDK 版）`%APPDATA%\Minecraft Bedrock Preview\users\shared\games\com.mojang\development_resource_packs\` に置く。安定版は `Minecraft Bedrock Preview` ではなく `Minecraft Bedrock`、古い UWP 版は `%LOCALAPPDATA%\Packages\<Preview のパッケージ>\LocalState\games\com.mojang\development_resource_packs\` になる（[GDK Migration on Windows](https://learn.microsoft.com/en-us/minecraft/creator/documents/gdkpcprojectfolder?view=minecraft-bedrock-stable)）。他の Resource Pack（特に `button-send-resource-pack/`、`chest-resource-pack/`、`data-driven-resource-pack/`）と併用しない。Behavior Pack は不要（`VirtualContainer` を開く場合のみ raw probe）。
 4. 使い捨ての棒・紙などを用意する。通常チェストには手で入れてよい。**`VirtualContainer` の中身は手で入れられないため、raw probe の `!invui fill` で入れる。`fill` は画面を開いていない（開いていたら閉じて `CLOSE` イベントが届いた）状態で実行し、その後に `!invui open 27` で開く。画面を開いたままの `fill` は probe が拒否する。拒否されずに書き込まれた場合は中止する。** カーソル上は空にし、サバイバルで行う。
 5. 通常のチェストを開く。緑ラベルが出るか、末尾が `desktop` か `pocket` かを記録する。ラベルが出なければ、パック未適用・`modifications` 非対応・差し込み先の変更などの可能性があるため、以降の結果を使わない。
@@ -110,7 +136,7 @@ check.mjs                             JSON 構造チェック（実機の代替�
   - ポケット側のブロッカーが右半分を覆う単純化のため、実際のグリッドとずれて一部のスロットが露出する。
   - ドラッグ・ドロップなどが JSON UI を経由しない経路で処理される。
 - **このプローブで確認できないこと**
-  - スロット単位（表示専用 / ボタン / 通常）の選択的な抑制。
+  - スロット単位（display / button / inventory）の選択的な抑制。JSON UI の collection binding にスロットのモードが露出していないため、このプローブでは実装していません。
   - InvUI 専用画面だけへの適用。
   - クリックの Script API への通知、`InputBridge`、`!invui:` チャット通知。
   - アイテムの複製・消失が起きないこと（そもそも保護していない）。
@@ -135,7 +161,7 @@ check.mjs                             JSON 構造チェック（実機の代替�
 
 - **アイテム保護**: 表示専用アイテムの保護、移動制限、複製・消失の防止。
 - **クリック通知 / InputBridge**: 押下は `button.invui_protection_blocked` に流れるだけで、Script API・Behavior Pack・チャットへは何も送りません。**InputBridge には接続していません。**
-- **スロット単位の制御**: グリッド全体を 1 枚で覆うだけで、対象スロットを選べません。
+- **スロット単位の制御**: グリッド全体を 1 枚で覆うだけで、対象スロットを選べません。モード別の選択は samples から実装根拠を作れず、opt-in controls も追加していません（上記「スロット単位の選択的抑制を実装できない根拠」）。
 - **画面識別**: InvUI 専用画面の判定。通常チェストにも作用します。
 - **保証**: パックが読み込まれること、ブロッカーが描画・入力されること、アイテムが保護されること。
 

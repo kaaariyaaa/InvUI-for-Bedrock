@@ -4,11 +4,13 @@
  *
  * 目的:
  * - 既定の init がどのファイルも書き換えないこと（読み取り専用）
- * - --install-resource-pack 明示時だけ ui/invui.json を追加すること
+ * - --install-resource-pack 明示時だけ ui/invui.json と試験的接続 2 ファイルを追加すること
+ * - 既存の ui/_ui_defs.json を自動変更せず、登録は手動だと表示すること
  * - 既存ファイルを上書きせず、競合時は差分を出して中断すること
  * - 失敗時に部分適用を残さないこと
- * - 未検証の隔離プローブであり、置くだけではチェストへ適用されないと表示すること
- * - generate-resource-pack が init とは別に、新しい出力先へ同梱3ファイルを生成すること
+ * - 未検証の隔離プローブであり、置くだけでは有効にならないと表示すること
+ * - generate-resource-pack が init とは別に、新しい出力先へ同梱5ファイルを生成し、
+ *   接続 2 ファイルを _ui_defs.json に登録済みにすること
  * - generate-resource-pack が既存パス・シンボリックリンクを拒否し、部分失敗時は自分が作ったものだけを戻すこと
  * - ロールバックが同一 inode への in-place 書き換えを消さず、temp 削除失敗を残骸として残さないこと
  * - 生成 manifest の UUID が実行ごとに作り直されること
@@ -36,7 +38,23 @@ const templatePath = path.resolve(here, '..', '..', 'resource_pack', 'ui', 'invu
 const templateReadmePath = path.resolve(here, '..', '..', 'resource_pack', 'README.md');
 const bundledManifestPath = path.resolve(here, '..', '..', 'resource_pack', 'manifest.json');
 const bundledUiDefsPath = path.resolve(here, '..', '..', 'resource_pack', 'ui', '_ui_defs.json');
+const connectTemplatePath = path.resolve(here, '..', '..', 'resource_pack', 'ui', 'invui_connect.json');
+const dataDrivenTemplatePath = path.resolve(
+  here,
+  '..',
+  '..',
+  'resource_pack',
+  'ui',
+  'invui_connect_data_driven.json',
+);
 const templateText = fs.readFileSync(templatePath, 'utf8');
+const connectTemplateText = fs.readFileSync(connectTemplatePath, 'utf8');
+const dataDrivenTemplateText = fs.readFileSync(dataDrivenTemplatePath, 'utf8');
+const installedFiles = [
+  ['ui/invui.json', 'invui.json', templateText],
+  ['ui/invui_connect.json', 'invui_connect.json', connectTemplateText],
+  ['ui/invui_connect_data_driven.json', 'invui_connect_data_driven.json', dataDrivenTemplateText],
+];
 
 function runCli(args, options = {}) {
   const result = spawnSync(options.nodePath || process.execPath, [...(options.nodeArgs || []), cliPath, ...args], {
@@ -308,14 +326,14 @@ test('テンプレートは JSON として読め、未接続の可視ラベル�
   }
 
   const readme = fs.readFileSync(templateReadmePath, 'utf8');
-  assert.match(readme, /置いただけでは/);
-  assert.match(readme, /チェスト画面/);
+  assert.match(readme, /登録済み/);
+  assert.match(readme, /手動/);
   assert.match(readme, /未検証/);
   assert.match(readme, /上書きしません/);
   assert.match(readme, /競合/);
 });
 
-test('--install-resource-pack は ui/invui.json だけを追加し、既存ファイルを変更しない', () => {
+test('--install-resource-pack は必要な 3 ファイルを追加し、既存ファイルを変更しない', () => {
   withFixture(({ behaviorPack, resourcePack }) => {
     const before = snapshot(resourcePack);
 
@@ -330,22 +348,26 @@ test('--install-resource-pack は ui/invui.json だけを追加し、既存フ�
 
     assert.equal(result.status, 0, result.both);
     assert.match(result.stdout, /導入済み/);
-    assert.match(result.stdout, /ui\/invui\.json/);
+    for (const [relativePath, basename, text] of installedFiles) {
+      assert.match(result.stdout, new RegExp(relativePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.equal(fs.readFileSync(path.join(resourcePack, relativePath), 'utf8'), text, basename);
+      assert.match(result.stdout, new RegExp(`rm ".*${relativePath.replace(/\./g, '\\.')}"`));
+    }
     assert.match(result.stdout, /隔離プローブ/);
-    assert.match(result.stdout, /置いただけではチェスト画面へ適用されません/);
-    assert.match(result.stdout, /rm ".*ui\/invui\.json"/);
+    assert.match(result.stdout, /置いただけでは有効にならない/);
     assert.match(result.stdout, /復元コマンドは.*変更も消します/);
 
-    const installed = path.join(resourcePack, 'ui', 'invui.json');
-    assert.equal(fs.readFileSync(installed, 'utf8'), templateText);
-    assert.deepEqual(changedPaths(before, snapshot(resourcePack)), ['ui/invui.json']);
+    assert.deepEqual(
+      changedPaths(before, snapshot(resourcePack)),
+      installedFiles.map(([relativePath]) => relativePath).sort(),
+    );
     assert.deepEqual(fs.readFileSync(path.join(resourcePack, 'ui', 'chest_screen.json')), Buffer.from(
       `${JSON.stringify({ namespace: 'chest' }, null, 2)}\n`,
     ));
   });
 });
 
-test('--install-resource-pack は ui/ がなくても ui/invui.json だけを作る', () => {
+test('--install-resource-pack は ui/ がなくても必要な 3 ファイルを作る', () => {
   withFixture(({ resourcePack }) => {
     fs.rmSync(path.join(resourcePack, 'ui'), { recursive: true, force: true });
     const before = snapshot(resourcePack);
@@ -353,8 +375,13 @@ test('--install-resource-pack は ui/ がなくても ui/invui.json だけを作
     const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack']);
 
     assert.equal(result.status, 0, result.both);
-    assert.equal(fs.readFileSync(path.join(resourcePack, 'ui', 'invui.json'), 'utf8'), templateText);
-    assert.deepEqual(changedPaths(before, snapshot(resourcePack)), ['ui/invui.json']);
+    for (const [relativePath, , text] of installedFiles) {
+      assert.equal(fs.readFileSync(path.join(resourcePack, relativePath), 'utf8'), text);
+    }
+    assert.deepEqual(
+      changedPaths(before, snapshot(resourcePack)),
+      installedFiles.map(([relativePath]) => relativePath).sort(),
+    );
     assert.match(result.stdout, /rmdir ".*\/ui"/);
   });
 });
@@ -368,16 +395,76 @@ test('--install-resource-pack は Behavior Pack 指定なしでも動作する',
   });
 });
 
-test('同一内容の ui/invui.json が既にある場合は書き換えず成功する', () => {
+test('同一内容の 3 ファイルが既にある場合は書き換えず成功する', () => {
   withFixture(({ resourcePack }) => {
-    const installed = path.join(resourcePack, 'ui', 'invui.json');
-    fs.writeFileSync(installed, templateText);
+    for (const [relativePath, , text] of installedFiles) {
+      fs.writeFileSync(path.join(resourcePack, relativePath), text);
+    }
     const before = snapshot(resourcePack);
 
     const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack']);
 
     assert.equal(result.status, 0, result.both);
     assert.match(result.stdout, /同梱テンプレートと同一/);
+    assert.deepEqual(snapshot(resourcePack), before);
+  });
+});
+
+test('既存の ui/_ui_defs.json は変更せず、未登録なら手動登録を案内する', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const userDefs = `${JSON.stringify({ ui_defs: ['ui/user_screen.json'] }, null, 2)}\n`;
+    fs.writeFileSync(uiDefsPath, userDefs);
+
+    const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack']);
+
+    assert.equal(result.status, 0, result.both);
+    assert.match(result.stdout, /_ui_defs\.json は変更していません/);
+    assert.match(result.stdout, /未登録: ui\/invui\.json/);
+    assert.match(result.stdout, /手動/);
+    assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), userDefs);
+  });
+});
+
+test('既存の ui/_ui_defs.json が登録済みなら、そのまま尊重して登録済みと表示する', () => {
+  withFixture(({ resourcePack }) => {
+    const uiDefsPath = path.join(resourcePack, 'ui', '_ui_defs.json');
+    const uiDefs = installedFiles.map(([relativePath]) => relativePath);
+    const userDefs = { ui_defs: ['ui/user_screen.json', ...uiDefs] };
+    writeJson(uiDefsPath, userDefs);
+    const before = snapshot(resourcePack);
+
+    const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack']);
+
+    assert.equal(result.status, 0, result.both);
+    assert.match(result.stdout, /登録済み: ui\/invui\.json/);
+    assert.doesNotMatch(result.stdout, /未登録:/);
+    // 登録済みでも既存 _ui_defs.json は書き換えない。
+    assert.equal(fs.readFileSync(uiDefsPath, 'utf8'), `${JSON.stringify(userDefs, null, 2)}\n`);
+    assert.deepEqual(
+      changedPaths(before, snapshot(resourcePack)),
+      installedFiles.map(([relativePath]) => relativePath).sort(),
+    );
+  });
+});
+
+test('接続ファイルの競合は全体を中断し、部分適用を残さない', () => {
+  withFixture(({ resourcePack }) => {
+    const conflictPath = path.join(resourcePack, 'ui', 'invui_connect_data_driven.json');
+    const userContent = '{"namespace":"user_data_driven","note":"keep me"}\n';
+    fs.writeFileSync(conflictPath, userContent);
+    const before = snapshot(resourcePack);
+
+    const result = runCli(['init', '--resource-pack', resourcePack, '--install-resource-pack']);
+
+    assert.equal(result.status, 1, result.both);
+    assert.match(result.stdout, /競合/);
+    assert.match(result.stdout, /ui\/invui_connect_data_driven\.json/);
+    assert.match(result.stdout, /\+.*user_data_driven/);
+    assert.equal(fs.readFileSync(conflictPath, 'utf8'), userContent);
+    // 競合したファイル以外（invui.json 等）も追加しない。
+    assert.equal(fs.existsSync(path.join(resourcePack, 'ui', 'invui.json')), false);
+    assert.equal(fs.existsSync(path.join(resourcePack, 'ui', 'invui_connect.json')), false);
     assert.deepEqual(snapshot(resourcePack), before);
   });
 });
@@ -398,6 +485,8 @@ test('異なる ui/invui.json は上書きせず、差分を出して中断す�
     assert.match(result.stdout, /\+.*user_probe/);
     assert.match(result.stdout, /-.*invui_probe/);
     assert.equal(fs.readFileSync(installed, 'utf8'), userContent);
+    // 競合時は他の 2 ファイルも追加しない（部分適用を残さない）。
+    assert.equal(fs.existsSync(path.join(resourcePack, 'ui', 'invui_connect.json')), false);
     assert.deepEqual(snapshot(resourcePack), before);
   });
 });
@@ -417,11 +506,19 @@ test('--json は導入結果と復元情報を出力する', () => {
     assert.equal(report.resourcePackInstall.status, 'installed');
     assert.deepEqual(
       report.resourcePackInstall.files.map((file) => [file.path, file.action]),
-      [['ui/invui.json', 'created']],
+      installedFiles.map(([relativePath]) => [relativePath, 'created']),
     );
-    assert.ok(report.resourcePackInstall.files[0].sha256);
-    assert.equal(report.resourcePackInstall.files[0].sha256.length, 64);
-    assert.ok(report.resourcePackInstall.restore.some((line) => line.startsWith('rm ')));
+    for (const file of report.resourcePackInstall.files) {
+      assert.equal(file.sha256.length, 64);
+    }
+    assert.ok(report.resourcePackInstall.restore.filter((line) => line.startsWith('rm ')).length === 3);
+    // 既存 _ui_defs.json は変更せず、未登録であることを機械可読に返す。
+    assert.equal(report.resourcePackInstall.uiDefs.path, 'ui/_ui_defs.json');
+    assert.equal(report.resourcePackInstall.uiDefs.action, 'not-modified');
+    assert.deepEqual(
+      report.resourcePackInstall.uiDefs.missing,
+      installedFiles.map(([relativePath]) => relativePath),
+    );
   });
 });
 
@@ -672,32 +769,44 @@ test('generate-resource-pack は --output 必須で、init 用フラグと混在
   assert.match(initWithOutput.both, /--output/);
 });
 
-test('generate-resource-pack は新しい出力先へ同梱3ファイルだけを生成する', () => {
+test('generate-resource-pack は新しい出力先へ同梱5ファイルだけを生成し、接続を登録済みにする', () => {
   withFixture(({ root }) => {
     const output = path.join(root, 'generated_pack');
     const result = runCli(['generate-resource-pack', '--output', output]);
 
     assert.equal(result.status, 0, result.both);
     assert.match(result.stdout, /Experimental/);
-    assert.match(result.stdout, /未接続/);
+    assert.match(result.stdout, /登録済み/);
     assert.match(result.stdout, /実機未検証/);
     assert.match(result.stdout, /manifest\.json/);
     assert.match(result.stdout, /ui\/_ui_defs\.json/);
-    assert.match(result.stdout, /ui\/invui\.json/);
+    for (const [relativePath] of installedFiles) {
+      assert.match(result.stdout, new RegExp(relativePath.replace(/\./g, '\\.')));
+    }
 
     assert.deepEqual(fs.readdirSync(output).sort(), ['manifest.json', 'ui']);
-    assert.deepEqual(fs.readdirSync(path.join(output, 'ui')).sort(), ['_ui_defs.json', 'invui.json']);
-    assert.equal(fs.readFileSync(path.join(output, 'ui', 'invui.json'), 'utf8'), templateText);
+    assert.deepEqual(
+      fs.readdirSync(path.join(output, 'ui')).sort(),
+      ['_ui_defs.json', 'invui.json', 'invui_connect.json', 'invui_connect_data_driven.json'],
+    );
+    for (const [relativePath, , text] of installedFiles) {
+      assert.equal(fs.readFileSync(path.join(output, relativePath), 'utf8'), text, relativePath);
+    }
     assert.deepEqual(
       fs.readFileSync(path.join(output, 'ui', '_ui_defs.json')),
       fs.readFileSync(bundledUiDefsPath),
     );
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, 'ui', '_ui_defs.json'), 'utf8')).ui_defs, [
+      'ui/invui.json',
+      'ui/invui_connect.json',
+      'ui/invui_connect_data_driven.json',
+    ]);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'), 'utf8'));
     const bundled = JSON.parse(fs.readFileSync(bundledManifestPath, 'utf8'));
     assert.notEqual(manifest.header.uuid, bundled.header.uuid);
     assert.notEqual(manifest.modules[0].uuid, bundled.modules[0].uuid);
-    assert.match(manifest.header.description, /not connected/);
+    assert.match(manifest.header.description, /NOT VERIFIED/);
 
     // 既存の behavior_pack / resource_pack / out 以外を、fixture 直下に作っていない。
     assert.deepEqual(fs.readdirSync(root).sort(), ['behavior_pack', 'generated_pack', 'out', 'resource_pack']);
@@ -717,9 +826,17 @@ test('generate-resource-pack は実行ごとに manifest の UUID を作り直�
     assert.equal(b.status, 'generated');
     assert.equal(a.experimentalConnected, false);
     assert.equal(a.verifiedInGame, false);
+    assert.equal(a.uiConnectRegistered, true);
     assert.equal(typeof a.notice, 'string');
-    assert.match(a.notice, /未接続/);
-    assert.deepEqual(a.files.map((file) => file.path), ['manifest.json', 'ui/_ui_defs.json', 'ui/invui.json']);
+    assert.match(a.notice, /登録済み/);
+    assert.match(a.notice, /全画面/);
+    assert.deepEqual(a.files.map((file) => file.path), [
+      'manifest.json',
+      'ui/_ui_defs.json',
+      'ui/invui.json',
+      'ui/invui_connect.json',
+      'ui/invui_connect_data_driven.json',
+    ]);
     assert.ok(a.files.every((file) => file.action === 'created' && file.sha256.length === 64));
 
     const uuids = [...a.uuids.map((entry) => entry.uuid), ...b.uuids.map((entry) => entry.uuid)];
@@ -782,7 +899,8 @@ test(
     const originalWriteFile = fs.writeFileSync;
     try {
       fs.writeFileSync = (target, ...args) => {
-        if (typeof target === 'string' && target.includes('_ui_defs.json')) {
+        // 最後のファイルで失敗させ、それ以前に配置した複数ファイルのロールバックを確認する。
+        if (typeof target === 'string' && target.includes('invui_connect_data_driven.json')) {
           const error = new Error('simulated write failure');
           error.code = 'EIO';
           throw error;
@@ -798,6 +916,7 @@ test(
       }
 
       assert.equal(result.status, 'failed');
+      assert.equal(result.uiConnectRegistered, false);
       assert.match(result.error, /失敗/);
       assert.match(result.error, /この CLI が作成したものだけ/);
       assert.equal(fs.existsSync(output), false);

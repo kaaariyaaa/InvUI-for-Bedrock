@@ -33,7 +33,7 @@ check.mjs                        JSON 構造チェック（実機の代替では
 1. 使い捨てワールドを複製し、バックアップを取る。
 2. このディレクトリを `development_resource_packs/` に置き、ワールドで有効化する。`VirtualContainer` を開くには npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要（ゲーム側の版表記は [API-NOTES.md](../API-NOTES.md) 第 8 節で確認）。samples の 1.26.70.23 は UI 構造の参照元にすぎない。Experimental を有効化する。
 3. 通常チェストでもラベルの有無を参考として記録する。ただし通常チェストは陽性対照ではない。
-4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。危険な custom Window adapter や `Window.open()` を直接叩くテスト用コードは書かない（現行コアは `Window.open()` を既定で拒否する。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。
+4. `VirtualContainer` の画面は、**同梱の raw probe**（[`tests/manual-bedrock/probe`](../probe/README.md)）の `!invui open 27` で開く。custom Window adapter や `Window.open()` を直接叩くテスト用コードは書かない（現行コアの実アダプタは `Window.open()` から `VirtualContainer.open()` を既定で呼ぶが、実機未検証で保護もない。probe は使い捨てワールド前提で、stick/paper だけを扱う最小経路）。
 5. 表示されたラベルの有無と、末尾が `.desktop` か `.pocket` かを記録する。
 
 ## 観察の解釈（いずれも推定）

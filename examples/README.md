@@ -5,9 +5,9 @@
 >
 > - スケッチ内の API は現行コアに存在しますが、このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）にもテストにも含まれていません。`npm run build` / `npm test` はここをコンパイル・実行しません。型検査の前には `npm run build` でパッケージ本体の `dist` を作ってください（`examples/` をビルドするわけではありません）。
 > - コア（レイアウト計算・アイテム・状態管理・Window のライフサイクル）は実装済みで Node.js 上でテストされていますが、**実機では一切検証していません**。
-> - **`Window.open()` は既定の実アダプタでは常に拒否されます。** `minecraftVirtualContainerAdapter` は `canOpenScreens = false` を返すため、`open()` は Container の作成・表示より前に `WindowOpenRejectedError` で reject します。`Window` オブジェクト自体は `build()` で作成済みで `status` は `"created"` のまま、`container` は `undefined` になり、画面は作成も表示もされません。`open()` は `async` なので、呼び出し側で catch しないと未処理の Promise rejection になります。既定の実アダプタでは画面を開く経路自体が拒否されるため、Resource Pack を置いたかどうかは関係ありません。
-> - **ただし、この既定拒否は安全境界ではありません。** `WindowBuilder.setContainerAdapter()` は公開 API で、`canOpenScreens = true` を返し `openContainer()` を実装したアダプタを注入すれば、`open()` の拒否は迂回され実画面の open 経路が呼ばれます。テスト用アダプタはテスト環境専用のガードではありませんが、**実機で画面が開くか自体が未検証**です（VirtualContainer / Experimental API 前提）。
-> - **表示専用アイテムの保護はありません。** 画面を開く実装では、表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれます。入力抑制も JSON UI もないため、プレイヤーが表示アイテムを取り出せる可能性があり、`refresh()` や状態更新の再描画で同じアイテムが再設定されるため、取り出しと再描画の組み合わせでアイテムが複製され得ます（実機未検証）。
+> - **`Window.open()` は既定の実アダプタで実画面を開きます（実機未検証）。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`open()` は `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`close()` は `VirtualContainer.close()` を呼びます。実際に画面が表示されるか、close がいつ完了するかは未確認です。`close()` は要求時点で返るため、閉鎖直後の再 `open()` は失敗し得ます。`open()` は `async` なので、呼び出し側で catch しないと未処理の Promise rejection になります。
+> - **クリック通知もアイテム保護もありません。** Bedrock のイベントからスロットを特定して `Window.handleClick()` へ渡す経路は未接続で、`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
+> - **取り出し後の再描画で複製・消失が起こり得ます。** 表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれます。プレイヤーが取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます（実機未検証）。
 > - **実機で試す場合は、使い捨てワールドだけで行ってください。** 本番ワールドや配布用ワールドでは実行しないでください。アイテムの複製・消失を防ぐ仕組みは現行コアにありません。
 > - クリック入力のブリッジ、アイテム保護、`InventoryLink` のアイテム移動は実装していません。JSON UI は未検証の隔離テンプレート（`resource_pack/`）を同梱するだけで、チェスト画面へは接続していません。スケッチ内のクリック処理を動作する機能として前提にしないでください。
 > - `VirtualContainer` は Bedrock Preview/Beta の Experimental API を前提とした設計です。
@@ -36,8 +36,8 @@
 | `Gui` / `Structure` / `Markers` / `GuiLink` | 実装済み。Node.js のテストで確認済み | なし |
 | `Item` / `ItemBuilder` / `Item.simple()` / `Item.builder()` / クリックハンドラー | 実装済み。ハンドラーは登録順に呼ばれる | 実機のクリックをハンドラーへ届ける仕組みはない。`Window.handleClick(slot)` を直接呼ぶ必要がある |
 | `ClickContext` | `player`、`slot`、`window: unknown` | `window` は `Window` 型ではない |
-| `Window` の設定・状態・`close()` | 実装済み | 画面を開く経路だけが既定拒否 |
-| `Window.open()` | `async`。実アダプタでは常に `WindowOpenRejectedError` | スケッチは `await` して `try` / `catch` で受け、未処理 rejection を残さない |
+| `Window` の設定・状態・`close()` | 実装済み | 画面を開く経路が既定で有効（実機未検証） |
+| `Window.open()` | `async`。既定の実アダプタで `VirtualContainer.open()` を呼ぶ（実機未検証） | スケッチは `await` して `try` / `catch` で受け、未処理 rejection を残さない。実機で表示されるかは未確認 |
 | `WindowBuilder.setLowerGui()` | API 互換のため受け付けるが、下側領域へは描画しない | 下側 GUI を置き換えられる前提で読まない |
 | `InventoryLink` の読み書き・購読 | 実装済み | なし |
 | `InventoryLink.moveTo()` | 常に `InventoryLinkMoveRejectedError` | スケッチには移動処理を置いていない |
@@ -71,21 +71,20 @@ npx tsc -p tsconfig.examples-check.tmp.json
 
 ## `Window.open()` の現状
 
-`openShop()` が呼ぶ `window.open()` は、既定の実アダプタでは画面を開きません。
+`openShop()` が呼ぶ `window.open()` は、既定の実アダプタで実画面を開こうとします。ただし実機未検証で、保護もありません。
 
-- 実アダプタ `minecraftVirtualContainerAdapter` の `canOpenScreens` は `false` 固定です。
-- `Window.builder().build()` は `Window` オブジェクトを作成し、`status` は `"created"` になります。既定拒否の `open()` ではこのオブジェクトは残り、`status` は `"created"` のまま、`container` は `undefined` です。画面（`VirtualContainer`）は作成も表示もされません。`close()` を呼ぶと `status` は `"closed"` になります。
-- `open()` は Container を作る前に `WindowOpenRejectedError` で reject します。
-- スケッチの `openShop()` は `await window.open()` を `try` / `catch` で囲み、この既定拒否を受け止めます。未処理 rejection にはなりません。
-- ただし `setContainerAdapter()` は公開 API です。`canOpenScreens = true` を返し `openContainer()` を実装したアダプタを渡せば、テストでは画面を開く経路に入ります。実機で同じ経路が成立するかは未検証です。既定拒否は「うっかり開かない」ための既定値であり、安全境界ではありません。
-- 画面が開いた状態では、表示専用アイテムをプレイヤーが取り出せる可能性があります（実機未検証）。取り出した後に `refresh()`（状態更新や購読による再描画）が走ると、同じアイテムが `setItem()` で再び書き込まれるため、複製が起こり得ます。
-- 保護とクリック処理が実機未検証のため既定は変えませんが、既定を変えないこと自体は安全性の保証ではありません。
+- 実アダプタ `minecraftVirtualContainerAdapter` の `canOpenScreens` は `true` です。
+- `Window.builder().build()` は `Window` オブジェクトを作成し、`status` は `"created"` になります。`open()` は状態を取得し、`VirtualContainer` を作成して全スロットを描画したうえで `VirtualContainer.open()` を呼びます。実機で画面が表示されるかは未確認です。
+- `close()` は `VirtualContainer.close()` を呼びます。close は「要求した」時点で返り、実際の close イベントは別 tick になることがあるため、直後に同じプレイヤーへ `open()` し直すと失敗し得ます。
+- `open()` は Container の作成・描画・open のどこで失敗しても reject し、エラーハンドラーにも報告します。スケッチの `openShop()` は `await window.open()` を `try` / `catch` で囲み、未処理 rejection にはなりません。
+- 画面が開いた状態では、表示専用アイテムをプレイヤーが取り出せます（実機未検証）。取り出した後に `refresh()`（状態更新や購読による再描画）が走ると、同じアイテムが `setItem()` で再び書き込まれるため、複製が起こり得ます。逆にプレイヤーが入れたアイテムが上書きされて消失し得ます。
+- クリック通知・入力抑制・JSON UI 連携は未実装または未接続で、ボタン押下はハンドラーへ届きません。実機の検証が終わるまで、この経路を安全な機能として扱わないでください。
 
 ## 読み方
 
 - スケッチは設計意図の確認用です。実装済み・動作確認済みという意味ではありません。
 - クリックハンドラーや `InventoryLink` の利用例は、実機試験に合格するまで有効化しないでください。
-- `setContainerAdapter()` で画面を開く実験は、使い捨てワールドでのみ行ってください。貴重なアイテムを持ち込まないでください。
+- 画面を開く実験は、使い捨てワールドでのみ行ってください。貴重なアイテムを持ち込まないでください。表示アイテムの取り出しと再描画による複製・消失リスクがあります。
 - 実際に動かせる例は、実機検証済みのテストビルドが用意された後に別途追加します。その際も、未検証機能を「動作例」として提示しないようにしてください。
 
 ## 将来の実行可能な例に必要なもの

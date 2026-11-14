@@ -46,17 +46,21 @@ export const world = {
         items: new Array(options.size).fill(undefined),
         opened: false,
         closed: false,
+        openPlayers: [],
+        closedPlayers: [],
         setItem(slot, item) {
           this.items[slot] = item;
         },
         getItem(slot) {
           return this.items[slot];
         },
-        open() {
+        open(player) {
           this.opened = true;
+          this.openPlayers.push(player);
         },
-        close() {
+        close(player) {
           this.closed = true;
+          this.closedPlayers.push(player);
         },
       };
       createdContainers.push(container);
@@ -370,11 +374,43 @@ test("Window.builder validates viewer, upper GUI, and shared state key", () => {
   assert.throws(() => Window.builder().setStateKey(""), TypeError);
 });
 
-test("real adapter never creates or opens a screen; Window.open rejects", async () => {
-  const gui = Gui.normal({ structure: ["a"] });
+test("real adapter opens and closes screens through VirtualContainer.open/close", async () => {
   const adapter = new MinecraftVirtualContainerAdapter();
-  assert.equal(adapter.canOpenScreens, false);
-  assert.equal(minecraftVirtualContainerAdapter.canOpenScreens, false);
+  assert.equal(adapter.canOpenScreens, true);
+  assert.equal(minecraftVirtualContainerAdapter.canOpenScreens, true);
+
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  const before = createdContainers.length;
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(createdContainers.length, before + 1);
+  const container = window.container;
+  assert.equal(createdContainers.at(-1), container);
+  assert.equal(container.opened, true);
+  assert.deepEqual(container.openPlayers, [player]);
+
+  window.close("PlayerClosed");
+  assert.equal(container.closed, true);
+  assert.deepEqual(container.closedPlayers, [player]);
+});
+
+test("Window.open rejects an adapter that has not opted into screens", async () => {
+  const gui = Gui.normal({ structure: ["a"] });
+  let created = 0;
+  const adapter = {
+    canOpenScreens: false,
+    createContainer() {
+      created += 1;
+      return {};
+    },
+    openContainer() {},
+    closeContainer() {},
+  };
 
   const window = Window.builder()
     .setViewer(player)
@@ -382,7 +418,6 @@ test("real adapter never creates or opens a screen; Window.open rejects", async 
     .setContainerAdapter(adapter)
     .build();
 
-  const before = createdContainers.length;
   await assert.rejects(
     () => window.open(),
     (error) =>
@@ -390,12 +425,7 @@ test("real adapter never creates or opens a screen; Window.open rejects", async 
       error.code === "INVUI_WINDOW_OPEN_UNVERIFIED",
   );
   assert.equal(window.status, "created");
-  assert.equal(createdContainers.length, before);
-
-  assert.throws(
-    () => adapter.openContainer({}, player),
-    WindowOpenRejectedError,
-  );
+  assert.equal(created, 0);
 });
 
 test("real adapter creates containers through VirtualContainerManager.create", () => {
@@ -439,15 +469,14 @@ test("real adapter forwards virtual container events and unsubscribes", () => {
   emitVirtualContainerItemChange({ container, player: viewer, slot: 5 });
   assert.equal(closeEvents.length, 2);
   assert.equal(itemChangeEvents.length, 1);
-  // Adding hooks must not make the production adapter openable.
-  assert.equal(adapter.canOpenScreens, false);
+  // Subscribing to the hooks must not change the default opt-in.
+  assert.equal(adapter.canOpenScreens, true);
 });
 
-test("Window consumes the real adapter's event hooks when a test adapter opts in", async () => {
+test("Window consumes the real adapter's event hooks", async () => {
   const adapter = new MinecraftVirtualContainerAdapter();
   // Keep the real event hooks; replace only the screen calls so the test never
   // needs a game. This instance stays separate from the production singleton.
-  adapter.canOpenScreens = true;
   const opened = [];
   const closed = [];
   adapter.openContainer = (container, viewer) => {
@@ -3520,6 +3549,53 @@ test("setTitle before open only applies to the next open", async () => {
 
   await window.open();
   assert.equal(adapter.containers[0].title, "Next title");
+  window.close();
+});
+
+test("a title set without awaiting is used by the immediately following open", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  const changing = window.setTitle("New title");
+  // No await: the title must already be stored when open() creates the
+  // container, and the queued change must not reject against "opening".
+  await window.open();
+  await changing;
+
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "New title");
+  assert.equal(adapter.containers[0].title, "New title");
+  assert.deepEqual(errors, []);
+  window.close();
+});
+
+test("an older queued title does not overwrite a newer one stored while closed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const queued = window.setTitle("Queued");
+  window.close();
+  window.setTitle("Latest");
+
+  await window.open();
+  await queued;
+
+  assert.equal(window.status, "open");
+  assert.equal(window.title, "Latest");
+  assert.equal(adapter.containers.at(-1).title, "Latest");
   window.close();
 });
 
