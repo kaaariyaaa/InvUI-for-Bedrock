@@ -829,3 +829,136 @@ test("a tab switch to a narrower layout re-renders and clears the old columns", 
   );
   window.close();
 });
+
+test("a state change during a custom InventoryLink read does not lose the link write", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, new ItemBuilder("minecraft:link_a").build());
+  let window;
+  let reenter = false;
+  // A custom Inventory may change Window state from getItem(). The link still
+  // displays its Inventory, not the Window state, so the read is not stale.
+  const reentrant = {
+    get size() {
+      return inventory.size;
+    },
+    getItem(slot) {
+      if (reenter) {
+        reenter = false;
+        window.setState({ selection: "x" });
+      }
+      return inventory.getItem(slot);
+    },
+    setItem(slot, item) {
+      inventory.setItem(slot, item);
+    },
+    clear() {
+      inventory.clear();
+    },
+    subscribe(listener) {
+      return inventory.subscribe(listener);
+    },
+  };
+  const link = new InventoryLink(reentrant, 0);
+  const gui = Gui.paged({
+    structure: [".l"],
+    ingredients: {
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+      l: link,
+    },
+    content: [
+      Item.simple(new ItemBuilder("minecraft:p1").build()),
+      Item.simple(new ItemBuilder("minecraft:p2").build()),
+    ],
+  });
+  window = buildWindow(gui, adapter);
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:p1");
+  assert.equal(container.items[1].typeId, "minecraft:link_a");
+
+  // The page change puts the notified link write inside a diff. Before the
+  // fix the state change the read caused advanced the epoch, the write was
+  // discarded, and the next diff skipped the state-independent link.
+  window.setState({ page: 1 });
+  reenter = true;
+  inventory.setItem(0, new ItemBuilder("minecraft:link_b").build());
+  await tick();
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:p2");
+  assert.equal(container.items[1].typeId, "minecraft:link_b");
+  window.close();
+});
+
+test("a failed link read superseded by a reentrant state change is reported", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, new ItemBuilder("minecraft:link_a").build());
+  let window;
+  let reenter = false;
+  const reentrant = {
+    get size() {
+      return inventory.size;
+    },
+    getItem(slot) {
+      if (reenter) {
+        reenter = false;
+        window.setState({ selection: "x" });
+        throw new Error("inventory read failed");
+      }
+      return inventory.getItem(slot);
+    },
+    setItem(slot, item) {
+      inventory.setItem(slot, item);
+    },
+    clear() {
+      inventory.clear();
+    },
+    subscribe(listener) {
+      return inventory.subscribe(listener);
+    },
+  };
+  const link = new InventoryLink(reentrant, 0);
+  const gui = Gui.paged({
+    structure: [".l"],
+    ingredients: {
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+      l: link,
+    },
+    content: [
+      Item.simple(new ItemBuilder("minecraft:p1").build()),
+      Item.simple(new ItemBuilder("minecraft:p2").build()),
+    ],
+  });
+  window = buildWindow(gui, adapter);
+  window.setErrorHandler((error, context) => errors.push({ error, context }));
+  await window.open();
+  const container = adapter.containers[0];
+
+  // The read changes state and then fails. The state diff that follows skips
+  // the state-independent link, so the failure must be reported here or the
+  // notification is lost silently (design 14.1). The previous display stays
+  // (design 14.2).
+  window.setState({ page: 1 });
+  reenter = true;
+  inventory.setItem(0, new ItemBuilder("minecraft:link_b").build());
+  await tick();
+  await tick();
+  await tick();
+
+  assert.equal(container.items[1].typeId, "minecraft:link_a");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.message, "inventory read failed");
+  assert.equal(errors[0].context.operation, "itemProvider");
+  assert.equal(errors[0].context.slot, 1);
+
+  // A later inventory notification retries the read and updates the display.
+  inventory.setItem(0, new ItemBuilder("minecraft:link_c").build());
+  await tick();
+  await tick();
+  assert.equal(container.items[1].typeId, "minecraft:link_c");
+  window.close();
+});

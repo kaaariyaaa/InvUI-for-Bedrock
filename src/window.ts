@@ -3196,7 +3196,9 @@ export class Window {
         // link cannot observe Window state, so its write must land before the
         // diff yields. An async read could be invalidated by a following state
         // change, and the next diff would then see the slot as already
-        // rendered and never write the link (design 11.4).
+        // rendered and never write the link (design 11.4). A state change the
+        // read itself triggers does not invalidate the snapshot either: see
+        // #applySlotStack.
         stack = element.getItem();
       } else {
         awaited = true;
@@ -3210,9 +3212,16 @@ export class Window {
       // new screen.
       // A synchronous InventoryLink read never suspends, but a reentrant
       // notification it caused can still have replaced this slot, so it is
-      // reported only while the slot is current (the old async read path).
+      // reported only while the slot is current (the old async read path). A
+      // state change it caused does not replace the slot and the newer pass
+      // skips state-independent links, so the failure would otherwise be
+      // swallowed with no pass left to report it (design 14.1).
       const canBeStale = awaited || isInventoryLinkElement(element);
-      if (!canBeStale || this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+      const isCurrent =
+        this.#isCurrentSlot(generation, epoch, slot, element, token) ||
+        (isInventoryLinkElement(element) &&
+          this.#isCurrentSlotIgnoringEpoch(generation, slot, element, token));
+      if (!canBeStale || isCurrent) {
         this.#report(error, "itemProvider", slot);
       }
       return;
@@ -3245,11 +3254,28 @@ export class Window {
     element: SlotElement | null | undefined,
     token: number,
   ): boolean {
+    return (
+      epoch === this.#renderEpoch &&
+      this.#isCurrentSlotIgnoringEpoch(generation, slot, element, token)
+    );
+  }
+
+  /**
+   * #isCurrentSlot without the render epoch. An InventoryLink snapshot is
+   * independent of Window state, so a state change during its synchronous read
+   * does not make the result stale; only a close/reopen, a layout or element
+   * change, a newer render for the slot, or a render halt does.
+   */
+  #isCurrentSlotIgnoringEpoch(
+    generation: number,
+    slot: number,
+    element: SlotElement | null | undefined,
+    token: number,
+  ): boolean {
     const layout = this.#layout;
     return (
       !this.#renderingHalted &&
       generation === this.#generation &&
-      epoch === this.#renderEpoch &&
       this.#container !== undefined &&
       layout !== undefined &&
       layout.slots[slot] === element &&
@@ -3266,7 +3292,13 @@ export class Window {
     token: number,
     stack: ItemStack | undefined,
   ): void {
-    if (!this.#isCurrentSlot(generation, epoch, slot, element, token)) {
+    if (
+      !this.#isCurrentSlot(generation, epoch, slot, element, token) &&
+      !(
+        isInventoryLinkElement(element) &&
+        this.#isCurrentSlotIgnoringEpoch(generation, slot, element, token)
+      )
+    ) {
       return;
     }
     const layout = this.#layout;
