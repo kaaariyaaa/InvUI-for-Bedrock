@@ -330,6 +330,23 @@ function memoryStore() {
   };
 }
 
+/** Test adapter whose containers log every physical slot the Window writes. */
+function writeCountingAdapter() {
+  const adapter = new InMemoryTestAdapter();
+  const createContainer = adapter.createContainer.bind(adapter);
+  adapter.createContainer = (options) => {
+    const container = createContainer(options);
+    container.writes = [];
+    const setItem = container.setItem.bind(container);
+    container.setItem = (slot, item) => {
+      container.writes.push(slot);
+      setItem(slot, item);
+    };
+    return container;
+  };
+  return adapter;
+}
+
 test("Window.builder validates viewer, upper GUI, and shared state key", () => {
   assert.throws(() => Window.builder().build(), /setViewer/);
   assert.throws(
@@ -3156,4 +3173,185 @@ test("a close failure whose error handler closes and reopens keeps the new open"
   window.close("PlayerClosed");
   assert.equal(window.status, "closed");
   assert.deepEqual(closeReasons, ["PlayerClosed", "PlayerClosed"]);
+});
+
+test("a re-render clears an occupied slot but skips clearing an already empty one", async () => {
+  const adapter = writeCountingAdapter();
+  let iconCalls = 0;
+  let emptyCalls = 0;
+  const gui = Gui.normal({
+    structure: ["ab"],
+    ingredients: {
+      a: Item.simple(() => {
+        iconCalls += 1;
+        return stack("minecraft:icon");
+      }),
+      b: Item.simple(() => {
+        emptyCalls += 1;
+        return undefined;
+      }),
+    },
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:icon");
+  assert.equal(container.items[1], undefined);
+  assert.deepEqual(container.writes, [0, 1]);
+
+  container.writes.length = 0;
+  await window.refresh();
+
+  // Both providers are still evaluated, so no display data is withheld; only
+  // the write that would clear an already empty slot is skipped.
+  assert.equal(iconCalls, 2);
+  assert.equal(emptyCalls, 2);
+  assert.deepEqual(container.writes, [0]);
+  assert.equal(container.items[0].typeId, "minecraft:icon");
+  assert.equal(container.items[1], undefined);
+  window.close();
+});
+
+test("a failed setItem is retried instead of being recorded as cleared", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const attempts = [];
+  let failNext = true;
+  const createContainer = adapter.createContainer.bind(adapter);
+  adapter.createContainer = (options) => {
+    const container = createContainer(options);
+    const setItem = container.setItem.bind(container);
+    container.setItem = (slot, item) => {
+      attempts.push(slot);
+      if (failNext) {
+        failNext = false;
+        throw new Error("setItem failed");
+      }
+      setItem(slot, item);
+    };
+    return container;
+  };
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  assert.deepEqual(attempts, [0]);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].error.message, "setItem failed");
+  assert.equal(errors[0].context.operation, "setItem");
+
+  // The failed write was never recorded, so the next pass retries it.
+  await window.refresh();
+  assert.deepEqual(attempts, [0, 0]);
+
+  // Only a write that returned is recorded: now the clear is skipped.
+  await window.refresh();
+  assert.deepEqual(attempts, [0, 0]);
+  assert.equal(adapter.containers[0].items[0], undefined);
+  window.close();
+});
+
+test("closing and reopening writes the new container's empty slots again", async () => {
+  const adapter = writeCountingAdapter();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const first = adapter.containers[0];
+  assert.deepEqual(first.writes, [0]);
+
+  first.writes.length = 0;
+  await window.refresh();
+  assert.deepEqual(first.writes, [], "an already cleared slot is skipped");
+
+  window.close();
+  await window.open();
+  const reopened = adapter.containers[1];
+  assert.notEqual(reopened, first);
+  assert.deepEqual(reopened.writes, [0], "the cache must not outlive its container");
+  window.close();
+});
+
+test("a stale async empty result does not record the slot as cleared", async () => {
+  const adapter = writeCountingAdapter();
+  const pending = [];
+  let mode = "stack";
+  const item = Item.simple(() => {
+    if (mode === "pending") {
+      return new Promise((resolve) => pending.push(resolve));
+    }
+    return mode === "empty" ? undefined : stack("minecraft:icon");
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:icon");
+
+  mode = "pending";
+  const stale = window.refresh();
+  await tick();
+  assert.equal(pending.length, 1);
+
+  // A newer pass writes a stack while the older provider is still pending.
+  mode = "stack";
+  window.setState({ page: 1 });
+  await tick();
+  assert.equal(container.items[0].typeId, "minecraft:icon");
+
+  // The stale result resolves empty. It belongs to an older render generation
+  // and must not leave the slot recorded as cleared.
+  pending[0](undefined);
+  await stale;
+  await tick();
+
+  mode = "empty";
+  container.writes.length = 0;
+  await window.refresh();
+  assert.deepEqual(container.writes, [0], "the current empty render must still write");
+  assert.equal(container.items[0], undefined);
+  window.close();
+});
+
+test("an itemChange from another viewer invalidates the write cache", async () => {
+  const adapter = writeCountingAdapter();
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = adapter.containers[0];
+  container.writes.length = 0;
+  await window.refresh();
+  assert.deepEqual(container.writes, []);
+
+  // This Window ignores another viewer's screen change and keeps rendering,
+  // so it must stop trusting what it recorded about the slots.
+  adapter.emitItemChange({ container, player: otherPlayer, slot: 0 });
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, []);
+
+  await window.refresh();
+  assert.deepEqual(container.writes, [0]);
+  window.close();
 });

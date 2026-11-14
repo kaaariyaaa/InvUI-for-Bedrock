@@ -26,6 +26,7 @@ import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
+import { SlotWriteCache } from "./render-cache.js";
 import { StateManager } from "./state.js";
 import type {
   GuiStatePatch,
@@ -581,6 +582,18 @@ export class Window {
 
   #container: VirtualContainer | undefined;
   #layout: ResolvedGuiLayout | undefined;
+  /**
+   * Skips only clearing a physical slot this container last cleared (design
+   * 11.2). It describes one container's slots, so it is created together with
+   * the container and dropped with it in `#teardown()`: a reopened Window or a
+   * container replaced during open starts with an empty cache.
+   *
+   * It is only consulted after the render guards in `#isCurrentSlot()`, so a
+   * stale provider result, a layout change, or a closed generation never reads
+   * or writes it. `markWritten()` runs only after `setItem()` returned, so a
+   * failed write is retried on the next pass.
+   */
+  #writeCache: SlotWriteCache | undefined;
   #stateHandle: StateHandle | undefined;
   /** Schema token the current state handle was acquired with. */
   #stateSchema: string | undefined;
@@ -700,7 +713,12 @@ export class Window {
           this.title.length === 0
             ? { size }
             : { size, title: this.title };
-        return this.#adapter.createContainer(options);
+        const container = this.#adapter.createContainer(options);
+        // The cache is bound to one container: a replacement (size change
+        // while opening) starts empty, so nothing is skipped against slots the
+        // previous container owned.
+        this.#writeCache = new SlotWriteCache();
+        return container;
       };
 
       let layout = this.upperGui.resolve(this.viewer, handle.get());
@@ -764,10 +782,12 @@ export class Window {
    * Re-resolve the GUI state and re-render every slot.
    *
    * A state change can change what an Item provider returns without changing
-   * the slot's element reference, so no slot is skipped by element identity.
-   * Resolved ItemStacks are not compared either: Bedrock stacks may carry
-   * components or lore that cannot be compared exhaustively, and treating two
-   * stacks as equal would leave stale display data.
+   * the slot's element reference, so no provider is skipped by element
+   * identity. Resolved ItemStacks are not compared either: Bedrock stacks may
+   * carry components or lore that cannot be compared exhaustively, and
+   * treating two stacks as equal would leave stale display data. The one write
+   * that is skipped is clearing a slot this container already has empty
+   * (`#writeCache`).
    */
   async refresh(): Promise<void> {
     await this.#refresh();
@@ -1146,6 +1166,10 @@ export class Window {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
+      // Another viewer changed this container through its screen. The Window
+      // does not close for that, so it keeps rendering: the write cache no
+      // longer describes the slots and must not skip an empty clear.
+      this.#writeCache?.invalidate();
       return;
     }
     this.#report(new WindowItemChangeDangerError(event.slot), "itemChange", event.slot);
@@ -1470,14 +1494,27 @@ export class Window {
     }
     const layout = this.#layout;
     const container = this.#container;
-    if (!layout || !container) {
+    const cache = this.#writeCache;
+    if (!layout || !container || !cache) {
+      return;
+    }
+    const physicalSlot = physicalSlotOf(layout, slot);
+    // The one provable skip: this container's slot was last cleared by this
+    // Window and is cleared again. It cannot delete data and it never skips a
+    // stack, so display content is never withheld. Skipping anything else
+    // would require an ItemStack equality that Bedrock does not provide.
+    if (!cache.shouldWrite(physicalSlot, stack)) {
       return;
     }
     try {
-      container.setItem(physicalSlotOf(layout, slot), stack);
+      container.setItem(physicalSlot, stack);
     } catch (error) {
       this.#report(error, "setItem", slot);
+      return;
     }
+    // Record only after the write returned: a throwing setItem stays
+    // unrecorded, so the next pass retries it instead of skipping it.
+    cache.markWritten(physicalSlot, stack);
   }
 
   /**
@@ -1596,6 +1633,7 @@ export class Window {
     this.#stateSchema = undefined;
     this.#container = undefined;
     this.#layout = undefined;
+    this.#writeCache = undefined;
     this.#screenRequested = false;
     this.#refreshPending = false;
     this.#slotRenderTokens.clear();
