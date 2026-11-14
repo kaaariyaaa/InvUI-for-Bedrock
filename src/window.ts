@@ -34,6 +34,16 @@
  * `button.send` payload either: design 10.4 does not guarantee a notification
  * is generated at all, so an Item click must still work without one. Like the
  * screen path, this is NOT verified on a real device.
+ *
+ * `world.afterEvents.playerLeave` closes the Window of the viewer that left
+ * with `PlayerLeft`, whether it is still `opening` or already `open`. The event
+ * carries only the player id, captured when the open cycle registers, and an
+ * id that belongs to another player is ignored. One module-level subscription
+ * serves every Window; closing releases the chat registry, state handle, GUI
+ * and element subscriptions, and adapter subscriptions through the normal
+ * close path (generation checks intact). An environment without the event
+ * (older API, test double) is detected once and Windows keep working without
+ * the automatic close. This is NOT verified on a real device.
  */
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
@@ -423,6 +433,65 @@ function invalidateChatInputWindow(window: Window): void {
   }
 }
 
+/**
+ * Windows that are `opening` or `open` and must be closed when their viewer
+ * leaves, one set shared by the module so a single `playerLeave` subscription
+ * serves every Window. A Window is added when `open()` starts and removed by
+ * `#teardown()`.
+ */
+const leaveWindows = new Set<Window>();
+let playerLeaveSubscribed = false;
+/** Latches the feature-detection failure, like the chat input bridge. */
+let playerLeaveUnavailable = false;
+
+/**
+ * Installs the `playerLeave` subscription on first use, or latches it off when
+ * the game API is absent (older `@minecraft/server`, test doubles, or a world
+ * with the event disabled). A Window still opens and closes normally then:
+ * only the automatic close on leave is skipped, and neither `open()` nor
+ * `close()` fails because of it.
+ */
+function ensurePlayerLeaveSubscription(): void {
+  if (playerLeaveSubscribed || playerLeaveUnavailable) {
+    return;
+  }
+  let playerLeave: typeof world.afterEvents.playerLeave | undefined;
+  try {
+    playerLeave = world.afterEvents?.playerLeave;
+  } catch {
+    playerLeave = undefined;
+  }
+  if (!playerLeave || typeof playerLeave.subscribe !== "function") {
+    playerLeaveUnavailable = true;
+    return;
+  }
+  try {
+    playerLeave.subscribe((event) => {
+      const playerId = event?.playerId;
+      if (typeof playerId !== "string" || playerId.length === 0) {
+        return;
+      }
+      // Snapshot: a close handler may open or close other Windows while this
+      // loop runs. Each Window re-checks its own status and generation.
+      for (const window of [...leaveWindows]) {
+        try {
+          window._onViewerLeft(playerId);
+        } catch (error) {
+          // One Window's close handler must not keep the other Windows open.
+          console.error("InvUI: closing a Window after its viewer left failed.", error);
+        }
+      }
+    });
+    playerLeaveSubscribed = true;
+  } catch (error) {
+    console.error(
+      "InvUI: playerLeave subscription could not be installed; Windows will not close automatically when a player leaves.",
+      error,
+    );
+    playerLeaveUnavailable = true;
+  }
+}
+
 let defaultStateManager: StateManager | undefined;
 
 function defaultManager(): StateManager {
@@ -740,6 +809,8 @@ export class Window {
   #status: WindowStatus = "created";
   /** Per-open chat input session id; see `_inputSessionId`. */
   #inputSessionId: string | undefined;
+  /** Viewer id captured at registration, because playerLeave carries only an id. */
+  #viewerId: string | undefined;
   #stateScope: StateScope;
   #stateKey: string | undefined;
   #stateLifetime: StateLifetime;
@@ -881,6 +952,26 @@ export class Window {
     return this.#inputSessionId;
   }
 
+  /**
+   * Internal: close this Window because its viewer left the world.
+   *
+   * `playerLeave` carries a player id, not a Player, so it is matched against
+   * the id captured when this open cycle registered; another player's id is
+   * ignored. `#performClose` keeps its own generation and reentrancy checks, so
+   * a close handler that reopens the Window keeps the new generation. The
+   * adapter is not asked to close: the screen went away with the player, and
+   * `close(viewer)` on a departed player can only fail.
+   */
+  _onViewerLeft(playerId: string): void {
+    if (this.#viewerId !== playerId) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    this.#performClose("PlayerLeft", false);
+  }
+
   get container(): VirtualContainer | undefined {
     return this.#container;
   }
@@ -920,6 +1011,13 @@ export class Window {
     const generation = ++this.#generation;
 
     try {
+      // Register before the screen can be shown so a leave during `opening`
+      // closes this Window too. A synchronous leave event delivered by the
+      // subscription closes it here; open() then resolves as closed.
+      this.#registerForPlayerLeave();
+      if (this.#status !== "opening" || generation !== this.#generation) {
+        return;
+      }
       // Subscribe before the screen can emit anything. A close event during
       // opening (for example UserBusy) must still tear the Window down.
       if (!this.#subscribeToContainerEvents(generation)) {
@@ -1611,6 +1709,25 @@ export class Window {
   }
 
   /**
+   * Track this Window for automatic close when its viewer leaves. The viewer
+   * id is read here, before the player can go invalid; if it cannot be read the
+   * Window is simply not auto-closed, so opening still works (fail closed for
+   * this feature only).
+   */
+  #registerForPlayerLeave(): void {
+    try {
+      this.#viewerId = this.viewer.id;
+    } catch {
+      this.#viewerId = undefined;
+    }
+    if (this.#viewerId === undefined) {
+      return;
+    }
+    leaveWindows.add(this);
+    ensurePlayerLeaveSubscription();
+  }
+
+  /**
    * Subscribes to the adapter's optional close/itemChange hooks before opening.
    * Returns false when an event delivered during subscription already closed
    * the Window. Subscriptions made before a failure are always removed.
@@ -2096,9 +2213,11 @@ export class Window {
   }
 
   #teardown(): void {
-    // Drop the Window from chat routing first: a close handler may reopen it,
-    // and the reopened generation must not inherit the old notification queue.
+    // Drop the Window from chat routing and leave handling first: a close
+    // handler may reopen it, and the reopened generation must be registered
+    // afresh (with its own viewer id) instead of inheriting this teardown.
     forgetChatInputWindow(this);
+    leaveWindows.delete(this);
     this.#unsubscribeFromContainerEvents();
     this.#stateSubscription?.();
     this.#stateSubscription = undefined;
@@ -2108,6 +2227,7 @@ export class Window {
     this.#stateHandle?.release();
     this.#stateHandle = undefined;
     this.#stateSchema = undefined;
+    this.#viewerId = undefined;
     this.#container = undefined;
     this.#retiringContainer = undefined;
     this.#expectedCloseContainer = undefined;

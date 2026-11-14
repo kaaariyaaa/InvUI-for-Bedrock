@@ -11,7 +11,14 @@ export const createdContainers = [];
 const closeCallbacks = new Set();
 const itemChangeCallbacks = new Set();
 const chatSendCallbacks = new Set();
+const playerLeaveCallbacks = new Set();
 export const scheduledRuns = [];
+
+export function emitPlayerLeave(playerId) {
+  for (const callback of [...playerLeaveCallbacks]) {
+    callback({ playerId, playerName: playerId });
+  }
+}
 
 export function emitVirtualContainerClose(event) {
   for (const callback of [...closeCallbacks]) callback(event);
@@ -94,6 +101,15 @@ export const world = {
     },
   },
   afterEvents: {
+    playerLeave: {
+      subscribe(callback) {
+        playerLeaveCallbacks.add(callback);
+        return callback;
+      },
+      unsubscribe(callback) {
+        playerLeaveCallbacks.delete(callback);
+      },
+    },
     virtualContainerClose: {
       subscribe(callback) {
         closeCallbacks.add(callback);
@@ -117,11 +133,24 @@ export const world = {
 `;
 
 const mockUrl = `data:text/javascript;base64,${Buffer.from(mockSource).toString("base64")}`;
+// Same double without the playerLeave signal, for the fail-closed feature test.
+// Window is imported with a `?no-player-leave` suffix so this signal-less world
+// is used by a fresh module instance.
+const noPlayerLeaveSource = mockSource.replace(
+  /    playerLeave: \{[\s\S]*?\n    \},\n/,
+  "",
+);
+const noPlayerLeaveUrl = `data:text/javascript;base64,${Buffer.from(noPlayerLeaveSource).toString("base64")}`;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@minecraft/server") {
-      return { url: mockUrl, shortCircuit: true };
+      return {
+        url: context.parentURL?.includes("no-player-leave")
+          ? noPlayerLeaveUrl
+          : mockUrl,
+        shortCircuit: true,
+      };
     }
     // Let tests run from src/ before `npm run build`: map the ESM-style
     // "./state.js" imports used by window.ts onto the TypeScript sources.
@@ -170,6 +199,7 @@ const {
 const {
   createdContainers,
   emitChatSend,
+  emitPlayerLeave,
   emitVirtualContainerClose,
   emitVirtualContainerItemChange,
   scheduledRuns,
@@ -4107,4 +4137,201 @@ test("a slot element swap on the same page invalidates a notification queued for
   assert.deepEqual(clicked, ["first", "second"]);
 
   window.close();
+});
+
+test("playerLeave closes only the leaving viewer's open Window and releases it", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const otherAdapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const otherCloseReasons = [];
+  const clicks = [];
+  const button = Item.builder()
+    .setItemProvider(() => stack("minecraft:button"))
+    .addClickHandler(() => clicks.push(1))
+    .build();
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["ab"], ingredients: { b: button } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+  const otherWindow = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(otherAdapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => otherCloseReasons.push(reason))
+    .build();
+
+  await window.open();
+  await otherWindow.open();
+  assert.equal(window.status, "open");
+  assert.equal(otherWindow.status, "open");
+
+  // Prove the Window is in the chat registry before the leave.
+  await sendChat(window, 1, 1);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  emitPlayerLeave(player.id);
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.isOpen, false);
+  assert.equal(window.container, undefined);
+  assert.deepEqual(closeReasons, ["PlayerLeft"]);
+  // The screen disappeared with the player: no adapter close was requested.
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.deepEqual(
+    adapter.itemChangeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  // State handle and layout were released by the normal close path.
+  assert.throws(() => window.getState(), /not open/);
+  assert.throws(() => window.setState({ page: 0 }), /not open/);
+
+  // The chat registry no longer routes a delayed line into it.
+  const delayed = await sendChat(window, 1, 2);
+  assert.equal(delayed.cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, [1]);
+
+  // Another viewer's Window and state are untouched.
+  assert.equal(otherWindow.status, "open");
+  assert.deepEqual(otherCloseReasons, []);
+  otherWindow.setState({ page: 0 });
+  assert.equal(otherWindow.getState().page, 0);
+
+  // A repeated or unrelated leave is a no-op.
+  emitPlayerLeave(player.id);
+  emitPlayerLeave("not-a-tracked-player");
+  assert.deepEqual(closeReasons, ["PlayerLeft"]);
+  assert.equal(otherWindow.status, "open");
+
+  otherWindow.close();
+});
+
+test("playerLeave while a Window is opening closes it before a screen is shown", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  const openHandlers = [];
+  let resolveProvider;
+  const item = Item.simple(
+    () =>
+      new Promise((resolve) => {
+        resolveProvider = resolve;
+      }),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addOpenHandler(() => openHandlers.push("open"))
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  const opening = window.open();
+  await Promise.resolve();
+  assert.equal(window.status, "opening");
+  const container = adapter.containers[0];
+  assert.ok(container, "container exists while providers are unresolved");
+
+  emitPlayerLeave(player.id);
+  assert.equal(window.status, "closed");
+
+  resolveProvider(stack("minecraft:late"));
+  await opening;
+
+  assert.equal(window.status, "closed");
+  assert.equal(window.container, undefined);
+  assert.equal(adapter.opened.length, 0, "the screen must never be requested");
+  assert.deepEqual(adapter.closed, []);
+  assert.deepEqual(openHandlers, []);
+  assert.deepEqual(closeReasons, ["PlayerLeft"]);
+  assert.equal(container.items[0], undefined, "a late provider must not write");
+  assert.deepEqual(
+    adapter.closeSubscriptions.map((record) => record.active),
+    [false],
+  );
+  assert.throws(() => window.getState(), /not open/);
+});
+
+test("a playerLeave close handler may reopen without the stale close tearing it down", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const closeReasons = [];
+  let reopened;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .addCloseHandler((reason) => {
+      closeReasons.push(reason);
+      if (closeReasons.length === 1) {
+        reopened = window.open();
+      }
+    })
+    .build();
+
+  await window.open();
+  const firstContainer = adapter.containers[0];
+  assert.equal(window.status, "open");
+
+  emitPlayerLeave(player.id);
+  await reopened;
+
+  // The close notification ends at the handler that started the new
+  // generation; the reopened Window stays open.
+  assert.equal(window.status, "open");
+  assert.deepEqual(closeReasons, ["PlayerLeft"]);
+  assert.equal(adapter.opened.length, 2);
+  assert.notEqual(window.container, firstContainer);
+  assert.equal(adapter.closed.length, 0, "the leave itself requests no close");
+
+  window.close("PlayerClosed");
+  assert.deepEqual(closeReasons, ["PlayerLeft", "PlayerClosed"]);
+  assert.equal(adapter.closed.length, 1);
+});
+
+test("Windows keep working when world.afterEvents.playerLeave is absent", async () => {
+  // A separate Window module instance resolves @minecraft/server to a double
+  // without the playerLeave signal: feature detection must latch off instead
+  // of breaking open/close.
+  const { Window: WindowWithoutPlayerLeave } = await import(
+    new URL("../src/window.ts?no-player-leave", import.meta.url).href
+  );
+  const adapter = new InMemoryTestAdapter();
+  const window = WindowWithoutPlayerLeave.builder()
+    .setViewer(player)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["a"],
+        ingredients: { a: Item.simple(() => stack("minecraft:a")) },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.equal(adapter.opened.length, 1);
+  window.close();
+  assert.equal(window.status, "closed");
+  assert.equal(adapter.closed.length, 1);
 });
