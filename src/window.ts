@@ -1570,8 +1570,16 @@ export class Window {
       registerChatInputWindow(this);
       this.#runOpenHandlers();
     } catch (error) {
-      // The teardown may report an unsubscribe failure, and that handler can
-      // close and reopen the Window. The failed open then belongs to the
+      // The failing operation may have reported an error (for example a
+      // subscription cleanup) whose handler closed and reopened the Window, and
+      // that close already tore the old resources down. The failed open then
+      // belongs to the generation that is gone: tearing down again would
+      // release the reopened generation's own state handle and subscriptions.
+      if (generation !== this.#generation) {
+        throw error;
+      }
+      // The teardown may itself report an unsubscribe failure, and that handler
+      // can close and reopen the Window. The failed open then belongs to the
       // generation that is gone: it must not mark the reopened Window closed or
       // deliver its error to the new generation's handler.
       this.#teardown();
