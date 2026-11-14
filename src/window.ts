@@ -263,13 +263,31 @@ export interface WindowContainerAdapter {
   openContainer(container: VirtualContainer, viewer: Player): void;
   closeContainer(container: VirtualContainer, viewer: Player): void;
   /**
+   * True when the event hooks below apply the official
+   * `{ containers: [container] }` filter to every subscription. The Window then
+   * subscribes once per container and attributes an event to the container it
+   * passed in, so the event's `container` does not have to be the same object
+   * returned by `createContainer()`. Adapters that leave this off (the default
+   * for custom adapters) receive the old hook call shape and their events are
+   * matched by the event's `container` reference.
+   */
+  readonly filtersContainerEvents?: boolean;
+  /**
    * Optional event hooks. The Window subscribes before it opens the screen and
    * unsubscribes on close or on a failed open. Both return an unsubscribe
    * function; the Window removes a subscription that succeeded even when the
-   * other one throws.
+   * other one throws. The second argument is provided only when
+   * `filtersContainerEvents` is true; it is the container the subscription
+   * must be limited to.
    */
-  subscribeClose?(handler: WindowContainerCloseHandler): () => void;
-  subscribeItemChange?(handler: WindowContainerItemChangeHandler): () => void;
+  subscribeClose?(
+    handler: WindowContainerCloseHandler,
+    container?: VirtualContainer,
+  ): () => void;
+  subscribeItemChange?(
+    handler: WindowContainerItemChangeHandler,
+    container?: VirtualContainer,
+  ): () => void;
 }
 
 /**
@@ -313,6 +331,12 @@ function toWindowCloseReason(reason: VirtualContainerCloseReason): WindowCloseRe
  */
 export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter {
   readonly canOpenScreens = true;
+  /**
+   * The beta `subscribe` options `{ containers: [...] }` make the engine fire
+   * only for the listed containers. This is what lets the Window trust a
+   * subscription instead of comparing `event.container` by reference.
+   */
+  readonly filtersContainerEvents = true;
 
   createContainer(options: VirtualContainerOptions): VirtualContainer {
     return world.virtualContainerManager.create(options);
@@ -336,11 +360,15 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
   }
 
   /**
-   * Forwards every player's virtual container close event. The Window filters
-   * by container identity and player, so this stays a single global
-   * subscription per open Window.
+   * Forwards this container's close events. When `container` is provided the
+   * engine subscription is limited to it with the official beta
+   * `{ containers: [container] }` option; without one (a direct call from an
+   * application or a test) it keeps the unfiltered global behavior.
    */
-  subscribeClose(handler: WindowContainerCloseHandler): () => void {
+  subscribeClose(
+    handler: WindowContainerCloseHandler,
+    container?: VirtualContainer,
+  ): () => void {
     const signal = world.afterEvents.virtualContainerClose;
     const callback = (event: VirtualContainerCloseAfterEvent): void => {
       handler({
@@ -349,16 +377,24 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
         reason: toWindowCloseReason(event.reason),
       });
     };
-    signal.subscribe(callback);
+    if (container) {
+      signal.subscribe(callback, { containers: [container] });
+    } else {
+      signal.subscribe(callback);
+    }
     return () => signal.unsubscribe(callback);
   }
 
   /**
-   * Forwards every player's virtual container item-change event. This is an
-   * `after` event: the slot was already changed through the screen, so this is
-   * detection only and cannot prevent the move.
+   * Forwards this container's item-change events. This is an `after` event: the
+   * slot was already changed through the screen, so this is detection only and
+   * cannot prevent the move. The optional `container` filters the subscription
+   * like {@link subscribeClose}.
    */
-  subscribeItemChange(handler: WindowContainerItemChangeHandler): () => void {
+  subscribeItemChange(
+    handler: WindowContainerItemChangeHandler,
+    container?: VirtualContainer,
+  ): () => void {
     const signal = world.afterEvents.virtualContainerItemChange;
     const callback = (event: VirtualContainerItemChangeAfterEvent): void => {
       handler({
@@ -367,7 +403,11 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
         slot: event.slot,
       });
     };
-    signal.subscribe(callback);
+    if (container) {
+      signal.subscribe(callback, { containers: [container] });
+    } else {
+      signal.subscribe(callback);
+    }
     return () => signal.unsubscribe(callback);
   }
 }
@@ -1128,6 +1168,13 @@ export class Window {
   #stateLifetime: StateLifetime;
   #stateManager: StateManager;
   #adapter: WindowContainerAdapter;
+  /**
+   * True when the adapter limits every event subscription to one container
+   * (see `WindowContainerAdapter.filtersContainerEvents`). The Window then
+   * subscribes per container and attributes the event to that container
+   * instead of trusting `event.container` to be the same reference.
+   */
+  #filtersContainerEvents: boolean;
   #openHandlers: readonly WindowOpenHandler[];
   #closeHandlers: readonly WindowCloseHandler[];
   #errorHandler: WindowErrorHandler | undefined;
@@ -1252,6 +1299,7 @@ export class Window {
     this.#stateLifetime = config.stateLifetime;
     this.#stateManager = config.stateManager ?? defaultManager();
     this.#adapter = config.adapter;
+    this.#filtersContainerEvents = config.adapter.filtersContainerEvents === true;
     this.#openHandlers = config.openHandlers;
     this.#closeHandlers = config.closeHandlers;
     this.#errorHandler = config.errorHandler;
@@ -1465,8 +1513,13 @@ export class Window {
         return;
       }
       // Subscribe before the screen can emit anything. A close event during
-      // opening (for example UserBusy) must still tear the Window down.
-      if (!this.#subscribeToContainerEvents(generation)) {
+      // opening (for example UserBusy) must still tear the Window down. A
+      // filter-capable adapter is subscribed per container once the first one
+      // exists, because the beta filter needs the container itself.
+      if (
+        !this.#filtersContainerEvents &&
+        !this.#subscribeToContainerEvents(generation)
+      ) {
         return;
       }
       const handle = this.#acquireState();
@@ -1508,6 +1561,9 @@ export class Window {
       }
       let container = createContainer(size);
       this.#container = container;
+      if (!this.#subscribeFilteredContainer(container, generation)) {
+        return;
+      }
 
       let passes = 0;
       while (true) {
@@ -1531,6 +1587,9 @@ export class Window {
           // instead of requiring a close/reopen cycle (design 8.4).
           container = createContainer(size);
           this.#container = container;
+          if (!this.#subscribeFilteredContainer(container, generation)) {
+            return;
+          }
         }
         this.#applyLayout(layout);
         await this.#renderAll(generation);
@@ -1744,6 +1803,11 @@ export class Window {
     this.#title = title;
 
     try {
+      // The replacement is not shown yet, but its close/item events must be
+      // attributable before it is opened, without trusting object identity.
+      if (!this.#subscribeFilteredContainer(nextContainer, generation)) {
+        return;
+      }
       this.#applyLayout(layout);
       await this.#renderAll(generation);
     } catch (error) {
@@ -2806,7 +2870,15 @@ export class Window {
     return container === this.#container || container === this.#retiringContainer;
   }
 
-  #onContainerClose(generation: number, event: WindowContainerCloseEvent): void {
+  /**
+   * `container` is the subscription's container when the adapter guaranteed
+   * the beta `containers` filter, and the event's own reference otherwise.
+   */
+  #onContainerClose(
+    generation: number,
+    event: WindowContainerCloseEvent,
+    container: VirtualContainer = event.container,
+  ): void {
     if (generation !== this.#generation) {
       return;
     }
@@ -2815,10 +2887,10 @@ export class Window {
     }
     // The Window asked for this close itself (title regeneration); it must not
     // be treated as the player closing the Window.
-    if (event.container === this.#expectedCloseContainer) {
+    if (container === this.#expectedCloseContainer) {
       return;
     }
-    if (!this.#ownsContainer(event.container)) {
+    if (!this.#ownsContainer(container)) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -2840,6 +2912,7 @@ export class Window {
   #onContainerItemChange(
     generation: number,
     event: WindowContainerItemChangeEvent,
+    container: VirtualContainer = event.container,
   ): void {
     if (generation !== this.#generation) {
       return;
@@ -2847,7 +2920,7 @@ export class Window {
     if (this.#status !== "opening" && this.#status !== "open") {
       return;
     }
-    if (!this.#ownsContainer(event.container)) {
+    if (!this.#ownsContainer(container)) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -2889,9 +2962,94 @@ export class Window {
   }
 
   /**
+   * Subscribes a filtered adapter to one container, or does nothing for an
+   * adapter that cannot filter (the old global hook is installed by
+   * {@link #subscribeToContainerEvents} instead).
+   */
+  #subscribeFilteredContainer(
+    container: VirtualContainer,
+    generation: number,
+  ): boolean {
+    if (!this.#filtersContainerEvents) {
+      return true;
+    }
+    return this.#subscribeContainerEvents(container, generation);
+  }
+
+  /**
+   * Subscribes close/itemChange for exactly one container through the beta
+   * `{ containers: [container] }` filter. The handler remembers `container`, so
+   * a delivered event belongs to it even when `event.container` is a different
+   * wrapper object. Returns false when an event delivered during subscription
+   * already closed the Window; partial subscriptions are always removed.
+   */
+  #subscribeContainerEvents(
+    container: VirtualContainer,
+    generation: number,
+  ): boolean {
+    const unsubscribers: Array<() => void> = [];
+    const track = (unsubscribe: unknown, kind: string): void => {
+      if (typeof unsubscribe !== "function") {
+        throw new TypeError(
+          `InvUI: adapter ${kind} subscription must return an unsubscribe function.`,
+        );
+      }
+      unsubscribers.push(unsubscribe as () => void);
+    };
+    // A title/size regeneration subscribes while already `open`, not only
+    // while `opening`.
+    const active = (): boolean =>
+      generation === this.#generation &&
+      (this.#status === "opening" || this.#status === "open");
+
+    try {
+      if (this.#adapter.subscribeClose) {
+        track(
+          this.#adapter.subscribeClose(
+            (event) => this.#onContainerClose(generation, event, container),
+            container,
+          ),
+          "close",
+        );
+      }
+      // A handler may have closed the Window while the first subscription was
+      // being installed; do not install the second one then.
+      if (!active()) {
+        this.#disposeEventSubscriptions(unsubscribers);
+        return false;
+      }
+      if (this.#adapter.subscribeItemChange) {
+        track(
+          this.#adapter.subscribeItemChange(
+            (event) => this.#onContainerItemChange(generation, event, container),
+            container,
+          ),
+          "itemChange",
+        );
+      }
+    } catch (error) {
+      this.#disposeEventSubscriptions(unsubscribers);
+      throw error;
+    }
+
+    if (!active()) {
+      this.#disposeEventSubscriptions(unsubscribers);
+      return false;
+    }
+    // Keep the other containers' subscriptions too: a replaced or retiring
+    // container may still deliver an event until this Window closes.
+    this.#eventUnsubscribers.push(...unsubscribers);
+    return true;
+  }
+
+  /**
    * Subscribes to the adapter's optional close/itemChange hooks before opening.
    * Returns false when an event delivered during subscription already closed
    * the Window. Subscriptions made before a failure are always removed.
+   *
+   * Used only for adapters without `filtersContainerEvents`: the global hooks
+   * cannot be limited to a container, so the handlers fall back to comparing
+   * the event's `container` reference.
    */
   #subscribeToContainerEvents(generation: number): boolean {
     const unsubscribers: Array<() => void> = [];

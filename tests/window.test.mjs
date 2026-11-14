@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 // that the real adapter never creates a container for a rejected open.
 const mockSource = `
 export const createdContainers = [];
-const closeCallbacks = new Set();
-const itemChangeCallbacks = new Set();
+const closeCallbacks = new Map();
+const itemChangeCallbacks = new Map();
 const chatSendCallbacks = new Set();
 const playerLeaveCallbacks = new Set();
 const entityDieCallbacks = new Set();
@@ -44,12 +44,25 @@ export function emitPlayerGameModeChange(player, toGameMode) {
   }
 }
 
+// The mock models the engine's beta containers subscription filter with
+// event.filterContainer (the underlying container identity, which can differ
+// from the event.container object handed to the callback). A subscription
+// without the option sees every event.
+function matchesFilter(options, event) {
+  if (!options || !options.containers) return true;
+  return options.containers.includes(event.filterContainer ?? event.container);
+}
+
 export function emitVirtualContainerClose(event) {
-  for (const callback of [...closeCallbacks]) callback(event);
+  for (const [callback, options] of [...closeCallbacks]) {
+    if (matchesFilter(options, event)) callback(event);
+  }
 }
 
 export function emitVirtualContainerItemChange(event) {
-  for (const callback of [...itemChangeCallbacks]) callback(event);
+  for (const [callback, options] of [...itemChangeCallbacks]) {
+    if (matchesFilter(options, event)) callback(event);
+  }
 }
 
 export function emitChatSend(message, sender) {
@@ -174,8 +187,8 @@ export const world = {
       },
     },
     virtualContainerClose: {
-      subscribe(callback) {
-        closeCallbacks.add(callback);
+      subscribe(callback, options) {
+        closeCallbacks.set(callback, options);
         return callback;
       },
       unsubscribe(callback) {
@@ -183,8 +196,8 @@ export const world = {
       },
     },
     virtualContainerItemChange: {
-      subscribe(callback) {
-        itemChangeCallbacks.add(callback);
+      subscribe(callback, options) {
+        itemChangeCallbacks.set(callback, options);
         return callback;
       },
       unsubscribe(callback) {
@@ -769,6 +782,131 @@ test("Window consumes the real adapter's event hooks", async () => {
   assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
   assert.equal(errors[0].context.slot, 0);
   assert.equal(closed.length, 1);
+});
+
+test("a filtered subscription receives only the container it names", () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const first = adapter.createContainer({ size: 9 });
+  const second = adapter.createContainer({ size: 27 });
+  const events = [];
+
+  const unsubscribe = adapter.subscribeClose(
+    (event) => events.push(event.reason),
+    first,
+  );
+  emitVirtualContainerClose({ container: second, player, reason: "PlayerDied" });
+  emitVirtualContainerClose({ container: first, player, reason: "PlayerClosed" });
+  // The engine filters on its own identity; the callback may still receive a
+  // different wrapper object.
+  emitVirtualContainerClose({
+    container: { size: 9 },
+    filterContainer: first,
+    player,
+    reason: "ServerClosed",
+  });
+  assert.deepEqual(events, ["PlayerClosed", "ServerClosed"]);
+
+  unsubscribe();
+  emitVirtualContainerClose({ container: first, player, reason: "UserBusy" });
+  assert.deepEqual(events, ["PlayerClosed", "ServerClosed"]);
+});
+
+test("a filtered adapter's Window resolves a close event by subscription, not by reference", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  adapter.openContainer = () => {};
+  adapter.closeContainer = () => {};
+  const closeReasons = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const container = window.container;
+  emitVirtualContainerClose({
+    container: { size: container.size },
+    filterContainer: container,
+    player,
+    reason: "PlayerClosed",
+  });
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"]);
+});
+
+test("a filtered adapter's Window still fails closed on a wrapper itemChange", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const closed = [];
+  adapter.openContainer = () => {};
+  adapter.closeContainer = (container, viewer) => closed.push({ container, viewer });
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  const container = window.container;
+  emitVirtualContainerItemChange({
+    container: { size: container.size },
+    filterContainer: container,
+    player,
+    slot: 3,
+  });
+
+  assert.equal(window.status, "closed");
+  assert.ok(errors[0].error instanceof WindowItemChangeDangerError);
+  assert.equal(errors[0].context.slot, 3);
+  assert.deepEqual(closed, [{ container, viewer: player }]);
+});
+
+test("a filtered adapter keeps the retiring container attributable during a regeneration", async () => {
+  const adapter = new MinecraftVirtualContainerAdapter();
+  const opened = [];
+  const closed = [];
+  adapter.openContainer = (container, viewer) => opened.push({ container, viewer });
+  adapter.closeContainer = (container, viewer) => closed.push({ container, viewer });
+  const closeReasons = [];
+  const pending = [];
+  let async = false;
+  const item = Item.simple(() =>
+    async ? new Promise((resolve) => pending.push(resolve)) : stack("minecraft:item"),
+  );
+  const window = Window.builder()
+    .setViewer(player)
+    .setTitle("Old title")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: item } }))
+    .setContainerAdapter(adapter)
+    .addCloseHandler((reason) => closeReasons.push(reason))
+    .build();
+
+  await window.open();
+  const first = window.container;
+
+  async = true;
+  const changing = window.setTitle("New title");
+  await tick();
+  assert.equal(pending.length, 1);
+  assert.notEqual(window.container, first, "the replacement container exists");
+
+  emitVirtualContainerClose({
+    container: { size: first.size },
+    filterContainer: first,
+    player,
+    reason: "PlayerClosed",
+  });
+
+  assert.equal(window.status, "closed");
+  assert.deepEqual(closeReasons, ["PlayerClosed"], "the player's close is not lost");
+  assert.deepEqual(opened.map((entry) => entry.container), [first]);
+
+  pending[0](stack("minecraft:item"));
+  await changing;
+  assert.equal(window.status, "closed");
 });
 
 test("a throwing Window error handler still logs the original error", async () => {
