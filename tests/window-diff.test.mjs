@@ -86,7 +86,7 @@ async function load(base) {
 }
 
 const { Gui, Markers } = await load("../src/gui");
-const { Item } = await load("../src/item");
+const { Item, ItemBuilder } = await load("../src/item");
 const { StateManager } = await load("../src/state");
 const { Window } = await load("../src/window");
 
@@ -319,5 +319,166 @@ test("a notification batched with a setUpperGui swap renders only the new GUI", 
   assert.equal(container.items[0].typeId, "minecraft:new");
   assert.equal(oldCalls, 0, "the old element must not render after the swap");
   assert.equal(newCalls, 1, "the full refresh renders the new slot once");
+  window.close();
+});
+
+test("a page change skips a fixed ItemBuilder decoration and re-evaluates an opaque provider", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const decoration = Item.simple(new ItemBuilder("minecraft:frame"));
+  let opaqueCalls = 0;
+  const opaque = Item.simple(() => {
+    opaqueCalls += 1;
+    return stack("minecraft:opaque");
+  });
+  const gui = Gui.paged({
+    structure: ["fi."],
+    ingredients: {
+      f: decoration,
+      i: opaque,
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+    },
+    content: [
+      Item.simple(() => stack("minecraft:page_1")),
+      Item.simple(() => stack("minecraft:page_2")),
+    ],
+  });
+  const window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:frame");
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+  opaqueCalls = 0;
+
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+
+  // The content slot changed and the opaque provider may read the new state, so
+  // both are re-evaluated. The fixed ItemBuilder cannot observe state, so its
+  // slot keeps the displayed stack without a provider call or a write.
+  assert.deepEqual([...writes].sort(), [1, 2]);
+  assert.equal(opaqueCalls, 1);
+  assert.equal(container.items[0].typeId, "minecraft:frame");
+  assert.equal(container.items[2].typeId, "minecraft:page_2");
+  window.close();
+});
+
+test("a page change re-evaluates an unchanged provider that reads the new state", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const decoration = Item.simple(new ItemBuilder("minecraft:frame"));
+  let window;
+  const pageLabel = Item.simple(() =>
+    stack(`minecraft:page_${window.getState().page ?? 0}`),
+  );
+  const gui = Gui.paged({
+    structure: ["fi."],
+    ingredients: {
+      f: decoration,
+      i: pageLabel,
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+    },
+    content: [
+      Item.simple(() => stack("minecraft:content_1")),
+      Item.simple(() => stack("minecraft:content_2")),
+    ],
+  });
+  window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[1].typeId, "minecraft:page_0");
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+
+  // Same element reference at slot 1, but the provider reads Window state, so
+  // treating it as unchanged would leave the stale page_0 on screen. The fixed
+  // decoration at slot 0 is still skipped.
+  assert.equal(container.items[1].typeId, "minecraft:page_1");
+  assert.deepEqual(writes, [1, 2]);
+  window.close();
+});
+
+test("an ItemBuilder whose provide was replaced is not treated as fixed", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const builder = new ItemBuilder("minecraft:frame");
+  const decoration = Item.simple(builder);
+  let window;
+  const gui = Gui.paged({
+    structure: ["fi."],
+    ingredients: {
+      f: decoration,
+      i: Item.simple(() => stack("minecraft:icon")),
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+    },
+    content: [
+      Item.simple(() => stack("minecraft:content_1")),
+      Item.simple(() => stack("minecraft:content_2")),
+    ],
+  });
+  window = buildWindow(gui, adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  assert.equal(container.items[0].typeId, "minecraft:frame");
+
+  // The replacement can read state, so the slot is no longer provably fixed.
+  builder.provide = () => stack(`minecraft:page_${window.getState().page ?? 0}`);
+  window.setState({ page: 1 });
+  await tick();
+  await tick();
+
+  assert.equal(container.items[0].typeId, "minecraft:page_1");
+  window.close();
+});
+
+test("a tab switch skips a fixed decoration shared by both tabs", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const decoration = Item.simple(new ItemBuilder("minecraft:frame"));
+  const filler = Item.simple(() => stack("minecraft:filler"));
+  const tab0 = Gui.normal({
+    structure: ["#a"],
+    ingredients: { "#": decoration, a: filler },
+  });
+  const tab1 = Gui.normal({
+    structure: ["#b"],
+    ingredients: { "#": decoration, b: filler },
+  });
+  const window = buildWindow(Gui.tab({ tabs: [tab0, tab1] }), adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+
+  const writes = [];
+  const setItem = container.setItem.bind(container);
+  container.setItem = (slot, item) => {
+    writes.push(slot);
+    setItem(slot, item);
+  };
+
+  window.setState({ tab: 1 });
+  await tick();
+  await tick();
+
+  // The two tabs have the same width, so the shared slot maps to the same
+  // physical slot and its fixed element needs no re-render.
+  assert.deepEqual(writes, [1]);
+  assert.equal(container.items[0].typeId, "minecraft:frame");
+  assert.equal(container.items[1].typeId, "minecraft:filler");
   window.close();
 });

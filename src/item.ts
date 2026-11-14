@@ -74,6 +74,24 @@ function normalizeProvider(source: ItemProviderSource): ItemProviderFunction {
   throw new TypeError("InvUI: Item provider must be an ItemStack, function, or { provide() }.");
 }
 
+/**
+ * The provider source a state diff can prove independent of Window state: a
+ * fixed ItemStack is cloned per call and an ItemBuilder renders only its own
+ * fields. Neither is given the Window or its state. Any function or custom
+ * ItemProvider is opaque, so it must be treated as state-dependent.
+ */
+function fixedProviderSource(
+  source: ItemProviderSource,
+): ItemStack | ItemBuilder | undefined {
+  if (isItemStack(source)) {
+    return source;
+  }
+  if (source instanceof ItemBuilder) {
+    return source;
+  }
+  return undefined;
+}
+
 function assertTicks(ticks: number): void {
   if (!Number.isInteger(ticks) || ticks <= 0) {
     throw new RangeError(`InvUI: updatePeriodically ticks must be a positive integer (got ${ticks}).`);
@@ -160,6 +178,13 @@ export class ItemBuilder implements ItemProvider {
   }
 }
 
+/**
+ * The original ItemBuilder provider, captured before callers can replace it. An
+ * ItemBuilder whose own `provide` differs from this can read anything, so a
+ * state diff must not skip it.
+ */
+const ITEM_BUILDER_PROVIDE = ItemBuilder.prototype.provide;
+
 /** Stage-builder returned by Item.builder(). */
 export class ItemDefinitionBuilder {
   private provider: ItemProviderSource = () => undefined;
@@ -231,6 +256,12 @@ export class Item {
   readonly id: string;
 
   private provider: ItemProviderFunction;
+  /**
+   * Source a state diff can prove independent of Window state, or undefined for
+   * an opaque provider. Kept so `isStateIndependent()` can re-check a replaced
+   * ItemBuilder.provide at render time (design 11.4).
+   */
+  private fixedSource: ItemStack | ItemBuilder | undefined;
   private placeholder: ItemStack | undefined;
   private clickHandlers: ClickHandler[] = [];
   private updateListeners = new Set<ItemUpdateListener>();
@@ -243,6 +274,7 @@ export class Item {
   constructor(provider: ItemProviderSource = () => undefined) {
     this.id = `item-${nextItemId++}`;
     this.provider = normalizeProvider(provider);
+    this.fixedSource = fixedProviderSource(provider);
   }
 
   static simple(source: ItemProviderSource): Item {
@@ -251,6 +283,25 @@ export class Item {
 
   static builder(): ItemDefinitionBuilder {
     return new ItemDefinitionBuilder();
+  }
+
+  /**
+   * True when the display cannot change because of a Window state update: the
+   * provider source is a fixed ItemStack or an ItemBuilder with its original
+   * `provide`, neither of which receives the Window or its state. A function or
+   * custom ItemProvider is opaque and returns false, so a state diff
+   * re-evaluates it. A replaced `provide` and external mutation of the source
+   * also return false or require `notifyWindows()`.
+   */
+  isStateIndependent(): boolean {
+    const source = this.fixedSource;
+    if (source === undefined) {
+      return false;
+    }
+    if (source instanceof ItemBuilder) {
+      return source.provide === ITEM_BUILDER_PROVIDE;
+    }
+    return true;
   }
 
   /** Resolve the display stack for a viewer; providers may be asynchronous. */
@@ -298,6 +349,7 @@ export class Item {
 
   setItemProvider(source: ItemProviderSource): this {
     this.provider = normalizeProvider(source);
+    this.fixedSource = fixedProviderSource(source);
     this.notifyWindows();
     return this;
   }
