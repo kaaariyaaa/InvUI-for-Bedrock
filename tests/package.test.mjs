@@ -379,6 +379,28 @@ test("packed package contents and consumer type check", async (t) => {
     }
   });
 
+  // The tarball excludes src/, so a source map that only points at ../src is
+  // unusable for a consumer. `inlineSources` must embed the original TypeScript.
+  await t.test("source maps embed the original sources", () => {
+    const mapPaths = packedPaths.filter(
+      (packedPath) => packedPath.startsWith("dist/") && packedPath.endsWith(".js.map"),
+    );
+    assert.ok(mapPaths.length > 0, "no JavaScript source maps were packed");
+    for (const packedPath of mapPaths) {
+      const map = JSON.parse(fs.readFileSync(path.join(installedDir, packedPath), "utf8"));
+      assert.ok(Array.isArray(map.sourcesContent), `${packedPath} must embed sourcesContent`);
+      assert.equal(map.sourcesContent.length, map.sources.length, `${packedPath} sourcesContent length`);
+      map.sources.forEach((source, index) => {
+        const sourceFile = path.resolve(repoRoot, "dist", source);
+        assert.equal(
+          map.sourcesContent[index],
+          fs.readFileSync(sourceFile, "utf8"),
+          `${packedPath} embeds stale source text for ${source}`,
+        );
+      });
+    }
+  });
+
   const minecraftScopeDir = path.join(consumerDir, "node_modules", "@minecraft");
   fs.mkdirSync(minecraftScopeDir, { recursive: true });
   for (const dependency of ["server", "common", "vanilla-data"]) {
