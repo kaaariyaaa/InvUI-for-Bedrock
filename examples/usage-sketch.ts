@@ -3,15 +3,12 @@
  *
  * 重要:
  * - このファイルはビルド・テストの対象外のスケッチです。型検査のみ手動で行い、実行はしません。
- *   型検査の前にリポジトリで `npm run build` を実行し、`dist` を作成してください。
  * - ここに現れる API は現行コアに存在しますが、実機での挙動を保証しません。
  *   実装との差は README.md の「現行実装との差」を参照してください。
  * - VirtualContainer は Bedrock Preview/Beta の Experimental API を前提とした設計です。
  * - クリック、アイテム保護、JSON UI、InventoryLink の移動は実機未検証であり、安全に利用できません。
  *   このスケッチのクリック処理を、動作する機能として本番設計へ持ち込まないでください。
- * - 実アダプタでは Window.open() が WindowOpenRejectedError で reject します。
- *   Window オブジェクト自体は build() で作成済み（status は "created" のまま）ですが、
- *   画面（VirtualContainer）は作成も表示もされません。
+ * - 実アダプタでは Window.open() が WindowOpenRejectedError で reject します（画面は開きません）。
  */
 
 import type { Player } from "@minecraft/server";
@@ -100,9 +97,7 @@ export async function openShop(player: Player): Promise<void> {
     await window.open();
   } catch (error) {
     // 既定の実アダプタではここに WindowOpenRejectedError が来る。
-    // Window オブジェクトは build() で作成済みで、status は "created" のまま。
-    // VirtualContainer は作成も表示もされておらず、window.container は undefined。
-    // 画面を開くには明示的なテスト用アダプタが必要（このスケッチでは使わない）。
+    // 画面が開かないだけで、Window は作成も表示もされていない。
     console.warn("InvUI: 画面を開けませんでした", error);
   }
 }
