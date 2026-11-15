@@ -381,6 +381,31 @@ test("packed package contents and consumer type check", async (t) => {
     }
   });
 
+  // The CLI points readers at this section for the unverified-feature warning.
+  // tests/ is not packed, so the section must not link to repository-only files
+  // and must say that the detailed procedures are not part of the tarball.
+  await t.test("packed README 実機テスト section does not link to unpacked files", () => {
+    const readme = fs.readFileSync(path.join(installedDir, "README.md"), "utf8");
+    const start = readme.indexOf("\n## 実機テスト\n");
+    assert.notEqual(start, -1, "packed README must keep the 実機テスト section");
+    const rest = readme.slice(start + 1);
+    const nextHeading = rest.indexOf("\n## ", 1);
+    const section = nextHeading === -1 ? rest : rest.slice(0, nextHeading);
+
+    assert.match(section, /npm tarball に(?:は)?含まれない/);
+
+    for (const match of section.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+      const href = match[1].trim();
+      if (/^(?:https?:|mailto:|#)/.test(href)) continue;
+      const target = decodeURI(href.split("#")[0]);
+      if (target === "") continue;
+      assert.ok(
+        fs.existsSync(path.resolve(installedDir, target)),
+        `packed README 実機テスト links to a file outside the tarball: ${href}`,
+      );
+    }
+  });
+
   // The tarball excludes src/, so a source map that only points at ../src is
   // unusable for a consumer. `inlineSources` must embed the original TypeScript.
   await t.test("source maps embed the original sources", () => {

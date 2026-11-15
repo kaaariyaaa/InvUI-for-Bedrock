@@ -427,21 +427,18 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 
 ## 実機テスト
 
-未検証機能を「提供済み」にしないため、実機テストの手順と合否基準を用意しています。
+未検証機能を「提供済み」にしないため、リポジトリの `tests/manual-bedrock/` に実機テストの手順と合否基準を用意しています。**`tests/` は npm tarball に含まれないため、パッケージだけを導入した利用者はこれらの資料を読めません。** その場合は、この節の注意事項と「実機検証が終わるまで正式機能として扱わないもの」を判断材料にし、合格を記録するまで有効な機能として扱わないでください。同梱の [resource_pack/README.md](resource_pack/README.md) には、接続ファイルと手動プローブを同梱物だけで試す手順があります。
 
-- 手順と安全上の注意: [tests/manual-bedrock/README.md](tests/manual-bedrock/README.md)
-- 合否チェックリスト: [tests/manual-bedrock/CHECKLIST.md](tests/manual-bedrock/CHECKLIST.md)
-- phase0 の最小プローブ（`VirtualContainer` の表示・close reason・itemChange）: [tests/manual-bedrock/probe/README.md](tests/manual-bedrock/probe/README.md)
-- `VirtualContainer` が chest 画面を使うかのマーカープローブ（単体 RP・ラベルのみ）: [tests/manual-bedrock/chest-resource-pack/README.md](tests/manual-bedrock/chest-resource-pack/README.md)
-- `data_driven_container` 画面の判定プローブ: [tests/manual-bedrock/data-driven-resource-pack/README.md](tests/manual-bedrock/data-driven-resource-pack/README.md)
-- チェスト画面のボタン押下が `!invui:` チャット通知を生むかの未検証観察プローブ（単体 RP・自動 payload なし・通常チェストにも影響し得る・使い捨てワールド専用・他の RP と同時併用しない）: [tests/manual-bedrock/button-send-resource-pack/README.md](tests/manual-bedrock/button-send-resource-pack/README.md)
-- `ItemLockMode.slot` のアイテムを通常クリックしたときに itemChange が届くかの観測プローブ（復元・クリック実行なし・stick / paper のみ・使い捨てワールド専用）。陽性でも設計7.2 により read-only 制御の根拠にしない: [tests/manual-bedrock/locked-click-probe/README.md](tests/manual-bedrock/locked-click-probe/README.md)
+次の資料はリポジトリ専用です（npm tarball 非同梱）。
 
-CLI の安全側の動作は、次のコマンドで自動確認できます（`npm test` にも含まれます）。
-
-```bash
-node --test tests/manual-bedrock/cli.test.mjs
-```
+- 手順と安全上の注意: `tests/manual-bedrock/README.md`
+- 合否チェックリスト: `tests/manual-bedrock/CHECKLIST.md`
+- phase0 の最小プローブ（`VirtualContainer` の表示・close reason・itemChange）: `tests/manual-bedrock/probe/README.md`
+- `VirtualContainer` が chest 画面を使うかのマーカープローブ（単体 RP・ラベルのみ）: `tests/manual-bedrock/chest-resource-pack/README.md`
+- `data_driven_container` 画面の判定プローブ: `tests/manual-bedrock/data-driven-resource-pack/README.md`
+- チェスト画面のボタン押下が `!invui:` チャット通知を生むかの未検証観察プローブ（単体 RP・自動 payload なし・通常チェストにも影響し得る・使い捨てワールド専用・他の RP と同時併用しない）: `tests/manual-bedrock/button-send-resource-pack/README.md`
+- `ItemLockMode.slot` のアイテムを通常クリックしたときに itemChange が届くかの観測プローブ（復元・クリック実行なし・stick / paper のみ・使い捨てワールド専用）。陽性でも設計7.2 により read-only 制御の根拠にしない: `tests/manual-bedrock/locked-click-probe/README.md`
+- CLI の安全側の動作確認（`npm test` に含まれる）: リポジトリで `node --test tests/manual-bedrock/cli.test.mjs`
 
 このテストは、既定ではパックを変更しないこと、`--install-resource-pack` 指定時も `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル以外を書き換えず既存ファイルを上書きしないこと、`--register-ui-defs` が単独では拒否され、併用時だけ不足分をバックアップ付きで追記して再実行では何も書かないこと、壊れた `_ui_defs.json` ではテンプレートごと中断すること、追記失敗時はロールバックすること、`generate-resource-pack` が5ファイルを生成して `_ui_defs.json` に3ファイルを登録すること、壊れた manifest で失敗することなどを確認します。実機の入力・表示・アイテム安全試験の代わりにはなりません。
 
