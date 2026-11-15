@@ -49,7 +49,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
 | JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込み、透明ブロッカー（`invui_connect_probe.grid_blocker`）はデスクトップでは `panel_top_half`（`item_grid` と同じ基準）、pocket では `pocket_panel` の `controls` 末尾へ `insert_back` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
 | npm 公開 | 未実施 |
-| ライセンス | 未設定 |
+| ライセンス | MIT（[LICENSE](LICENSE)、npm tarball にも同梱） |
 
 ## コアの実装範囲（実機非依存）
 
@@ -499,6 +499,7 @@ Resource Pack を使わなくても、コアの型・レイアウト計算・状
 ```text
 InvUI-for-Bedrock/
 ├── package.json                  # 0.1.0-beta.1 / ESM / build・test・pack scripts
+├── LICENSE                       # MIT
 ├── tsconfig.json
 ├── bin/
 │   └── cli.js                    # 配布補助 CLI（静的検査・任意でプローブ導入）
@@ -561,7 +562,7 @@ InvUI-for-Bedrock/
 └── InvUI_for_Bedrock_Design.md   # 全体設計書
 ```
 
-`LICENSE` はまだありません。`resource_pack/` は既定で `data_driven_container` のパネルへ接続する未検証テンプレートで、`chest_screen` は編集していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
+`LICENSE` は MIT です（`package.json` の `license` も `MIT`、`files` に `LICENSE` を含めているため npm tarball にも入ります）。`resource_pack/` は既定で `data_driven_container` のパネルへ接続する未検証テンプレートで、`chest_screen` は編集していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
 
 ## 対応バージョン
 
@@ -576,7 +577,7 @@ CLI は manifest からゲーム版・Experimental の有効状態を確定で�
 
 ## ライセンス
 
-未設定です。配布前に決定する必要があります。
+MIT です。[LICENSE](LICENSE) を参照してください。
 
 ## 参考
 
