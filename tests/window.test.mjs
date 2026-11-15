@@ -7285,6 +7285,87 @@ test("a slot whose provider failed after a mapping change is not clickable", asy
   window.close();
 });
 
+test("a failed slot stays unclickable when a later refresh skips its state-independent element", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const broken = {
+    resolve: () => {
+      throw new Error("provider failed");
+    },
+    subscribe: () => () => {},
+    getMode: () => "button",
+    isStateIndependent: () => true,
+  };
+  const window = Window.builder()
+    .setViewer({ id: "indep-failed", name: "IndepFailed" })
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: broken } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.deepEqual(window._inputSlotModes(), ["display"]);
+  // The state diff skips the unchanged state-independent element, so it never
+  // writes the slot again; applying the new layout must not forget that the
+  // slot still shows its previous display.
+  window.setState({ selection: "changed" });
+  await tick();
+  await tick();
+  await tick();
+  assert.equal(adapter.containers[0].items[0], undefined, "the slot shows nothing");
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["display"],
+    "a slot whose item was never drawn must stay display-only",
+  );
+  assert.equal(await window.handleClick(0), false, "the unseen button is not clickable");
+  window.close();
+});
+
+test("a stale sync provider failure does not disable a slot a newer pass rendered", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  let window;
+  let calls = 0;
+  const element = Item.builder()
+    .setItemProvider(() => {
+      calls += 1;
+      if (calls === 1) {
+        return stack("minecraft:first");
+      }
+      if (calls === 2) {
+        // A synchronous provider failure after a reentrant refresh has
+        // superseded this render: the failure is still reported, but it no
+        // longer owns the slot.
+        void window.refresh();
+        throw new Error("outer provider failed");
+      }
+      return stack("minecraft:ok");
+    })
+    .addClickHandler(() => {})
+    .build();
+  window = Window.builder()
+    .setViewer({ id: "reentrant-throw", name: "ReentrantThrow" })
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: element } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ selection: "changed" });
+  await tick();
+  await tick();
+  await tick();
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:ok");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "itemProvider");
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["button"],
+    "the nested refresh rendered the slot, so it must stay clickable",
+  );
+  window.close();
+});
+
 test("a page round trip in one timing rejects a line minted for the transient page", async () => {
   const viewer = { id: "chat-setstate-aba", name: "AbaState" };
   const clicks = [];
@@ -8633,3 +8714,4 @@ test("a reopen from a subscribe error during a refresh keeps the reopened render
     `leaked element subscription: ${subscribes} subscribes vs ${unsubscribes} unsubscribes`,
   );
 });
+

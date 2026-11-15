@@ -3758,7 +3758,10 @@ export class Window {
     this.#inputPendingLayout = undefined;
     this.#layout = layout;
     this.#layoutSettled = false;
-    this.#unrenderedSlots.clear();
+    // Keep #unrenderedSlots: applying a layout does not re-write a slot the diff
+    // may skip (an unchanged state-independent element), so clearing its marker
+    // here would offer the stale display as this layout's button. A successful
+    // write clears the slot in #applySlotStack.
     // The applied layout is not on screen until the pass that follows writes
     // it; see #settleLayout. Input fails closed in the gap.
     this.#layoutPresented = false;
@@ -3991,8 +3994,13 @@ export class Window {
           this.#isCurrentSlotIgnoringEpoch(generation, slot, element, token));
       if (!canBeStale || isCurrent) {
         // The slot keeps its previous display instead of this layout's item, so
-        // input must not target it until a later write succeeds.
-        this.#unrenderedSlots.add(slot);
+        // input must not target it until a later write succeeds. Only a failure
+        // that still owns the slot leaves that stale display: one that lost it
+        // to a newer pass is superseded by that pass, and marking it here would
+        // disable the slot the newer render already wrote.
+        if (isCurrent) {
+          this.#unrenderedSlots.add(slot);
+        }
         this.#report(error, "itemProvider", slot);
       }
       return;
