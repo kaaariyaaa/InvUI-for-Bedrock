@@ -213,10 +213,21 @@ function openFor(player, size, mode, ticks) {
 
   try {
     container.open(player);
+    log(`OPEN_CALLED size=${size} mode=${mode} (open() returned without throwing)`);
   } catch (error) {
     reply(player, `OPEN_FAILED size=${size} mode=${mode} error=${describeError(error)}`);
     return;
   }
+
+  // 画面が出ないときの切り分け用: 次の tick で engine が view を登録したかを見る。
+  system.run(() => {
+    const viewers = viewersOf(container);
+    log(
+      `VIEWERS_AFTER_OPEN size=${size} mode=${mode} viewers=${
+        viewers === undefined ? "unavailable" : viewers.length
+      } (0 なら engine が open を受理していない)`,
+    );
+  });
 
   const key = keyFor(size, mode);
   const generation = (openGenerations.get(key) ?? 0) + 1;
