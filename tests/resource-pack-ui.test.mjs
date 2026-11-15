@@ -453,3 +453,29 @@ test("the default desktop blocker is anchored to the sample slot area, not the w
     "README must not measure the blocker geometry from desktop_panel",
   );
 });
+
+test("the shipped pack READMEs do not claim the click reception path is missing", () => {
+  // The library receives `!invui:` chat lines in the 4-field shape (Node.js
+  // tested, not verified in-game). The pack itself ships no receiver, so saying
+  // "no script-side reception" is a stale claim from before that path existed.
+  const readmes = [
+    ["resource_pack/README.md", readText(packReadmePath)],
+    [
+      "resource_pack/experimental/connect-data-driven/README.md",
+      readText(path.join(repoRoot, "resource_pack", "experimental", "connect-data-driven", "README.md")),
+    ],
+  ];
+  for (const [label, text] of readmes) {
+    for (const stale of [
+      "スクリプト側の受信処理もありません",
+      "スクリプト側の受信・クリック処理は未実装",
+    ]) {
+      assert.ok(!text.includes(stale), `${label} must not claim the script-side reception is missing`);
+    }
+    assert.ok(
+      text.includes("受信スクリプト") || text.includes("受信経路"),
+      `${label} must distinguish the pack's scripts from the library reception`,
+    );
+    assert.ok(text.includes("実機未検証"), `${label} must not claim the reception is verified in-game`);
+  }
+});
