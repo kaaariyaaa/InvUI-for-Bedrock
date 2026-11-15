@@ -2745,7 +2745,10 @@ export class Window {
     if (
       !current ||
       current.width !== layout.width ||
-      current.height !== layout.height
+      current.height !== layout.height ||
+      // A clear of a column beyond the current width failed on an earlier pass
+      // and left the wider width recorded: only the full render retries it.
+      (this.#renderedWidth !== undefined && this.#renderedWidth > layout.width)
     ) {
       try {
         await this.#renderAll(generation);
@@ -3906,11 +3909,16 @@ export class Window {
     }
     // A narrower Structure reuses the same container: the columns beyond its
     // width are no longer addressed, so slots a wider layout wrote there must
-    // be cleared instead of left visible.
-    if (this.#renderedWidth !== undefined && this.#renderedWidth > layout.width) {
-      this.#clearUnmappedColumns(layout);
+    // be cleared instead of left visible. A failed clear leaves the old width
+    // recorded, so the next full pass (or the diff that sees it) retries the
+    // columns instead of declaring them clean.
+    if (
+      this.#renderedWidth === undefined ||
+      this.#renderedWidth <= layout.width ||
+      this.#clearUnmappedColumns(layout)
+    ) {
+      this.#renderedWidth = layout.width;
     }
-    this.#renderedWidth = layout.width;
     // A new batch invalidates every result started before it.
     const epoch = ++this.#renderEpoch;
     this.#beginLayoutRender(layout);
@@ -3937,14 +3945,17 @@ export class Window {
    * Clear the physical columns a wider Structure previously wrote but the
    * current layout no longer addresses. `container.size` covers `height` full
    * nine-column rows, so only the tail of each row can be stale (a height
-   * change creates a new container instead).
+   * change creates a new container instead). Returns false when a clear threw,
+   * so `#renderAll` keeps the wider width recorded and a later pass retries;
+   * slots that were cleared are marked empty, so a retry skips them.
    */
-  #clearUnmappedColumns(layout: ResolvedGuiLayout): void {
+  #clearUnmappedColumns(layout: ResolvedGuiLayout): boolean {
     const container = this.#container;
     const cache = this.#writeCache;
     if (!container || !cache) {
-      return;
+      return true;
     }
+    let cleared = true;
     for (let row = 0; row < layout.height; row += 1) {
       for (let column = layout.width; column < PHYSICAL_COLUMNS; column += 1) {
         const physicalSlot = row * PHYSICAL_COLUMNS + column;
@@ -3957,11 +3968,13 @@ export class Window {
           container.setItem(physicalSlot, undefined);
         } catch (error) {
           this.#report(error, "setItem", physicalSlot);
+          cleared = false;
           continue;
         }
         cache.markWritten(physicalSlot, undefined);
       }
     }
+    return cleared;
   }
 
   async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {

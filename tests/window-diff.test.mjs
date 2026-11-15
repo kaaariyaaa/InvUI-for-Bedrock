@@ -524,6 +524,61 @@ test("a state diff retries a fixed slot whose last write failed", async () => {
   window.close();
 });
 
+test("a failed clear of an old column is retried by the next pass", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const wide = Gui.normal({
+    structure: ["abcdef"],
+    ingredients: {
+      a: Item.simple(new ItemBuilder("minecraft:a")),
+      b: Item.simple(new ItemBuilder("minecraft:b")),
+      c: Item.simple(new ItemBuilder("minecraft:c")),
+      d: Item.simple(new ItemBuilder("minecraft:d")),
+      e: Item.simple(new ItemBuilder("minecraft:e")),
+      f: Item.simple(new ItemBuilder("minecraft:f")),
+    },
+  });
+  // A paged child tab so the state can change without changing the width.
+  const narrow = Gui.paged({
+    structure: ["ghi."],
+    ingredients: {
+      g: Item.simple(new ItemBuilder("minecraft:g")),
+      h: Item.simple(new ItemBuilder("minecraft:h")),
+      i: Item.simple(new ItemBuilder("minecraft:i")),
+      ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL,
+    },
+    content: [
+      Item.simple(() => stack("minecraft:p1")),
+      Item.simple(() => stack("minecraft:p2")),
+    ],
+  });
+  const window = buildWindow(Gui.tab({ tabs: [wide, narrow] }), adapter);
+
+  await window.open();
+  const container = adapter.containers[0];
+  const setItem = container.setItem.bind(container);
+  let fail = true;
+  container.setItem = (slot, item) => {
+    if (slot === 5 && fail) {
+      fail = false;
+      throw new Error("clear failed");
+    }
+    setItem(slot, item);
+  };
+
+  window.setState({ tab: 1 });
+  await tick();
+  await tick();
+  assert.equal(container.items[5].typeId, "minecraft:f", "the failed clear left f");
+
+  // Any later pass must clear the column again instead of trusting the width
+  // it recorded for the failed pass.
+  window.setState({ tab: 1, tabs: { 1: { page: 1 } } });
+  await tick();
+  await tick();
+  assert.equal(container.items[5], undefined);
+  window.close();
+});
+
 test("a fixed ItemStack notified in the same timing as a state change is rendered", async () => {
   const adapter = new InMemoryTestAdapter();
   const source = new ItemBuilder("minecraft:icon").build();
