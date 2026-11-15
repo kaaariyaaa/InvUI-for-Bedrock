@@ -1,0 +1,7 @@
+{
+  "ui_defs": [
+    "ui/invui_chat_transport.json",
+    "ui/invui_chat_desktop_attach.json",
+    "ui/invui_chat_pocket_attach.json"
+  ]
+}

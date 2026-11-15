@@ -1,0 +1,35 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "InvUI VirtualContainer Chat Bridge | Probe",
+    "description": "VirtualContainer + JSON UI button.send transport probe. Does not provide automatic per-slot click payload generation.",
+    "uuid": "6736d9ca-7f06-4510-b702-c752ad63ab39",
+    "version": [
+      0,
+      1,
+      0
+    ],
+    "min_engine_version": [
+      1,
+      26,
+      70
+    ]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "0fb2584d-f5e1-4187-a735-16cacde28b4d",
+      "version": [
+        0,
+        1,
+        0
+      ]
+    }
+  ],
+  "metadata": {
+    "authors": [
+      "InvUI for Bedrock integration"
+    ],
+    "license": "MIT"
+  }
+}
