@@ -426,6 +426,45 @@ test("setItem does not write when cloning the previous value fails", () => {
   assert.throws(() => inventory.serialize(codec), /stored clone failed/);
 });
 
+test("clear does not partially clear when a stored stack cannot be cloned", () => {
+  // clear() used to delegate to setItem() slot by slot. A later slot whose
+  // stored clone() throws then left every earlier slot already cleared even
+  // though clear() threw, so the caller saw a failure and lost items.
+  const codec = {
+    encode: () => ({}),
+    decode: (value) =>
+      value.typeId === "minecraft:apple"
+        ? new ItemBuilder("minecraft:apple", 2).build()
+        : {
+            typeId: "minecraft:diamond",
+            clone: () => ({
+              typeId: "minecraft:diamond",
+              clone: () => {
+                throw new Error("stored clone failed");
+              },
+            }),
+          },
+  };
+  const inventory = VirtualInventory.deserialize(
+    {
+      version: INVENTORY_SNAPSHOT_VERSION,
+      size: 2,
+      slots: [
+        { slot: 0, item: { typeId: "minecraft:apple", amount: 2 } },
+        { slot: 1, item: { typeId: "minecraft:diamond", amount: 1 } },
+      ],
+    },
+    codec,
+  );
+  const changes = [];
+  inventory.subscribe((change) => changes.push(change));
+
+  assert.throws(() => inventory.clear(), /stored clone failed/);
+  assert.equal(inventory.getItem(0).typeId, "minecraft:apple");
+  assert.equal(inventory.getItem(0).amount, 2);
+  assert.equal(changes.length, 0);
+});
+
 test("VirtualInventory validates size and slot bounds", () => {
   assert.throws(() => new VirtualInventory(-1), RangeError);
   assert.throws(() => new VirtualInventory(1.5), RangeError);

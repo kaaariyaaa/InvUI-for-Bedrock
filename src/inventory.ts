@@ -149,10 +149,22 @@ export class VirtualInventory implements Inventory {
   }
 
   clear(): void {
+    // Clone every occupied item before clearing anything. A stored stack can
+    // fail to clone (for example one restored by a codec whose clone() is only
+    // valid once), and clearing slot by slot would then leave the earlier
+    // slots empty even though clear() threw and reported no change.
+    const occupied: Array<{ slot: number; previous: ItemStack }> = [];
     for (let slot = 0; slot < this.size; slot++) {
-      if (this.items[slot] !== undefined) {
-        this.setItem(slot, undefined);
+      const item = this.items[slot];
+      if (item !== undefined) {
+        occupied.push({ slot, previous: cloneItem(item) });
       }
+    }
+    // The entries are already validated clones; assign directly so a second
+    // clone cannot fail after earlier slots were cleared.
+    for (const { slot, previous } of occupied) {
+      this.items[slot] = undefined;
+      this.emit(slot, previous, undefined);
     }
   }
 
