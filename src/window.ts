@@ -5,13 +5,29 @@
  * `openContainer`/`closeContainer` call `VirtualContainer.open(player)` /
  * `close(player)`. This path has NOT been verified on a real device.
  *
- * Screen protection is detection only. `virtualContainerItemChange` is an
- * `after` event, so a move the player performs through the screen has already
- * happened when the handler runs: it cannot be prevented and the previous item
- * cannot be restored. A display item taken through the screen can therefore be
- * lost or duplicated (a later render can write it back). The Window reports
- * `WindowItemChangeDangerError` and closes, which is best-effort. Until the
- * manual verification in design 10 and 18.2 is complete, use a throwaway world.
+ * Screen protection is detection plus best-effort recovery, not prevention.
+ * `virtualContainerItemChange` is an `after` event, so a move the player
+ * performs through the screen has already happened when the handler runs. The
+ * Window therefore lets the move happen and undoes it:
+ *
+ * 1. `virtualContainerItemChange` restores the changed container slot from its
+ *    `beforeItemStack`, so the screen keeps showing what it showed before.
+ * 2. A reconciliation pass on the next tick pairs the container change with
+ *    the player's own events (`playerInventoryItemChange`,
+ *    `playerCursorItemGrab`, `playerCursorItemRelease`) and reverts only the
+ *    player-side slot or cursor the screen move created. It never scans for
+ *    "GUI-tagged" items: the Window knows what it rendered, and the player-side
+ *    event describes the destination slot and its previous content exactly, so
+ *    the player's own identical stacks are left alone.
+ * 3. A container slot that cannot be restored fails closed
+ *    (`WindowItemChangeDangerError`, rendering stopped, Window closed).
+ *
+ * A drop straight from the screen to the ground is covered by the same pairing:
+ * `entityItemDrop` records the dropped item entity and the reconciliation
+ * removes that entity when it still holds the item the screen lost. Limit: this
+ * is `after`-the-fact and Script API only; a player-side change that cannot be
+ * mapped to a slot is skipped rather than guessed. Not verified on a real
+ * device.
  *
  * `createContainer()` uses the official
  * `world.virtualContainerManager.create()` so layout sizes and titles can be
@@ -89,8 +105,16 @@
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
 import type {
+  Container,
+  Entity,
+  EntityItemDropAfterEvent,
   ItemStack,
   Player,
+  PlayerCursorItemGrabAfterEvent,
+  PlayerCursorInventoryComponent,
+  PlayerCursorItemReleaseAfterEvent,
+  PlayerInventoryItemChangeAfterEvent,
+  PlayerInventoryType,
   VirtualContainer,
   VirtualContainerCloseAfterEvent,
   VirtualContainerCloseReason,
@@ -161,6 +185,13 @@ export interface WindowContainerItemChangeEvent {
   readonly container: VirtualContainer;
   readonly player: Player;
   readonly slot: number;
+  /**
+   * The item in the slot before the player's change, if any. The Window
+   * restores this stack into `slot` during the reconciliation pass.
+   */
+  readonly beforeItemStack?: ItemStack;
+  /** The item in the slot after the player's change, if any. */
+  readonly itemStack?: ItemStack;
 }
 
 export type WindowContainerCloseHandler = (event: WindowContainerCloseEvent) => void;
@@ -207,18 +238,22 @@ export class WindowOpenRejectedError extends Error {
 
 /**
  * Reported through the error handler (operation `itemChange`) when a player
- * changes the Window's container through the screen. The change is not treated
- * as a click and the previous item is not restored: the render is stopped and
- * the screen is closed instead, because moves/copies through the screen are
- * unverified.
+ * changed the Window's container through the screen and the change could not be
+ * undone (the container write threw). Rendering is stopped and the Window
+ * closes, because a later render would write the display item back over an
+ * unknown slot and could duplicate it.
+ *
+ * A change that is undone is not reported: taking an item through the screen is
+ * an expected player action, not an error.
  */
 export class WindowItemChangeDangerError extends Error {
   readonly code = "INVUI_CONTAINER_ITEM_CHANGE";
   readonly slot: number;
 
-  constructor(slot: number) {
+  constructor(slot: number, options?: ErrorOptions) {
     super(
-      `InvUI: slot ${slot} of the Window container was changed through the screen. Rendering is stopped and the Window is closing.`,
+      `InvUI: slot ${slot} of the Window container was changed through the screen and could not be restored. Rendering is stopped and the Window is closing.`,
+      options,
     );
     this.name = "WindowItemChangeDangerError";
     this.slot = slot;
@@ -335,12 +370,11 @@ function toWindowCloseReason(reason: VirtualContainerCloseReason): WindowCloseRe
  * `close(player)`.
  *
  * NOT VERIFIED ON A REAL DEVICE. The event hooks are detection, not
- * protection: both game events are `after` events, so a close or item change
- * has already happened when the handler runs; subscribing cannot prevent it or
- * restore the previous item. A player can take a display item through the
- * screen and a later render can write it back, duplicating it; an item the
- * player removed can also be lost. The Window only reports
- * `WindowItemChangeDangerError` and closes.
+ * prevention: both game events are `after` events, so a close or item change
+ * has already happened when the handler runs; subscribing cannot prevent it.
+ * The Window restores a changed container slot and reverts the matching
+ * player-side change on the next tick (see the module comment), and fails
+ * closed only when the container slot cannot be restored.
  */
 export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter {
   readonly canOpenScreens = true;
@@ -399,10 +433,10 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
   }
 
   /**
-   * Forwards this container's item-change events. This is an `after` event: the
-   * slot was already changed through the screen, so this is detection only and
-   * cannot prevent the move. The optional `container` filters the subscription
-   * like {@link subscribeClose}.
+   * Forwards this container's item-change events, including both stacks, so
+   * the Window can restore the slot. This is an `after` event: the slot was
+   * already changed through the screen. The optional `container` filters the
+   * subscription like {@link subscribeClose}.
    */
   subscribeItemChange(
     handler: WindowContainerItemChangeHandler,
@@ -414,6 +448,8 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
         container: event.container,
         player: event.player,
         slot: event.slot,
+        beforeItemStack: event.beforeItemStack,
+        itemStack: event.itemStack,
       });
     };
     if (container) {
@@ -537,7 +573,11 @@ type LifecycleEventName =
   | "playerLeave"
   | "entityDie"
   | "playerDimensionChange"
-  | "playerGameModeChange";
+  | "playerGameModeChange"
+  | "playerInventoryItemChange"
+  | "playerCursorItemGrab"
+  | "playerCursorItemRelease"
+  | "entityItemDrop";
 
 function afterEventState(): AfterEventSubscriptionState {
   return { subscribed: false, unavailable: false };
@@ -624,7 +664,7 @@ function ensureAfterEventSubscription(
     state.subscribed = true;
   } catch (error) {
     console.error(
-      `InvUI: ${name} subscription could not be installed; Windows will not close automatically ${purpose}.`,
+      `InvUI: ${name} subscription could not be installed; ${purpose}.`,
       error,
     );
     state.unavailable = true;
@@ -639,7 +679,7 @@ function ensurePlayerLeaveSubscription(): void {
   ensureAfterEventSubscription(
     playerLeaveState,
     "playerLeave",
-    "when a player leaves",
+    "Windows will not close automatically when a player leaves",
     (event) => {
       const playerId = readString(readProperty(event, "playerId"));
       if (!playerId) {
@@ -662,7 +702,7 @@ function ensureEntityDieSubscription(): void {
   ensureAfterEventSubscription(
     entityDieState,
     "entityDie",
-    "when a player dies",
+    "Windows will not close automatically when a player dies",
     (event) => {
       const entityId = readId(readProperty(event, "deadEntity"));
       if (!entityId) {
@@ -686,7 +726,7 @@ function ensurePlayerDimensionChangeSubscription(): void {
   ensureAfterEventSubscription(
     playerDimensionChangeState,
     "playerDimensionChange",
-    "when a player changes dimension",
+    "Windows will not close automatically when a player changes dimension",
     (event) => {
       const playerId = readId(readProperty(event, "player"));
       if (!playerId) {
@@ -705,7 +745,7 @@ function ensurePlayerGameModeChangeSubscription(): void {
   ensureAfterEventSubscription(
     playerGameModeChangeState,
     "playerGameModeChange",
-    "when a player starts spectating",
+    "Windows will not close automatically when a player starts spectating",
     (event) => {
       // Only spectator mode closes a Window; Creative/Survival switches do not.
       if (readString(readProperty(event, "toGameMode")) !== "Spectator") {
@@ -770,6 +810,274 @@ function ensureShutdownSubscription(): void {
     );
     shutdownState.unavailable = true;
   }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Screen item guard
+ *
+ * `virtualContainerItemChange` is an `after` event: by the time the Window
+ * hears about a take, the item is already in the player's inventory or on
+ * their cursor. The guard therefore does not try to prevent it; it records the
+ * change and reconciles it with the player's own after-events on the next tick:
+ *
+ * - the container slot is restored from `beforeItemStack` immediately, so the
+ *   screen keeps showing the display item;
+ * - the player-side change that the screen move caused is reverted to its own
+ *   `beforeItemStack` (inventory slot), cleared (cursor), or the dropped item
+ *   entity is removed (`entityItemDrop`), so the item the screen lost does not
+ *   remain with the player or on the ground;
+ * - the player's own items are never scanned for or deleted wholesale: only a
+ *   slot whose current content still matches the event's `itemStack` is
+ *   written, and only when a same-tick screen change of the same item type
+ *   exists. An item the player already had is left alone because the revert
+ *   writes the slot's own previous stack, not an "empty" value.
+ *
+ * Deferring the player-side write to the next tick removes the event-order
+ * dependency: whichever of the container event and the player event arrives
+ * first, both are recorded before reconciliation.
+ *
+ * ponytail: one deferred reconciliation from event payloads, no per-tick
+ * inventory scan. Bedrock has no item identity, so a scan would have to guess
+ * which stack is the GUI copy and could delete a player's own item. Add a tick
+ * scan only if a device is seen to deliver the pair across ticks or to miss
+ * `playerInventoryItemChange`.
+ * ------------------------------------------------------------------------- */
+
+/** One item type the screen lost (`take`) or gained (`placement`). */
+interface ScreenItemChange {
+  readonly kind: "take" | "placement";
+  readonly typeId: string;
+  /** Amount of this type still to match against player-side changes. */
+  remaining: number;
+}
+
+/** One changed player inventory slot, as reported by the after-event. */
+interface PlayerSlotChangeRecord {
+  readonly inventoryType: PlayerInventoryType;
+  /** The event's slot; `#resolvePlayerSlot` maps it to a container index. */
+  readonly slot: number;
+  readonly before: ItemStack | undefined;
+  /** Last state of the slot in this batch; merged by #collapsePlayerChanges. */
+  after: ItemStack | undefined;
+  matchedGain: boolean;
+  matchedLoss: boolean;
+}
+
+/** One cursor grab/release, as reported by the after-event. */
+interface CursorItemChangeRecord {
+  readonly kind: "grab" | "release";
+  readonly item: ItemStack;
+  matched: boolean;
+}
+
+/** One item entity the viewer dropped, as reported by `entityItemDrop`. */
+interface DroppedItemChangeRecord {
+  readonly entity: Entity;
+  readonly item: ItemStack;
+  matched: boolean;
+}
+
+/**
+ * Learned mapping from `PlayerInventoryItemChangeAfterEvent.slot` to the
+ * player inventory container index, per `PlayerInventoryType`. The relation is
+ * not documented, so it is only learned from a candidate that the live
+ * container confirms (see `#resolvePlayerSlot`) and never guessed. The hotbar
+ * and main inventory are separate sub-inventories; the main inventory may be
+ * reported either absolute (container index) or relative to the 27-slot area.
+ */
+const playerSlotOffsets = new Map<PlayerInventoryType, number>();
+
+/** Above this many unpaired records the oldest are dropped (see #pruneGuardRecords). */
+const MAX_SCREEN_GUARD_RECORDS = 128;
+
+/** Read `ItemStack.typeId` without letting a stale stack throw. */
+function stackType(item: ItemStack | undefined): string | undefined {
+  if (!item) {
+    return undefined;
+  }
+  try {
+    const typeId = item.typeId;
+    return typeof typeId === "string" && typeId.length > 0 ? typeId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read `ItemStack.amount`, defaulting to 1 for a stale stack. */
+function stackAmount(item: ItemStack | undefined): number {
+  if (!item) {
+    return 0;
+  }
+  try {
+    const amount = item.amount;
+    return typeof amount === "number" && Number.isFinite(amount)
+      ? Math.max(0, Math.floor(amount))
+      : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** What an inventory change added, if anything (a swap both adds and removes). */
+function gainedBy(change: PlayerSlotChangeRecord): { typeId: string; amount: number } | undefined {
+  const afterType = stackType(change.after);
+  if (!afterType) {
+    return undefined;
+  }
+  if (stackType(change.before) !== afterType) {
+    return { typeId: afterType, amount: stackAmount(change.after) };
+  }
+  const delta = stackAmount(change.after) - stackAmount(change.before);
+  return delta > 0 ? { typeId: afterType, amount: delta } : undefined;
+}
+
+/** What an inventory change removed, if anything (a swap both adds and removes). */
+function lostBy(change: PlayerSlotChangeRecord): { typeId: string; amount: number } | undefined {
+  const beforeType = stackType(change.before);
+  if (!beforeType) {
+    return undefined;
+  }
+  if (stackType(change.after) !== beforeType) {
+    return { typeId: beforeType, amount: stackAmount(change.before) };
+  }
+  const delta = stackAmount(change.before) - stackAmount(change.after);
+  return delta > 0 ? { typeId: beforeType, amount: delta } : undefined;
+}
+
+/** The player's 36-slot inventory container, or undefined when unavailable. */
+function playerInventoryContainer(player: Player): Container | undefined {
+  try {
+    const component = player.getComponent("minecraft:inventory");
+    return component?.container;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Safe `Container.getItem` for a candidate slot. */
+function readContainerItem(
+  container: Container,
+  slot: number,
+): ItemStack | undefined {
+  try {
+    return container.getItem(slot);
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when `item` is exactly the type and amount the event reported. */
+function sameTypeAndAmount(
+  item: ItemStack | undefined,
+  expected: ItemStack | undefined,
+): boolean {
+  return (
+    stackType(item) !== undefined &&
+    stackType(item) === stackType(expected) &&
+    stackAmount(item) === stackAmount(expected)
+  );
+}
+
+/** True when two stacks describe the same item content (undefined == empty). */
+function sameItemContent(
+  left: ItemStack | undefined,
+  right: ItemStack | undefined,
+): boolean {
+  const leftType = stackType(left);
+  const rightType = stackType(right);
+  if (leftType === undefined || rightType === undefined) {
+    return leftType === undefined && rightType === undefined;
+  }
+  return leftType === rightType && stackAmount(left) === stackAmount(right);
+}
+
+/** Windows whose screen can emit a move the guard must reconcile. */
+const itemGuardWindows = new Set<Window>();
+
+const playerInventoryChangeState = afterEventState();
+const playerCursorGrabState = afterEventState();
+const playerCursorReleaseState = afterEventState();
+const entityItemDropState = afterEventState();
+
+/**
+ * Installs the player-side after-event subscriptions the guard reconciles
+ * against, once for the whole module. A missing signal is latched off like the
+ * lifecycle events: Windows still open and restore container slots, only the
+ * matching player-side revert is skipped.
+ */
+function ensureItemGuardSubscriptions(): void {
+  ensureAfterEventSubscription(
+    playerInventoryChangeState,
+    "playerInventoryItemChange",
+    "item moves through the screen will not be reverted",
+    (event) => {
+      for (const window of [...itemGuardWindows]) {
+        try {
+          window._onViewerInventoryChange(
+            event as PlayerInventoryItemChangeAfterEvent,
+          );
+        } catch (error) {
+          console.error(
+            "InvUI: reconciling a player inventory change against the screen item guard failed.",
+            error,
+          );
+        }
+      }
+    },
+  );
+  ensureAfterEventSubscription(
+    playerCursorGrabState,
+    "playerCursorItemGrab",
+    "items taken to the cursor through the screen will not be removed",
+    (event) => {
+      for (const window of [...itemGuardWindows]) {
+        try {
+          window._onViewerCursorGrab(event as PlayerCursorItemGrabAfterEvent);
+        } catch (error) {
+          console.error(
+            "InvUI: reconciling a cursor grab against the screen item guard failed.",
+            error,
+          );
+        }
+      }
+    },
+  );
+  ensureAfterEventSubscription(
+    playerCursorReleaseState,
+    "playerCursorItemRelease",
+    "items placed from the cursor into the screen will not be returned",
+    (event) => {
+      for (const window of [...itemGuardWindows]) {
+        try {
+          window._onViewerCursorRelease(
+            event as PlayerCursorItemReleaseAfterEvent,
+          );
+        } catch (error) {
+          console.error(
+            "InvUI: reconciling a cursor release against the screen item guard failed.",
+            error,
+          );
+        }
+      }
+    },
+  );
+  ensureAfterEventSubscription(
+    entityItemDropState,
+    "entityItemDrop",
+    "items dropped from the screen will not be removed",
+    (event) => {
+      for (const window of [...itemGuardWindows]) {
+        try {
+          window._onViewerItemDrop(event as EntityItemDropAfterEvent);
+        } catch (error) {
+          console.error(
+            "InvUI: reconciling an item drop against the screen item guard failed.",
+            error,
+          );
+        }
+      }
+    },
+  );
 }
 
 let defaultStateManager: StateManager | undefined;
@@ -1363,6 +1671,23 @@ export class Window {
   #containerEventUnsubscribers = new Map<VirtualContainer, Array<() => void>>();
   /** Set once `openContainer` has been called, before the screen may emit events. */
   #screenRequested = false;
+  /**
+   * Item changes of this Window's own container through the screen, waiting for
+   * the player-side change they caused to be reconciled on the next tick.
+   */
+  #screenChanges: ScreenItemChange[] = [];
+  /** Player inventory changes recorded for the current reconciliation. */
+  #playerChanges: PlayerSlotChangeRecord[] = [];
+  /** Cursor grab/release events recorded for the current reconciliation. */
+  #cursorChanges: CursorItemChangeRecord[] = [];
+  /** Item-drop events recorded for the current reconciliation. */
+  #dropChanges: DroppedItemChangeRecord[] = [];
+  /** A reconciliation is queued for the next game tick. */
+  #guardReconcileQueued = false;
+  /** Invalidates a reconciliation queued before a close/reopen. */
+  #guardReconcileToken = 0;
+  /** True while the guard writes to the player's inventory/cursor. */
+  #applyingGuard = false;
   /** Set when an item change through the screen must not be rendered over. */
   #renderingHalted = false;
   /** Per-slot render tokens so an older async provider cannot overwrite a newer result. */
@@ -3204,14 +3529,15 @@ export class Window {
   }
 
   /**
-   * A player changed the container through the screen. This is not a click and
-   * the previous item is not restored: report the danger, stop rendering (so a
-   * late provider cannot write over the changed slot), and request close.
+   * A player changed the container through the screen. This is not a click:
+   * restore the slot from the event's `beforeItemStack` and reconcile the item
+   * the player gained (or placed) on the next tick. The change is not reported
+   * when the restore succeeds; only a container write that throws fails closed.
    *
    * The `opening` status is covered too: `openContainer` may dispatch the event
    * synchronously, before `open()` sets `open`. Dropping that event would let
    * the following render pass put the item the player already took back into
-   * the container (a duplicate), so it fails closed like an open one.
+   * the container (a duplicate), so it is handled like an open one.
    */
   #onContainerItemChange(
     generation: number,
@@ -3234,13 +3560,718 @@ export class Window {
       this.#writeCache?.invalidate();
       return;
     }
-    this.#report(new WindowItemChangeDangerError(event.slot), "itemChange", event.slot);
-    // The error handler may have closed and reopened the Window; this event
-    // still belongs to the previous generation and must not close the new one.
-    if (generation !== this.#generation) {
+    if (!("beforeItemStack" in event)) {
+      // An adapter that cannot describe the previous item leaves nothing to
+      // restore with; fall back to failing closed instead of clearing a slot
+      // that may have shown an item.
+      this.#report(new WindowItemChangeDangerError(event.slot), "itemChange", event.slot);
+      if (generation !== this.#generation) {
+        return;
+      }
+      this.#stopRendering();
+      this.#performClose("ServerClosed", true);
       return;
     }
-    this.#performClose("ServerClosed", true);
+    this.#recordScreenItemChange(event.beforeItemStack, event.itemStack);
+    if (!this.#restoreScreenSlot(generation, container, event.slot, event.beforeItemStack)) {
+      return;
+    }
+    this.#queueGuardReconcile();
+  }
+
+  /** Split one container change into the item types the screen lost or gained. */
+  #recordScreenItemChange(
+    before: ItemStack | undefined,
+    after: ItemStack | undefined,
+  ): void {
+    const beforeType = stackType(before);
+    const afterType = stackType(after);
+    if (beforeType !== undefined && beforeType === afterType) {
+      const lost = stackAmount(before) - stackAmount(after);
+      if (lost > 0) {
+        this.#screenChanges.push({ kind: "take", typeId: beforeType, remaining: lost });
+      } else if (lost < 0) {
+        this.#screenChanges.push({
+          kind: "placement",
+          typeId: afterType,
+          remaining: -lost,
+        });
+      }
+      return;
+    }
+    if (beforeType !== undefined) {
+      this.#screenChanges.push({
+        kind: "take",
+        typeId: beforeType,
+        remaining: stackAmount(before),
+      });
+    }
+    if (afterType !== undefined) {
+      this.#screenChanges.push({
+        kind: "placement",
+        typeId: afterType,
+        remaining: stackAmount(after),
+      });
+    }
+  }
+
+  /**
+   * Write the slot's previous stack back through the screen change. Script
+   * writes do not raise `virtualContainerItemChange`, so this cannot re-enter
+   * the handler. Returns false when the Window failed closed on a throwing
+   * write; the caller then stops.
+   */
+  #restoreScreenSlot(
+    generation: number,
+    container: VirtualContainer,
+    physicalSlot: number,
+    before: ItemStack | undefined,
+  ): boolean {
+    // The slot no longer matches what the cache believes; a later render must
+    // not skip it.
+    this.#writeCache?.invalidate(physicalSlot);
+    try {
+      container.setItem(physicalSlot, before);
+      return true;
+    } catch (error) {
+      // The error handler may have closed and reopened the Window; this event
+      // still belongs to the previous generation and must not close the new one.
+      if (generation !== this.#generation) {
+        this.#report(error, "itemChange", physicalSlot);
+        return false;
+      }
+      if (this.#status !== "opening" && this.#status !== "open") {
+        this.#report(error, "itemChange", physicalSlot);
+        return false;
+      }
+      this.#report(
+        new WindowItemChangeDangerError(physicalSlot, { cause: error }),
+        "itemChange",
+        physicalSlot,
+      );
+      if (generation === this.#generation) {
+        this.#stopRendering();
+        this.#performClose("ServerClosed", true);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Queue one reconciliation for the next game tick. `system.run` runs after
+   * the current tick's events, so both the container event and the player-side
+   * event it caused are recorded regardless of delivery order. Without a
+   * scheduler (a test double) the pass runs immediately and only sees what has
+   * arrived so far.
+   */
+  #queueGuardReconcile(): void {
+    if (this.#guardReconcileQueued) {
+      return;
+    }
+    this.#guardReconcileQueued = true;
+    const token = ++this.#guardReconcileToken;
+    const run = (): void => {
+      if (token !== this.#guardReconcileToken || !this.#guardReconcileQueued) {
+        return;
+      }
+      this.#guardReconcileQueued = false;
+      this.#reconcileScreenChanges();
+    };
+    const gameSystem: typeof server.system | undefined = server.system;
+    if (gameSystem && typeof gameSystem.run === "function") {
+      try {
+        gameSystem.run(run);
+        return;
+      } catch {
+        // A broken scheduler must not leave the guard pending forever.
+      }
+    }
+    run();
+  }
+
+  /**
+   * Pair the recorded container changes with the player-side changes and undo
+   * the player side. Only the amount still unmatched is considered, so a take
+   * split over several inventory slots (or a stack swap) is not over-reverted.
+   * A change that no player-side event explains is forgotten; the container
+   * slot is already restored.
+   */
+  #reconcileScreenChanges(): void {
+    const screenChanges = this.#screenChanges;
+    const playerChanges = this.#playerChanges;
+    const cursorChanges = this.#cursorChanges;
+    const dropChanges = this.#dropChanges;
+    this.#screenChanges = [];
+    this.#playerChanges = [];
+    this.#cursorChanges = [];
+    this.#dropChanges = [];
+    if (screenChanges.length === 0) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    const container = playerInventoryContainer(this.viewer);
+    const cursor = this.#cursorInventory();
+    if (!container && !cursor) {
+      return;
+    }
+    const netScreenChanges = this.#collapseScreenChanges(screenChanges);
+    const netPlayerChanges = this.#collapsePlayerChanges(playerChanges);
+    const netCursorChanges = this.#collapseCursorChanges(cursorChanges);
+    this.#applyingGuard = true;
+    try {
+      for (const screenChange of netScreenChanges) {
+        if (screenChange.kind === "take") {
+          this.#revertGainedByPlayer(
+            screenChange,
+            container,
+            cursor,
+            netPlayerChanges,
+            netCursorChanges,
+            dropChanges,
+          );
+        } else {
+          this.#revertPlacedByPlayer(
+            screenChange,
+            container,
+            cursor,
+            netPlayerChanges,
+            netCursorChanges,
+          );
+        }
+      }
+    } finally {
+      this.#applyingGuard = false;
+    }
+  }
+
+  /**
+   * Cancel screen changes that undo each other in the same batch (a take
+   * followed by putting the same amount back) and subtract partial opposites.
+   * What remains is the net item flow, which is what the player-side changes
+   * must explain; without this, a take-and-put-back would revert both sides and
+   * duplicate the item.
+   */
+  #collapseScreenChanges(changes: readonly ScreenItemChange[]): ScreenItemChange[] {
+    const net: ScreenItemChange[] = [];
+    for (const change of changes) {
+      if (change.remaining <= 0) {
+        continue;
+      }
+      const oppositeKind = change.kind === "take" ? "placement" : "take";
+      const other = net.find(
+        (candidate) =>
+          candidate.kind === oppositeKind &&
+          candidate.typeId === change.typeId &&
+          candidate.remaining > 0,
+      );
+      if (!other) {
+        net.push({ ...change });
+        continue;
+      }
+      const amount = Math.min(other.remaining, change.remaining);
+      other.remaining -= amount;
+      const leftover = change.remaining - amount;
+      if (leftover > 0) {
+        net.push({
+          kind: change.kind,
+          typeId: change.typeId,
+          remaining: leftover,
+        });
+      }
+    }
+    return net.filter((change) => change.remaining > 0);
+  }
+
+  /**
+   * Merge repeated changes of one inventory slot into its first `before` and
+   * last `after`. A gain followed by a loss of the same item is a no-op and is
+   * dropped; two separate records would otherwise be reverted twice, writing
+   * the intermediate stack back as a duplicate.
+   */
+  #collapsePlayerChanges(changes: readonly PlayerSlotChangeRecord[]): PlayerSlotChangeRecord[] {
+    const merged: PlayerSlotChangeRecord[] = [];
+    const bySlot = new Map<string, PlayerSlotChangeRecord>();
+    for (const change of changes) {
+      const key = `${change.inventoryType}:${change.slot}`;
+      const existing = bySlot.get(key);
+      if (existing) {
+        existing.after = change.after;
+        continue;
+      }
+      const record: PlayerSlotChangeRecord = {
+        inventoryType: change.inventoryType,
+        slot: change.slot,
+        before: change.before,
+        after: change.after,
+        matchedGain: false,
+        matchedLoss: false,
+      };
+      bySlot.set(key, record);
+      merged.push(record);
+    }
+    return merged.filter((change) => !sameItemContent(change.before, change.after));
+  }
+
+  /**
+   * Pair a cursor grab with a later release of the same item (and the reverse)
+   * so a take-and-put-back is not treated as both a take and a placement.
+   */
+  #collapseCursorChanges(changes: readonly CursorItemChangeRecord[]): CursorItemChangeRecord[] {
+    const net: CursorItemChangeRecord[] = [];
+    for (const change of changes) {
+      const oppositeKind = change.kind === "grab" ? "release" : "grab";
+      const match = net.findIndex(
+        (candidate) =>
+          candidate.kind === oppositeKind &&
+          sameItemContent(candidate.item, change.item),
+      );
+      if (match >= 0) {
+        net.splice(match, 1);
+        continue;
+      }
+      net.push({ kind: change.kind, item: change.item, matched: false });
+    }
+    return net;
+  }
+
+  /**
+   * Remove what the screen lost from an inventory slot, from the cursor, or
+   * from an item entity the viewer dropped straight from the screen.
+   */
+  #revertGainedByPlayer(
+    screenChange: ScreenItemChange,
+    container: Container | undefined,
+    cursor: PlayerCursorInventoryComponent | undefined,
+    playerChanges: readonly PlayerSlotChangeRecord[],
+    cursorChanges: readonly CursorItemChangeRecord[],
+    dropChanges: readonly DroppedItemChangeRecord[],
+  ): void {
+    for (const change of playerChanges) {
+      if (screenChange.remaining <= 0) {
+        return;
+      }
+      if (change.matchedGain) {
+        continue;
+      }
+      const gained = gainedBy(change);
+      if (
+        !gained ||
+        gained.typeId !== screenChange.typeId ||
+        gained.amount > screenChange.remaining
+      ) {
+        continue;
+      }
+      if (!container || !this.#revertPlayerSlot(container, change)) {
+        continue;
+      }
+      change.matchedGain = true;
+      screenChange.remaining -= gained.amount;
+    }
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    if (cursor) {
+      for (const change of cursorChanges) {
+        if (screenChange.remaining <= 0) {
+          return;
+        }
+        if (change.kind !== "grab" || change.matched) {
+          continue;
+        }
+        if (
+          stackType(change.item) !== screenChange.typeId ||
+          stackAmount(change.item) > screenChange.remaining
+        ) {
+          continue;
+        }
+        if (!this.#clearCursorItem(cursor, change.item)) {
+          continue;
+        }
+        change.matched = true;
+        screenChange.remaining -= stackAmount(change.item);
+      }
+    }
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    for (const change of dropChanges) {
+      if (screenChange.remaining <= 0) {
+        return;
+      }
+      if (change.matched) {
+        continue;
+      }
+      if (stackType(change.item) !== screenChange.typeId) {
+        continue;
+      }
+      const amount = stackAmount(change.item);
+      if (amount <= 0 || amount > screenChange.remaining) {
+        continue;
+      }
+      if (!this.#removeDroppedItem(change)) {
+        continue;
+      }
+      change.matched = true;
+      screenChange.remaining -= amount;
+    }
+  }
+
+  /**
+   * Remove the item entity the viewer dropped through the screen, when it is
+   * still there with the stack the event reported. A gone or changed entity is
+   * left alone: the pickup or a merge is then explained by another event.
+   */
+  #removeDroppedItem(change: DroppedItemChangeRecord): boolean {
+    try {
+      if (!change.entity.isValid) {
+        return false;
+      }
+      const component = change.entity.getComponent("minecraft:item");
+      if (!component || !sameItemContent(component.itemStack, change.item)) {
+        return false;
+      }
+      change.entity.remove();
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+  /** Return what the player placed into the screen to their inventory/cursor. */
+  #revertPlacedByPlayer(
+    screenChange: ScreenItemChange,
+    container: Container | undefined,
+    cursor: PlayerCursorInventoryComponent | undefined,
+    playerChanges: readonly PlayerSlotChangeRecord[],
+    cursorChanges: readonly CursorItemChangeRecord[],
+  ): void {
+    for (const change of playerChanges) {
+      if (screenChange.remaining <= 0) {
+        return;
+      }
+      if (change.matchedLoss) {
+        continue;
+      }
+      const lost = lostBy(change);
+      if (
+        !lost ||
+        lost.typeId !== screenChange.typeId ||
+        lost.amount > screenChange.remaining
+      ) {
+        continue;
+      }
+      if (!container || !this.#revertPlayerSlot(container, change)) {
+        continue;
+      }
+      change.matchedLoss = true;
+      screenChange.remaining -= lost.amount;
+    }
+    if (screenChange.remaining <= 0 || !cursor) {
+      return;
+    }
+    for (const change of cursorChanges) {
+      if (screenChange.remaining <= 0) {
+        return;
+      }
+      if (change.kind !== "release" || change.matched) {
+        continue;
+      }
+      if (
+        stackType(change.item) !== screenChange.typeId ||
+        stackAmount(change.item) > screenChange.remaining
+      ) {
+        continue;
+      }
+      if (!container || !this.#returnToInventory(container, change.item)) {
+        continue;
+      }
+      change.matched = true;
+      screenChange.remaining -= stackAmount(change.item);
+    }
+  }
+
+  /**
+   * The cursor inventory component, or undefined when the API is absent (the
+   * cursor is not used on touch input, so a failure only skips that branch).
+   */
+  #cursorInventory(): PlayerCursorInventoryComponent | undefined {
+    try {
+      return this.viewer.getComponent("minecraft:cursor_inventory");
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Restore one changed player inventory slot to its `beforeItemStack`.
+   *
+   * The event's `slot` is not documented to be the container index, so the
+   * write is made only to a candidate the live container confirms still holds
+   * the event's `itemStack`. When two candidates match, or none does, nothing
+   * is written: refusing to guess is safer than deleting a player's own stack.
+   */
+  #revertPlayerSlot(container: Container, change: PlayerSlotChangeRecord): boolean {
+    const expected = change.after;
+    if (!expected) {
+      return false;
+    }
+    const slot = this.#resolvePlayerSlot(container, change);
+    if (slot === undefined) {
+      return false;
+    }
+    try {
+      container.setItem(slot, change.before);
+      return true;
+    } catch (error) {
+      // The duplicate stays, but the screen content is consistent; closing
+      // would not remove it, so report and keep the Window usable.
+      this.#report(error, "itemChange", slot);
+      return false;
+    }
+  }
+
+  /** Map the event's slot to a container index, confirmed by current content. */
+  #resolvePlayerSlot(
+    container: Container,
+    change: PlayerSlotChangeRecord,
+  ): number | undefined {
+    const expected = change.after;
+    if (!expected) {
+      return undefined;
+    }
+    const learned = playerSlotOffsets.get(change.inventoryType);
+    const candidates: number[] = [];
+    const add = (slot: number): void => {
+      if (
+        Number.isInteger(slot) &&
+        slot >= 0 &&
+        slot < container.size &&
+        !candidates.includes(slot)
+      ) {
+        candidates.push(slot);
+      }
+    };
+    if (learned !== undefined) {
+      add(change.slot + learned);
+    }
+    add(change.slot);
+    // The main inventory may be reported relative to the 27-slot area instead
+    // of as an absolute container index. The hotbar is 0..8 in either
+    // convention, so only the main inventory gets the second candidate.
+    if (change.inventoryType !== "Hotbar") {
+      add(change.slot + 9);
+    }
+    const matches = candidates.filter((slot) =>
+      sameTypeAndAmount(readContainerItem(container, slot), expected),
+    );
+    if (matches.length !== 1) {
+      return undefined;
+    }
+    playerSlotOffsets.set(change.inventoryType, matches[0] - change.slot);
+    return matches[0];
+  }
+
+  /** Clear the cursor when it still holds exactly the item the event reports. */
+  #clearCursorItem(
+    cursor: PlayerCursorInventoryComponent,
+    expected: ItemStack,
+  ): boolean {
+    let current: ItemStack | undefined;
+    try {
+      current = cursor.item;
+    } catch {
+      return false;
+    }
+    if (!sameTypeAndAmount(current, expected)) {
+      return false;
+    }
+    try {
+      cursor.clear();
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+  /** Give a cursor-released item back to the player after the slot was restored. */
+  #returnToInventory(container: Container, item: ItemStack): boolean {
+    try {
+      const leftover = container.addItem(item);
+      if (leftover !== undefined) {
+        // The inventory is full: the item cannot be returned, but it must not
+        // stay behind a screen slot that was already restored.
+        this.#report(
+          new Error("InvUI: cannot return the item placed into the screen; the inventory is full."),
+          "itemChange",
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+  /**
+   * Keep the recorded player-side changes bounded: they only matter for the
+   * single reconciliation their tick schedules, and a Window whose container is
+   * never touched still sees every inventory change of its viewer.
+   */
+  #pruneGuardRecords(): void {
+    const drop = (length: number, limit: number): number =>
+      length <= limit ? 0 : length - limit;
+    const playerDrop = drop(this.#playerChanges.length, MAX_SCREEN_GUARD_RECORDS);
+    if (playerDrop > 0) {
+      this.#playerChanges.splice(0, playerDrop);
+    }
+    const cursorDrop = drop(this.#cursorChanges.length, MAX_SCREEN_GUARD_RECORDS);
+    if (cursorDrop > 0) {
+      this.#cursorChanges.splice(0, cursorDrop);
+    }
+    const entityDrop = drop(this.#dropChanges.length, MAX_SCREEN_GUARD_RECORDS);
+    if (entityDrop > 0) {
+      this.#dropChanges.splice(0, entityDrop);
+    }
+  }
+
+  /**
+   * Internal: one `playerInventoryItemChange` of any player; the viewer filter
+   * and the "screen is open" check happen here. Only recorded, never acted on:
+   * the reconciliation pass decides whether a screen change explains it.
+   */
+  _onViewerInventoryChange(event: PlayerInventoryItemChangeAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    if (!isSamePlayer(event.player, this.viewer)) {
+      return;
+    }
+    let inventoryType: PlayerInventoryType;
+    let slot: number;
+    let before: ItemStack | undefined;
+    let after: ItemStack | undefined;
+    try {
+      inventoryType = event.inventoryType;
+      slot = event.slot;
+      before = event.beforeItemStack;
+      after = event.itemStack;
+    } catch {
+      // The event may expose an invalid player/stack.
+      return;
+    }
+    if (!Number.isInteger(slot) || slot < 0) {
+      return;
+    }
+    if (stackType(before) === undefined && stackType(after) === undefined) {
+      return;
+    }
+    this.#playerChanges.push({
+      inventoryType,
+      slot,
+      before,
+      after,
+      matchedGain: false,
+      matchedLoss: false,
+    });
+    this.#pruneGuardRecords();
+  }
+
+  /** Internal: one `playerCursorItemGrab`; see {@link _onViewerInventoryChange}. */
+  _onViewerCursorGrab(event: PlayerCursorItemGrabAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    if (!isSamePlayer(event.player, this.viewer)) {
+      return;
+    }
+    let item: ItemStack;
+    try {
+      item = event.item;
+    } catch {
+      return;
+    }
+    if (stackType(item) === undefined) {
+      return;
+    }
+    this.#cursorChanges.push({ kind: "grab", item, matched: false });
+    this.#pruneGuardRecords();
+  }
+
+  /** Internal: one `playerCursorItemRelease`; see {@link _onViewerInventoryChange}. */
+  _onViewerCursorRelease(event: PlayerCursorItemReleaseAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    if (!isSamePlayer(event.player, this.viewer)) {
+      return;
+    }
+    let item: ItemStack;
+    try {
+      item = event.item;
+    } catch {
+      return;
+    }
+    if (stackType(item) === undefined) {
+      return;
+    }
+    this.#cursorChanges.push({ kind: "release", item, matched: false });
+    this.#pruneGuardRecords();
+  }
+
+  /**
+   * Internal: one `entityItemDrop`. Records every item entity the viewer
+   * dropped so the reconciliation can remove the one that came out of the
+   * screen. Only the viewer's own drops are considered.
+   */
+  _onViewerItemDrop(event: EntityItemDropAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (this.#status !== "opening" && this.#status !== "open") {
+      return;
+    }
+    const viewerId = this.#viewerId ?? readId(this.viewer);
+    if (!viewerId) {
+      return;
+    }
+    let droppedBy: string | undefined;
+    let items: Entity[];
+    try {
+      droppedBy = event.entity?.id;
+      items = event.items;
+    } catch {
+      return;
+    }
+    if (droppedBy !== viewerId || !Array.isArray(items)) {
+      return;
+    }
+    for (const itemEntity of items) {
+      let item: ItemStack | undefined;
+      try {
+        item = itemEntity.getComponent("minecraft:item")?.itemStack;
+      } catch {
+        item = undefined;
+      }
+      if (!item || stackType(item) === undefined) {
+        continue;
+      }
+      this.#dropChanges.push({ entity: itemEntity, item, matched: false });
+    }
+    this.#pruneGuardRecords();
   }
 
   /**
@@ -3252,11 +4283,13 @@ export class Window {
    */
   #registerForLifecycleClose(): void {
     lifecycleWindows.add(this);
+    itemGuardWindows.add(this);
     ensurePlayerLeaveSubscription();
     ensureEntityDieSubscription();
     ensurePlayerDimensionChangeSubscription();
     ensurePlayerGameModeChangeSubscription();
     ensureShutdownSubscription();
+    ensureItemGuardSubscriptions();
 
     try {
       this.#viewerId = this.viewer.id;
@@ -4322,6 +5355,16 @@ export class Window {
     // afresh (with its own viewer id) instead of inheriting this teardown.
     forgetChatInputWindow(this);
     lifecycleWindows.delete(this);
+    itemGuardWindows.delete(this);
+    // A reconciliation queued for the old generation must not touch the
+    // player after a close/reopen; the token invalidates it.
+    this.#guardReconcileToken += 1;
+    this.#guardReconcileQueued = false;
+    this.#applyingGuard = false;
+    this.#screenChanges = [];
+    this.#playerChanges = [];
+    this.#cursorChanges = [];
+    this.#dropChanges = [];
 
     // Detach every handle before calling it. An adapter or element unsubscribe
     // may throw, and its error handler can close and reopen the Window: the
