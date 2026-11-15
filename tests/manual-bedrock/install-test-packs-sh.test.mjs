@@ -9,7 +9,7 @@
  * - com.mojang の既知候補検出と、引数 / MC_COMOJANG / 複数候補の番号選択
  * - 選択したパックだけを behavior_packs / resource_packs へ上書きコピーすること
  * - 取消・不正入力・ソース欠落では何も変更しないこと
- * - README が .bat (Windows) / .sh (Linux・macOS) を指すこと
+ * - README が .sh を指すこと
  *
  * 実機のパック読込・表示は検証しない。
  *
@@ -105,7 +105,7 @@ test('削除コマンドを持たない（rm を使わない）', () => {
   assert.doesNotMatch(sh, /\bfind\b[^\n]*-delete/);
 });
 
-test('全 7 パック（BP 2 / RP 5）を bat と同じコピー先で列挙する', () => {
+test('全 7 パック（BP 2 / RP 5）を所定のコピー先で列挙する', () => {
   for (const pack of PACKS) {
     assert.ok(sh.includes(`|${pack.kind}|${pack.src}|${pack.dst}`), `${pack.src} -> ${pack.dst} が一覧にない`);
     assert.ok(
@@ -141,21 +141,15 @@ test('ワールド選択・JSON 編集をしない', () => {
   assert.match(sh, /resource_packs/);
 });
 
-test('README は .bat (Windows) / .sh (Linux・macOS) を指す', () => {
+test('README は .sh を指し、削除済みの bat を指さない', () => {
   const readme = fs.readFileSync(readmePath, 'utf8');
-  assert.match(
-    readme,
-    /`install-test-packs\.bat` \(Windows\) \/ `install-test-packs\.sh` \(Linux・macOS\)/,
-  );
-  assert.doesNotMatch(readme, /install-to-world\.bat/);
+  assert.match(readme, /`install-test-packs\.sh`/);
+  assert.doesNotMatch(readme, /install-test-packs\.bat|install-to-world\.bat/);
 
   const probeReadme = fs.readFileSync(probeReadmePath, 'utf8');
-  assert.match(
-    probeReadme,
-    /`\.\.\/install-test-packs\.bat` \(Windows\) \/ `\.\.\/install-test-packs\.sh` \(Linux・macOS\)/,
-  );
-  assert.match(probeReadme, /bat[^\n]*実機未検証/);
-  assert.doesNotMatch(probeReadme, /install-to-world\.bat/);
+  assert.match(probeReadme, /`\.\.\/install-test-packs\.sh`/);
+  assert.match(probeReadme, /実機未検証/);
+  assert.doesNotMatch(probeReadme, /install-test-packs\.bat|install-to-world\.bat/);
 });
 
 // --- 実行チェック（偽 com.mojang。Minecraft は起動しない） ---------------------

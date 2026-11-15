@@ -19,7 +19,7 @@
 
 | パック | 何を見るか | 入れ方 |
 |---|---|---|
-| [`locked-click-probe/`](locked-click-probe/README.md) | ロックしたアイテムのクリックで通知が来るか（観測のみ） | `install-test-packs.bat` (Windows) / `install-test-packs.sh` (Linux・macOS) か `.mcpack` |
+| [`locked-click-probe/`](locked-click-probe/README.md) | ロックしたアイテムのクリックで通知が来るか（観測のみ） | `install-test-packs.sh` か `.mcpack` |
 | [`probe/`](probe/README.md) | `VirtualContainer` 単体の表示・close・itemChange | BP を配置（コア不要） |
 | [`chest-resource-pack/`](chest-resource-pack/README.md) | VirtualContainer がチェスト画面を使うか | RP を単独で有効化 |
 | [`data-driven-resource-pack/`](data-driven-resource-pack/README.md) | `data_driven_container` 画面を使うか | RP を単独で有効化 |

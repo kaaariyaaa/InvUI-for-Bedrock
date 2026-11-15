@@ -7,7 +7,7 @@ set -u
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GLOBAL=''
 
-# 番号|種別|このスクリプト隣のコピー元|コピー先フォルダ名（bat と同じ）
+# 番号|種別|このスクリプト隣のコピー元|コピー先フォルダ名
 PACKS=(
   '1|BP|probe/behavior_pack|invui_probe'
   '2|BP|locked-click-probe/behavior_pack|locked_click_probe'
