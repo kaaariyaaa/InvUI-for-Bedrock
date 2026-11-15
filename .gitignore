@@ -11,7 +11,6 @@ dist/
 .DS_Store
 *.log
 
-# Local-only configuration and example type-check files
+# Local-only configuration
 .env.local
 .env.*.local
-tsconfig.examples-check.tmp.json

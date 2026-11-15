@@ -1,29 +1,27 @@
 # InvUI for Bedrock
 
-Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API を参考にした、Minecraft Bedrock Edition Script API 向けの TypeScript GUI ライブラリです。
+A TypeScript GUI library for Minecraft Bedrock Edition Script API, based on the design and public API of [InvUI for Java Edition](https://github.com/NichtStudioCode/InvUI).
 
 > [!WARNING]
-> **ベータ版・実機未検証**
+> **Beta — not tested in Minecraft.**
 >
-> バージョンは `0.1.0-beta.1` で、npm には未公開です。画面表示には Bedrock Preview/Beta の Experimental API `VirtualContainer` を使用します。
+> Version `0.1.0-beta.1` is not published to npm. This library uses the experimental `VirtualContainer` API in Minecraft Bedrock Preview/Beta. `Window.open()` attempts to open a real screen, but the game-side behavior has not been verified.
 >
-> `Window.open()` は既定で実画面を開こうとしますが、Minecraft 実機では未検証です。クリック通知を自動生成する UI や JSON UI 連携はありません。アイテムの取り出しは事後復元のみのため、**複製・消失の危険があります**。実機で試す場合は使い捨てワールドだけを使用してください。
+> No bundled UI generates click notifications, and JSON UI integration is not provided. Item changes are restored only *after* they occur, which can cause item duplication or loss. **Only use disposable test worlds. Do not use this library in production worlds.**
 
-## 機能
+## Features
 
-- `Structure`、`Gui` による通常・ページ・スクロール・タブ形式のレイアウト
-- `Item` / `ItemBuilder` による表示要素とクリックハンドラーの定義
-- `Window` の画面管理、GUI の差し替え、状態に応じた表示更新
-- `StateManager` によるプレイヤー別・共有状態と任意の永続化
-- `VirtualInventory` と読み取り専用の `PlayerInventory`
+- Normal, paged, scrolling, and tabbed layouts with `Structure` and `Gui`
+- Item providers, display metadata, and click handlers with `Item` and `ItemBuilder`
+- Window lifecycle, state-aware rendering, and GUI replacement
+- Player-specific or shared state, with optional persistence and migrations
+- In-memory inventories and read-only player inventory access
 
-コアの計算・状態管理は Node.js 上のモック環境で確認しています。ゲーム内での動作は別途検証が必要です。`InventoryLink.moveTo()` は未実装で、アイテム移動はできません。詳しくは [実装状況と制約](docs/status.md) を参照してください。
+The layout and state-management core has been checked using Node.js mocks, **not on a Minecraft client**. `InventoryLink.moveTo()` is not implemented.
 
-## 導入とビルド
+## Build
 
-必要環境は **Node.js 24** と `@minecraft/server@2.13.0-beta.1.26.70-preview.24`（開発・peer 依存の固定バージョン）です。Minecraft 本体の対応バージョンは実機未確認です。
-
-npm に未公開のため、現在はソースを取得してビルドします。
+Requires **Node.js 24** and the pinned `@minecraft/server@2.13.0-beta.1.26.70-preview.24` development/peer dependency.
 
 ```bash
 git clone https://github.com/kaaariyaaa/InvUI-for-Bedrock.git
@@ -32,11 +30,11 @@ npm ci
 npm run build
 ```
 
-`dist/` に ESM と TypeScript の型定義を生成します。ローカルパッケージとして使う場合は `npm pack` で tarball を作成し、アドオン側で導入してください。`@minecraft/server` はアドオンのバンドルから外部化する必要があります。
+The build generates ESM JavaScript and TypeScript declarations in `dist/`. The package is currently private and unpublished. You can use `npm pack` to create a local archive for an add-on project. Keep `@minecraft/server` external when bundling.
 
-## API の例
+## Basic API
 
-次は GUI のレイアウトを作る例です。ゲーム内での画面表示やクリック動作を保証する例ではありません。
+This example constructs a layout; it does not demonstrate a tested in-game screen.
 
 ```ts
 import { Gui, Item, ItemBuilder } from "invui-bedrock";
@@ -49,26 +47,24 @@ const gui = Gui.normal({
 });
 ```
 
-`Window` を使う例は [examples/usage-sketch.ts](examples/usage-sketch.ts) にあります。スケッチはビルド・実機テストの対象外です。
+See the [API reference](docs/api.md) for the public classes, types, builders, and method signatures.
 
-## CLI
+## Behavior Pack inspection
 
-`bin/cli.js` の `init` は Behavior Pack の設定を**読み取り専用で検査**します。ファイルを生成・修正しません。
+The bundled CLI inspects an existing Behavior Pack **without modifying files**:
 
 ```bash
 node bin/cli.js init --behavior-pack ./behavior_pack
 ```
 
-`--json`、`--help`、`--version` にも対応しています。
+It also accepts `--json`, `--help`, and `--version`.
 
-## ドキュメント
+## Documentation
 
-- [実装状況と制約](docs/status.md) — 実装済みの機能、未完成点、実機検証
-- [実装の詳細](docs/implementation.md) — 差分描画、状態管理、インベントリ
-- [開発・ビルド](docs/development.md) — 開発環境、パッケージ化、CLI
-- [全体設計書](docs/design.md) — 設計方針と今後の検証対象
-- [利用スケッチ](examples/README.md) — 公開 API を使った例と注意点
+- [API reference](docs/api.md) — public API and usage
+- [Status and limitations](docs/status.md) — implemented functionality, missing pieces, and risks
+- [Development](docs/development.md) — local setup, packaging, and CLI
 
-## ライセンス
+## License
 
-MIT。詳細は [LICENSE](LICENSE) を参照してください。
+[MIT](LICENSE).

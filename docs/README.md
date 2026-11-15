@@ -1,9 +1,7 @@
-# ドキュメント
+# Documentation
 
-- [実装状況と制約](status.md): 実装済みの機能、未完成点、実機検証と安全性
-- [実装の詳細](implementation.md): 表示更新、GUI の差し替え、永続状態、インベントリ
-- [開発・ビルド](development.md): 開発環境、ビルド、ローカル配布、CLI
-- [全体設計書](design.md): 構想と検証前の設計（現行実装の説明ではありません）
-- [利用スケッチ](../examples/README.md): API の使用イメージ
+- [API reference](api.md) — public TypeScript APIs exported from `src/index.ts`
+- [Status and limitations](status.md) — current implementation, missing functionality, and safety
+- [Development](development.md) — setup, build, packaging, and the inspection CLI
 
-最初に [ルート README](../README.md) の注意事項を確認してください。設計書と実装状況が異なる場合は、実装状況と実コードを優先してください。
+Start with the [project README](../README.md). In-game behavior has not been verified.
