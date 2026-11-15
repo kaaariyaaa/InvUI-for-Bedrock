@@ -95,7 +95,7 @@ resource_pack/
 送る形は **`!invui:<session-id>:<layout-generation>:<slot>:<sequence>`** です。`Window.id`（`window-N`）は使いません。
 
 - **session-id**: `Window` が `open()` の成功ごとに作り直す `_inputSessionId` を 1 フィールド目に入れます。
-- **layout-generation**: 通知を生成した時点のクリック可能レイアウトの世代 `_inputLayoutGeneration` を 2 フィールド目に入れます。open ごとに `0` から始まり、ページ・行・タブ・スロット要素の変更で進みます。**ページ変更前に控えた値のまま送ると、変更後に届いた通知は `stale-layout-generation` として拒否されます。**
+- **layout-generation**: 通知を生成した時点のクリック可能レイアウトの世代 `_inputLayoutGeneration` を 2 フィールド目に入れます。open ごとに `0` から始まり、ページ・行・タブ・スロット要素の変更で進みます。**ページ変更前に控えた値のまま送ると、変更後に届いた通知は `stale-layout-generation` として拒否されます。** さらに、世代が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは入力ゲートが closed で、通知は button が無いものとして拒否されハンドラーは実行されません。`placeholder` を指定しない非同期 provider が未解決の間、Container 再生成中（`setTitle()` / サイズ変更 / `setUpperGui()`）、provider または `setItem()` が失敗したスロットも同じゲートで閉じます（失敗スロットは後で書き込みが成功するまで button にならない）。close・再オープンでゲートはリセットされます。Node.js テストのみで実機未検証です。
 - **slot**: 現在のレイアウトで button mode の論理スロット（0〜53）へ合わせます。
 - **sequence**: 同じ session 内で厳密に増やします（最初の受理は `1`）。
 
@@ -116,8 +116,8 @@ resource_pack/
    ```
 
 2. 表示された session-id（形は `session-<36進の時刻>-<36進の連番>-<36進6文字>`。毎回変わります）と layout-generation（open 直後は `0`）を控えます。
-3. プローブへ `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を手入力して送信します（`!invui:session-ab12cd-1-f3k9xz:0:0:1` のような形。この例の値自体は無効です）。
-4. **`open()` のたびに session-id は変わり、layout-generation は `0` に戻ります。** 開き直したら両方読み直してください。**ページ・行・タブ、または同じページのスロット要素が変わったら layout-generation も変わる**ため、送信前に読み直してください。古い値は `stale-layout-generation`、前の open の session は `session-mismatch`、画面を閉じたままなら `window-closed` として拒否されます。最初の `open()` 成功前の値は `undefined` です。
+3. プローブへ `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を手入力して送信します（`!invui:session-ab12cd-1-f3k9xz:0:0:1` のような形。この例の値自体は無効です）。**対象レイアウトのアイテムが画面に表示されてから送ってください。** ページ変更直後・`placeholder` を指定しない非同期 provider の未解決中・Container 再生成中は入力ゲートが closed で、送信してもハンドラーは実行されません。
+4. **`open()` のたびに session-id は変わり、layout-generation は `0` に戻ります。** 開き直したら両方読み直してください。**ページ・行・タブ、または同じページのスロット要素が変わったら layout-generation も変わる**ため、送信前に読み直してください。古い値は `stale-layout-generation`、前の open の session は `session-mismatch`、画面を閉じたままなら `window-closed` として拒否されます。最初の `open()` 成功前の値は `undefined` です。入力ゲートが closed の間に送った通知はハンドラーを実行しておらず sequence を消費しないため、アイテムが表示された後に同じ sequence で送り直せます（直前の受理から 100 ms の間隔は別途適用されます）。
 5. 通知は直前の受理から既定 100 ms 間隔（10 回/秒）に制限されます。100 ms 以内の連投は `rate-limited` として拒否され、クリックは実行されません（`open()` をまたいでも直前の受理時刻を引き継ぎます）。この間隔を変える公開 API はありません（`Window` の自動接続が内部既定値 `minIntervalMs: 100` を使うため、変えるには `src/window.ts` の配線を変更する必要があります）。
 
 両 getter はアンダースコア付きの内部扱い・互換保証なしです。取得手段はこの公開 getter だけで、**UI（JSON UI）から session-id / layout-generation を読む方法はありません**。値を取得できない場合はプローブでの送信は成立しないため、その時点で中止してください（取得できるふりの手順は記載しません）。自動送信も自動採番も実装していません。
@@ -298,7 +298,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 - **アイテム保護・入力抑制・画面終了処理は未完成**です。表示アイテムの取り出し、再描画による複製・消失、チャット送信の成否は未検証です。
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。
-- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id / layout-generation は開発者スクリプトが `Window._inputSessionId` / `Window._inputLayoutGeneration` を表示して取得します（JSON UI からは取得できません）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
+- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id / layout-generation は開発者スクリプトが `Window._inputSessionId` / `Window._inputLayoutGeneration` を表示して取得します（JSON UI からは取得できません）。**入力ゲート**: 世代が一致していても、描画完了前・`placeholder` を指定しない未解決 provider・Container 再生成中・失敗スロットは button として扱われず、通知は拒否されます（Node.js テストのみ、実機未検証）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
 - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**で、既定では未登録・未接続・CLI 対象外です。通常クリックを `button.drop_one` へ付け替えるため、**1 クリックごとにアイテムが 1 個ドロップされ得ます**（保護ではありません）。`button.drop_one` を通常クリックから発火させる書式と、オーバーレイが下の slot を対象にできるかは未検証です。サーバー側で itemChange をクリックとして処理する実装はなく、現行コアは itemChange を危険として close します。対象は `data_driven_container.desktop_panel` のみで、**同パネルを使う全画面に影響し得ます**。pocket は対象外です。既定の接続とは併用しないでください。
 - 既存 Resource Pack との競合をゼロにはできません。追加するファイルは最小限ですが、無影響を保証するものではありません。
 - `manifest.json` の UUID は固定のプレースホルダです。同じ内容のパックを複数入れると UUID が衝突し得ます。

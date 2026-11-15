@@ -11,7 +11,7 @@
 > - **itemChange の検出は保護ではありません。** 既定のアダプタは `world.afterEvents.virtualContainerItemChange` を購読し、画面からの変更を `Window` が `WindowItemChangeDangerError` としてエラーハンドラーへ通知し、再描画を停止して close を要求します。ただし `after` イベントなので変更はすでに起きており、取り消しも変更前への復元もできません。close の成否も未検証です。
 > - **raw probe とコアの試験は別物です。** [`probe/`](probe/README.md) の raw probe は InvUI コアもアダプタも使わず、`world.virtualContainerManager` から `VirtualContainer` を直接開くため、`VirtualContainer` 単体の表示・close reason・itemChange を確認できます（未実施）。一方、DISP 以降のコア試験は `Window.open()` 経由で、InvUI のレイアウト・描画・将来の保護を対象にします。**raw probe の結果をコアの合格に流用せず、その逆もしないでください。**
 > - **Resource Pack の画面接続は変更中で、適用可否は未検証です。** `resource_pack/ui/invui_connect.json` と `invui_connect_data_driven.json`（[`resource_pack/experimental/connect-data-driven/`](../../resource_pack/experimental/connect-data-driven/README.md)）が `data_driven_container` の `desktop_panel` / `pocket_panel` へ差し込む試験的接続で、作業ツリーの `ui/_ui_defs.json` はこれを登録済みです。接続は警告ラベルと `invui_probe_root` を `insert_front` で、**透明ブロッカー**（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込みます。ただし `VirtualContainer` を特定できないため、**そのパネルを使う全画面（通常のコンテナを含み得る）に適用され得ます**。接続が実際に効くか、ブロッカーが入力を遮断するか、適用範囲、通常チェストへの影響は未検証で、ファイル構成も変更中です。**試験時に実際の `_ui_defs.json` と導入ファイルを確認して記録し、「接続済み」「未接続」のどちらも既定事実として扱わないでください。**
-> - **`InventoryLink.moveTo()` は常に拒否されます**（`InventoryLinkMoveRejectedError`）。クリック入力を実機イベントへつなぐ仕組みも未提供です。
+> - **`InventoryLink.moveTo()` は常に拒否されます**（`InventoryLinkMoveRejectedError`）。クリック入力は、`Window` が `world.beforeEvents.chatSend` で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を受け取って `handleClick()` へ流す受信経路だけが自動接続されています（Node.js テスト済み・実機未検証）。UI 側がその通知を自動生成する実装はなく、通知は手入力で偽装できます。
 > - **実機での実験は使い捨てワールドだけで行ってください。** 本番ワールド・配布用ワールド・共有サーバーでは実行しないでください。
 > - [`button-send-resource-pack/`](button-send-resource-pack/README.md) は、クリック通知の候補である `button.send` を単独で観察する**実験用 Resource Pack（使い捨てワールド専用）**です。クリック通知は未検証であり、通知文字列を自動で設定する仕組みはなく、入力抑制・アイテム保護もありません。`chest-resource-pack/` や `data-driven-resource-pack/` など**他の Resource Pack との併用は禁止**です。このキットが存在することは、クリック通知の試験を実施済みという意味ではありません。
 > - [`edit-box-resource-pack/`](edit-box-resource-pack/README.md) は、入力欄（`edit_box`）と `button.send` の組み合わせを観察する**実験用 Resource Pack（使い捨てワールド専用）**です。**未検証**であり、`#message_text_box` と `always_listening` を使うため**チャット入力を奪い得ます**。バニラのチェストパネルを対象とするため**通常のチェストにも表示される可能性があり、移動が壊れたら即時中止**してください。**アイテム保護はありません。** `button-send-resource-pack/` など**他の Resource Pack との併用は禁止**です。導入だけで試験実施済みにはなりません。
@@ -148,7 +148,9 @@ JSON UI の上重ねだけでコンテナ側グリッドの操作を止められ
 
 ### D. クリック通知
 
-透明ボタン等の入力経路が利用できる場合に限り、通常クリックが Script API へ 1 回だけ届くか確認する。`button.send` → チャット通知は候補であり、採用確定ではありません。現行コアにはクリック入力を実機イベントへつなぐ仕組みがなく、JSON UI の画面接続も変更中・未検証です。接続を有効にしても、通知を解釈して `Window.handleClick()` へ渡す処理はコアにないため、この試験は入力ブリッジと UI を実装したテストビルドでのみ実施できます。既定接続の透明ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、クリック通知を送りません。チェスト画面で成立しない場合は不合格として記録し、別方式を検討する。
+透明ボタン等の入力経路が利用できる場合に限り、通常クリックが Script API へ 1 回だけ届くか確認する。`button.send` → チャット通知は候補であり、採用確定ではありません。ライブラリ側は `Window` が `world.beforeEvents.chatSend` で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を受け取り `handleClick()` へ流す受信経路だけを実装済みです（Node.js テスト済み・実機未検証）。UI 側が通知を自動生成する実装はなく、JSON UI の画面接続も変更中・未検証です。既定接続の透明ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、クリック通知を送りません。そのため、この試験は手入力プローブ（[`resource_pack/README.md`](../../resource_pack/README.md) の「手動・静的ペイロード送信プローブ」）または通知を生成するテストビルドでのみ実施できます。通知は手入力で偽装でき、sender id 以外は信用できません。チェスト画面で成立しない場合は不合格として記録し、別方式を検討する。
+
+**入力ゲート**: 通知の世代が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは、入力は受理されずハンドラーも実行されません（チャット経路は button が無いものとして拒否、`handleClick()` は `false`）。`placeholder` を指定しない非同期 provider が未解決の間は closed が続き（タイムアウトはない）、provider または `setItem()` が失敗したスロットは後で書き込みが成功するまで button になりません。Container 再生成（`setTitle()` / サイズ変更 / `setUpperGui()`）は swap から新しい画面が開くまで closed です。close・再オープンはゲートをリセットします。closed 中に拒否された通知はハンドラー未実行で sequence を消費しないため、アイテムが表示された後に同じ sequence で送り直せます（rate limit の 100 ms 間隔は別途適用）。これらは Node.js テストのみで実機未検証です。
 
 この観察だけを切り出した実験用 Resource Pack が [`button-send-resource-pack/`](button-send-resource-pack/README.md) です。**使い捨てワールド専用**で、陽性対照ラベルと `button.send` を発火させるボタンを 1 つずつ通常チェスト画面へ差し込むだけで、**通知文字列を自動で設定する仕組みはなく**、入力抑制もアイテム保護もありません。**他の Resource Pack との併用はできません。** 同梱の `check.mjs` は JSON 構造だけを検査し、表示・押下・通知受信は確認しません。導入しただけでは `CLICK-01` 〜 `CLICK-09` を「実施済み」にしないでください。
 
@@ -159,6 +161,8 @@ JSON UI の上重ねだけでコンテナ側グリッドの操作を止められ
 - ページ変更・画面終了後の古い通知が破棄されるか（`CLICK-05`）
 - 通知文字列が通常チャットとして表示されないか（`CLICK-06`）
 - 同じ通知の連続送信で処理が重複しないか（`CLICK-07`）
+- 描画完了前に送った通知が実行されず、表示後に同じ sequence で送り直すと実行されるか（`CLICK-10`）
+- provider が失敗したスロットが、後でそのスロットが描画されるまでクリックできないか（`CLICK-11`）
 
 ### E. `InventoryLink` の安全試験
 
@@ -221,6 +225,7 @@ node --test tests/manual-bedrock/cli.test.mjs
 確認できないこと:
 
 - ゲーム内のクリック、アイテム保護、JSON UI の適用範囲。
+- 入力ゲート（描画完了前・`placeholder` を指定しない未解決 provider・失敗スロット・Container 再生成中は closed）が実機でも成立するか。
 - Resource Pack の試験的接続が実際に画面へ適用されるか、VirtualContainer に限定されるか（VirtualContainer 画面が同パネルを使っているかは未確定）。
 - 透明ブロッカーが入力を遮断するか、覆った範囲のボタンや inventory slot を巻き込まないか、プレイヤー側・controller・タッチでどう振る舞うか。
 - アイテムの複製・消失。
@@ -255,6 +260,7 @@ node tests/manual-bedrock/edit-box-resource-pack/check.mjs
 以下は、この手順を実施して結果が出るまで確定しません。
 
 - 入力通知方式（`button.send` → チャット通知を採用できるか）
+- 描画完了まで入力を拒否するゲート、失敗スロットを非 clickable にする扱い、`placeholder` を指定しない未解決 provider と Container 再生成中に closed を続ける扱いが、実機の画面更新タイミングでも意図どおり成立するか（Node.js テストのみ、実機未検証）
 - 自動スロットクリック通知の可否。公式 samples と script beta の範囲では、標準表示を保ったまま非破壊・タッチ対応で自動通知する経路は確認できていない。`button.send` / `button.drop_one` / カーソル / マーカーアイテムの各候補と実機で必要な観測項目は [`CLICK-NOTIFICATION-NOTES.md`](CLICK-NOTIFICATION-NOTES.md) を参照。自動通知は実装済みとして扱わない
 - `ItemLockMode.slot` のアイテムを通常クリックしたときに `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか。届けば復元不要のクリック源になり得るため、[`locked-click-probe/`](locked-click-probe/README.md) で単独に観測する（復元・クリック実行・JSON UI なし）。未実施であり、結果が出るまで実装経路にしない。陽性でも設計7.2 により、ロックを表示スロットの読み取り専用化に使わない
 - JSON UI のボタンを `button.slot_N`（N=0〜8）へ mapping したときに `PlayerHotbarSelectedSlotChangeAfterEvent` が発火するか。発火しても 9 値だけで、通常のホットバー入力との区別が必要。詳細は [`CLICK-NOTIFICATION-NOTES.md`](CLICK-NOTIFICATION-NOTES.md) の 9〜11 節
