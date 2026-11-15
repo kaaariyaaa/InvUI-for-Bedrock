@@ -53,10 +53,26 @@ test('a one-item slot drop invokes a handler without replenishing the stack',()=
 test('abnormal item changes close the session without running a click',()=>{
  const x=setup();x.chat('!invui test');x.tick();x.tick();
  x.click(3,x.stack(3,64),x.stack(3,12));
- assert.match(x.player.messages.at(-1),/Unexpected item change at slot 3/);
+ assert.match(x.player.messages.at(-2),/Unexpected item change at slot 3/);
+ assert.match(x.player.messages.at(-1),/Click diagnostic: slot=3 expected=minecraft:paperx64 before=minecraft:paperx64 name=ok lore=ok type=ok after=minecraft:paperx12 name=ok lore=ok type=ok/);
  assert.equal(x.containers[0].viewers.length,0);
  assert.equal(x.chat('!invui info').cancel,true);
  assert.match(x.player.messages.at(-1),/No session/);
+});
+test('a full pickup is reported as empty afterward and rejected',()=>{
+ const x=setup();x.chat('!invui test');x.tick();x.tick();
+ x.click(24,x.stack(24,64),undefined);
+ assert.match(x.player.messages.at(-1),/slot=24.*before=minecraft:stickx64.*after=empty/);
+ assert.ok(!x.player.messages.some(m=>m.includes('Received slot click')));
+ assert.equal(x.containers[0].viewers.length,0);
+});
+test('a marker mismatch is reported without disclosing the session token',()=>{
+ const x=setup();x.chat('!invui test');x.tick();x.tick();
+ const before=x.stack(7,64);
+ before.setLore(['incorrect marker']);
+ x.click(7,before,x.stack(7,63));
+ assert.match(x.player.messages.at(-1),/slot=7.*lore=present.*after=minecraft:paperx63/);
+ assert.ok(!x.player.messages.some(m=>m.includes('Received slot click')));
 });
 test('dropped transport items are cleaned up but unrelated drops remain',()=>{
  const x=setup();x.chat('!invui test');x.tick();x.tick();

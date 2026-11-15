@@ -11,6 +11,30 @@
 import { world, system, ItemStack } from '@minecraft/server';
 
 const PREFIX = '!invui:';
+/**
+ * Render only an item's non-sensitive structural details. The full session
+ * marker is not printed, but a mismatch is visible. No inventory mutations.
+ */
+function describeTransportStack(stack, expectedType, expectedTag, expectedMarker) {
+  if (!stack) return 'empty';
+  let loreMatch = false;
+  let loreState = 'unreadable';
+  try {
+    const lore = stack.getLore?.();
+    loreState = Array.isArray(lore) ? (lore.length ? 'present' : 'none') : 'unavailable';
+    loreMatch = Array.isArray(lore) && lore[0] === expectedMarker;
+  } catch (error) {
+    loreState = 'error';
+    console.warn('[InvUI Chat] Unable to inspect transport lore:', error);
+  }
+  const type = String(stack.typeId ?? '?');
+  const amount = String(stack.amount ?? '?');
+  const nameMatch = stack.nameTag === expectedTag;
+  return type + 'x' + amount + ' name=' + (nameMatch ? 'ok' : 'mismatch') +
+    ' lore=' + (loreMatch ? 'ok' : loreState) +
+    ' type=' + (type === expectedType ? 'ok' : 'mismatch');
+}
+
 // One-click transport uses only disposable, server-minted stacks. Never refill them while the UI is open.
 const TRANSPORT_STACK_SIZE = 64;
 const TRANSPORT_MARKER_PREFIX = '§0InvUI:transport:';
@@ -236,7 +260,15 @@ try {
       after.amount === before.amount - 1;
 
     if (!isPress) {
-      message(ev.player,`Unexpected item change at slot ${slot}; closing without replenishing or replacing items.`);
+      const marker = transportMarker(st.sessionId, slot);
+      const expected = expectedKind + 'x' + String(st.remaining[slot] ?? '?');
+      const detail = 'slot=' + slot + ' expected=' + expected +
+        ' before=' + describeTransportStack(before, expectedKind, expectedTag, marker) +
+        ' after=' + describeTransportStack(after, expectedKind, expectedTag, marker);
+      console.warn('[InvUI Chat] Rejected item change: ' + detail);
+      message(ev.player, 'Unexpected item change at slot ' + slot + '; ' +
+        'closing without replenishing or replacing items.');
+      message(ev.player, 'Click diagnostic: ' + detail);
       forgetSession(ev.player.id, st);
       try { st.container.close(ev.player); } catch {}
       return;
