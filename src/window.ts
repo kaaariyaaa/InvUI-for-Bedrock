@@ -2735,11 +2735,13 @@ export class Window {
    * one that carries handlers, returns false without enqueueing anything.
    *
    * Clicks run on the state handle's queue, so shared-state windows process
-   * them in order (design 12.1). The whole slot mapping and the mode are
-   * checked again when the queued task actually runs: a click that waited
-   * behind a close, reopen, page/line/tab change, a swapped slot element, or a
-   * slot that turned display while waiting is discarded instead of invoking a
-   * handler for a layout that is no longer current.
+   * them in order (design 12.1). The layout generation, the whole slot mapping,
+   * and the mode are checked again when the queued task actually runs: a click
+   * that waited behind a close, reopen, page/line/tab change, a swapped slot
+   * element, or a slot that turned display while waiting is discarded instead
+   * of invoking a handler for a layout that is no longer current. The
+   * generation is what catches a layout that changed and then returned to the
+   * same slot mapping: the mapping comparison alone cannot see that round trip.
    */
   async handleClick(slot: number): Promise<boolean> {
     return (await this._inputClick(slot)) === "clicked";
@@ -2764,6 +2766,7 @@ export class Window {
       return "discarded";
     }
     const generation = this.#generation;
+    const layoutGeneration = this.#inputLayoutGeneration;
     const handle = this.#stateHandle;
     let handlerInvoked = false;
     try {
@@ -2771,7 +2774,8 @@ export class Window {
         if (
           this.#status !== "open" ||
           this.#stateHandle !== handle ||
-          generation !== this.#generation
+          generation !== this.#generation ||
+          layoutGeneration !== this.#inputLayoutGeneration
         ) {
           return false;
         }

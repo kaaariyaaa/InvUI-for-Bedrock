@@ -6798,6 +6798,81 @@ test("a layout change after a chat click is accepted still discards it", async (
   window.close();
 });
 
+test("a layout that changes and returns to the same mapping still discards a queued click", async () => {
+  const viewer = { id: "chat-aba", name: "Aba" };
+  const adapter = new InMemoryTestAdapter();
+  const gate = deferred();
+  const started = deferred();
+  const clicked = [];
+  const target = Item.builder()
+    .setItemProvider(() => stack("minecraft:target"))
+    .addClickHandler(() => clicked.push("target"))
+    .build();
+  const blocker = Item.builder()
+    .setItemProvider(() => stack("minecraft:blocker"))
+    .addClickHandler(async () => {
+      started.resolve();
+      await gate.promise;
+    })
+    .build();
+  const firstOther = Item.simple(() => stack("minecraft:first_other"));
+  const secondOther = Item.simple(() => stack("minecraft:second_other"));
+  const originalGui = () =>
+    Gui.normal({
+      structure: ["abcd"],
+      ingredients: { a: blocker, b: firstOther, d: target },
+    });
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(originalGui())
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+
+  // Hold the shared state queue with a running click, so the chat click below
+  // is accepted (and validated) but cannot run its handler yet.
+  const running = window.handleClick(0);
+  await tick();
+  await started.promise;
+
+  emitChatSend(chatPayload(window, 3, 1), { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+
+  // A -> B -> A: the slot mapping at execution time equals the one the click
+  // was accepted for, but the generation advanced twice. The ABA round trip is
+  // still a layout change, so the accepted notification must not run.
+  window.setUpperGui(
+    Gui.normal({
+      structure: ["abcd"],
+      ingredients: { a: blocker, b: secondOther, d: target },
+    }),
+  );
+  await tick();
+  assert.equal(window._inputLayoutGeneration, 1, "the first swap advances the layout generation");
+  window.setUpperGui(originalGui());
+  await tick();
+  assert.equal(window._inputLayoutGeneration, 2, "the swap back advances it again");
+
+  gate.resolve();
+  await running;
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(clicked, [], "a click accepted before the layout round trip must not run after it");
+
+  // The retry names the generation that is current after the round trip.
+  await sendChat(window, 3, 2);
+  await flushChatInput();
+  assert.deepEqual(clicked, ["target"]);
+
+  window.close();
+});
+
 test("playerLeave closes only the leaving viewer's open Window and releases it", async () => {
   const adapter = new InMemoryTestAdapter();
   const otherAdapter = new InMemoryTestAdapter();
