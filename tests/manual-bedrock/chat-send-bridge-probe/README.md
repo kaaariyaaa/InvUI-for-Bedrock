@@ -12,7 +12,7 @@
 
 ## テスト方法
 
-`.mcaddon` をBedrock Preview/Betaのテストワールドへインポートし、BPとRPを有効にする。コンテンツログを有効にする。通常のチャットから `!invui test` を送る。`InvUI Chat Probe` の `VirtualContainer` が開く。画面上部の入力欄へチャットに表示された `!invui:<session-id>:0:0:0` を入力し、`SEND` を押す。Script側から `Received chat click` が表示されたか、コンテンツログを確認する。右側や上側にテストUIが現れなければ、画面接続に失敗したことになる。
+`.mcaddon` をBedrock Preview/Betaのテストワールドへインポートし、BPとRPを有効にする。コンテンツログを有効にする。通常のチャットから `!invui test` を送る。チャットを閉じるまで画面が開けない場合に備え、**10 tick（通常約0.5秒）ごとに最大24回、通常約12秒間** `VirtualContainer.open()` を再試行する。`getViewers()` にプレイヤーが現れた時点で再試行を止め、`UserBusy` で画面が閉じた場合は残り回数で再開する。`!invui clear`・通常の画面クローズ・退出・再度の `!invui test` で古い再試行を停止する。最初の試行はチャットを閉じる時間を確保するため10 tick後に始まる。`getViewers()` は画面表示の確証ではないので、**実際に `InvUI Chat Probe` の画面が表示されたか目視で確認する**。画面上部の入力欄へチャットに表示された `!invui:<session-id>:0:0:0` を入力し、`SEND` を押す。Script側から `Received chat click` が表示されたか、コンテンツログを確認する。右側や上側にテストUIが現れなければ、画面接続に失敗したことになる。
 
 `!invui info` で次の通知例を表示する。`!invui clear` で現在の画面を閉じる。通常のチャット欄から通知文を入力して成功しても、**JSON UI のボタンによる送信が成立したことにはならない**。
 
