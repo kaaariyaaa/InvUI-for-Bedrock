@@ -16,6 +16,8 @@ PACKS=(
   '5|RP|button-send-resource-pack|invui_button_send_probe'
   '6|RP|edit-box-resource-pack|invui_edit_box_probe'
   '7|RP|protection-resource-pack|invui_protection_probe'
+  '8|BP|chat-send-bridge-probe/behavior_pack|invui_chat_send_bridge_probe_bp'
+  '9|RP|chat-send-bridge-probe/resource_pack|invui_chat_send_bridge_probe_rp'
 )
 
 # mcpelauncher 系の既定候補。behavior_packs と resource_packs の両方があるものだけ使う。
@@ -174,18 +176,22 @@ if [[ "$selection" =~ ^[[:space:]]*$ ]]; then
 fi
 
 SELECTED=()
+MAX_PACK_INDEX=${#PACKS[@]}
 case "$selection" in
   [Aa][Ll][Ll])
-    SELECTED=(1 2 3 4 5 6 7)
+    for entry in "${PACKS[@]}"; do
+      IFS='|' read -r index _ <<< "$entry"
+      SELECTED+=("$index")
+    done
     ;;
   *)
     if ! [[ "$selection" =~ ^[0-9[:space:]]+$ ]]; then
-      fail "無効な選択: ${selection}. 1-7 の番号をスペース区切りで、または all。何も変更していません。"
+      fail "無効な選択: ${selection}. 1-${MAX_PACK_INDEX} の番号をスペース区切りで、または all。何も変更していません。"
     fi
     read -ra numbers <<< "$selection"
     for number in "${numbers[@]}"; do
-      if [ "$number" -lt 1 ] || [ "$number" -gt 7 ]; then
-        fail "範囲外の番号: ${number} (1-7)。何も変更していません。"
+      if [ "$number" -lt 1 ] || [ "$number" -gt "$MAX_PACK_INDEX" ]; then
+        fail "範囲外の番号: ${number} (1-${MAX_PACK_INDEX})。何も変更していません。"
       fi
       case " ${SELECTED[*]} " in
         *" $number "*) ;;
