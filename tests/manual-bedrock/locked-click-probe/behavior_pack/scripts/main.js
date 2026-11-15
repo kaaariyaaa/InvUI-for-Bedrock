@@ -339,7 +339,10 @@ function summarizeCloseItems(items) {
   }
   const totals = new Map();
   let nonEmpty = 0;
-  for (const stack of items) {
+  // Index loop: the engine's array may not be iterable in this host even when
+  // Array.isArray() is true (observed on device as "value is not iterable").
+  for (let index = 0; index < items.length; index += 1) {
+    const stack = items[index];
     if (!stack) {
       continue;
     }
