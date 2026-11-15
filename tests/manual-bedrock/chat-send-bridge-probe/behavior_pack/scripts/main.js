@@ -131,7 +131,7 @@ function parseInput(raw) {
   if (![generation,slot,sequence].every(Number.isSafeInteger)) return null;
   return {sessionId,generation,slot,sequence};
 }
-function acceptClick(player, input) {
+function acceptClick(player, input, source = 'chat') {
   const state=sessions.get(player.id);
   if (!state) return message(player,'Rejected: no open VirtualContainer session.');
   if (state.sessionId!==input.sessionId || state.generation!==input.generation)
@@ -146,7 +146,7 @@ function acceptClick(player, input) {
   lastSequence.set(player.id,input.sequence);
   state.hits++;
   // Deliberately do not call container.setItem(): avoids item duplication.
-  message(player, `Received chat click: logical slot=${input.slot}; events=${state.hits}.`);
+  message(player, `Received ${source} click: logical slot=${input.slot}; events=${state.hits}.`);
 }
 world.beforeEvents.chatSend.subscribe(event => {
   const raw=event.message;
@@ -243,7 +243,7 @@ try {
     // session on the server, rather than requiring JSON UI to mint IDs.
     acceptClick(ev.player, {
       sessionId: st.sessionId, generation: st.generation, slot, sequence,
-    });
+    }, 'slot');
   });
 } catch (error) { console.warn('No virtualContainerItemChange support:',error); }
 try {

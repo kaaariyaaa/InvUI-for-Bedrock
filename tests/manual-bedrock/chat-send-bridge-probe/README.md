@@ -12,7 +12,7 @@
 
 ## クリック入力（実装段階）
 
-**操作方法:** `!invui test` で開いた27スロットの画面のアイテムを1回押すと、PC用のJSON UIグリッドが `button.drop_one` を実行する。Script APIの `virtualContainerItemChange` に届いたイベントからプレイヤーとスロットを特定し、サーバーが管理するセッション・レイアウト世代・sequenceと照合したうえで `Received chat click: logical slot=...` と表示する（現状は受信確認用ハンドラー）。
+**操作方法:** `!invui test` で開いた27スロットの画面のアイテムを1回押すと、PC用のJSON UIグリッドが `button.drop_one` を実行する。Script APIの `virtualContainerItemChange` に届いたイベントからプレイヤーとスロットを特定し、サーバーが管理するセッション・レイアウト世代・sequenceと照合したうえで `Received slot click: logical slot=...` と表示する（現状は受信確認用ハンドラー）。
 
 **元の第1候補は継続:** 上部のテキスト欄と `button.send` は残してある。ただし、通常のチェスト画面で `button.send` がチャットを送信できるか、押したスロット番号をJSON UIからチャットへ渡せるかは確認できていない。現時点の1クリック経路は設計書10.3の第2候補であり、**チャット送信を用いた自動クリックの完成ではない**。
 
