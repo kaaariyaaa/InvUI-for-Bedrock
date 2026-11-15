@@ -8862,3 +8862,124 @@ test("a reopen from a subscribe error during a refresh keeps the reopened render
   );
 });
 
+test("a subscribe error during open does not discard the reopened screen's async item", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, stack("minecraft:linked"));
+  // A custom Inventory may fail to subscribe (for example a container adapter
+  // that is not ready). The Window reports that failure and an error handler is
+  // allowed to close and reopen the Window, exactly like the duck-typed element
+  // subscriptions covered above.
+  let throwOnce = true;
+  const subscribe = inventory.subscribe.bind(inventory);
+  inventory.subscribe = (listener) => {
+    if (throwOnce) {
+      throwOnce = false;
+      throw new Error("inventory subscribe failed");
+    }
+    return subscribe(listener);
+  };
+  const link = new InventoryLink(inventory, 0);
+  const loading = deferred();
+  const asyncItem = Item.simple(() => loading.promise);
+  const gui = Gui.normal({
+    structure: ["ab"],
+    ingredients: { a: link, b: asyncItem },
+  });
+  let reopened;
+  let handling = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (handling || context.operation !== "subscribe") {
+        return;
+      }
+      handling = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  assert.ok(reopened, "the handler reopened the Window");
+  loading.resolve(stack("minecraft:loaded"));
+  await reopened;
+  await tick();
+
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, ["subscribe"]);
+  const container = window.container;
+  assert.equal(
+    container.items[1].typeId,
+    "minecraft:loaded",
+    "the abandoned open pass must not discard the reopened generation's provider result",
+  );
+  assert.equal(container.items[0].typeId, "minecraft:linked");
+  window.close();
+});
+
+test("a subscribe error during a size-changing upper GUI swap does not discard the reopened screen's async item", async () => {
+  const adapter = new InMemoryTestAdapter();
+  const errors = [];
+  const inventory = new VirtualInventory(1);
+  inventory.setItem(0, stack("minecraft:linked"));
+  let throwOnce = true;
+  const subscribe = inventory.subscribe.bind(inventory);
+  inventory.subscribe = (listener) => {
+    if (throwOnce) {
+      throwOnce = false;
+      throw new Error("inventory subscribe failed");
+    }
+    return subscribe(listener);
+  };
+  const link = new InventoryLink(inventory, 0);
+  const loading = deferred();
+  const asyncItem = Item.simple(() => loading.promise);
+  const initialGui = Gui.normal({
+    structure: ["a"],
+    ingredients: { a: Item.simple(() => stack("minecraft:initial")) },
+  });
+  const biggerGui = Gui.normal({
+    structure: ["ab", "cd"],
+    ingredients: { a: link, b: asyncItem },
+  });
+  let reopened;
+  let handling = false;
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(initialGui)
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => {
+      errors.push(context.operation);
+      if (handling || context.operation !== "subscribe") {
+        return;
+      }
+      handling = true;
+      window.close("PlayerClosed");
+      reopened = window.open();
+    })
+    .build();
+
+  await window.open();
+  window.setUpperGui(biggerGui);
+  await tick();
+  assert.ok(reopened, "the handler reopened the Window during the regeneration");
+  loading.resolve(stack("minecraft:loaded"));
+  await reopened;
+  await tick();
+
+  assert.equal(window.status, "open");
+  assert.deepEqual(errors, ["subscribe"]);
+  const container = window.container;
+  assert.equal(
+    container.items[1].typeId,
+    "minecraft:loaded",
+    "the abandoned regeneration pass must not discard the reopened generation's provider result",
+  );
+  assert.equal(container.items[0].typeId, "minecraft:linked");
+  window.close();
+});
