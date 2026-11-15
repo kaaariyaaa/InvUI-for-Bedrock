@@ -314,7 +314,7 @@ test("packed package contents and consumer type check", async (t) => {
       }
     }
 
-    for (const required of ["package.json", "README.md", "bin/cli.js", "dist/index.js", "dist/index.d.ts"]) {
+    for (const required of ["package.json", "README.md", "LICENSE", "bin/cli.js", "dist/index.js", "dist/index.d.ts"]) {
       assert.ok(packedSet.has(required), `missing packed file: ${required}`);
     }
 
@@ -334,7 +334,7 @@ test("packed package contents and consumer type check", async (t) => {
       );
     }
 
-    const allowedTopLevel = new Set(["package.json", "README.md"]);
+    const allowedTopLevel = new Set(["package.json", "README.md", "LICENSE"]);
     for (const packedPath of packedPaths) {
       assert.ok(
         allowedTopLevel.has(packedPath) ||
@@ -368,6 +368,14 @@ test("packed package contents and consumer type check", async (t) => {
   const installedDir = path.join(consumerDir, "node_modules", "invui-bedrock");
   fs.mkdirSync(path.dirname(installedDir), { recursive: true });
   fs.renameSync(packageDir, installedDir);
+
+  await t.test("tarball carries the LICENSE text byte-for-byte", () => {
+    assert.deepEqual(
+      fs.readFileSync(path.join(installedDir, "LICENSE")),
+      fs.readFileSync(path.join(repoRoot, "LICENSE")),
+      "tarball content differs from repository for LICENSE",
+    );
+  });
 
   await t.test("tarball carries the resource pack files byte-for-byte", () => {
     for (const relativePath of bundledResourcePackFiles) {
@@ -473,6 +481,8 @@ test("packed package contents and consumer type check", async (t) => {
 
     assert.equal(packedPackage.name, repositoryPackage.name);
     assert.equal(packedPackage.version, repositoryPackage.version);
+    assert.equal(packedPackage.license, repositoryPackage.license);
+    assert.equal(packedPackage.license, "MIT");
     assert.equal(packedPackage.type, "module");
     assert.equal(packedPackage.main, "./dist/index.js");
     assert.equal(packedPackage.types, "./dist/index.d.ts");

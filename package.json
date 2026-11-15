@@ -3,6 +3,7 @@
   "version": "0.1.0-beta.1",
   "private": true,
   "description": "GUI library for Minecraft Bedrock Edition Script API",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,7 +20,8 @@
     "dist",
     "bin",
     "resource_pack",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "scripts": {
