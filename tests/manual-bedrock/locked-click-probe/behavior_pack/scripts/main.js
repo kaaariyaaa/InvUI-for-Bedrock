@@ -51,6 +51,9 @@ const DEFAULT_SIZE = 9;
 const DEFAULT_MODE = "slot";
 const DEFAULT_TICKS = 1200;
 const MAX_TICKS = 2400;
+// open() は UserBusy（画面が閉じ切っていない）で拒否されることがあるので再試行する。
+const MAX_OPEN_ATTEMPTS = 12;
+const OPEN_RETRY_TICKS = 2;
 const MAX_LOG_TEXT = 96;
 const ITEM_TYPES = ["minecraft:stick", "minecraft:paper"];
 const MODES = new Set(["slot", "inventory", "plain"]);
@@ -180,16 +183,18 @@ function viewersOf(container) {
 }
 
 function canOpen(container) {
+  // pending（未確認の open）を先に見る: これが残っている間は engine 側の状態が
+  // 確定していないので、viewers の有無より強い拒否理由になる。
+  const pending = pendingOpen.get(container);
+  if (pending && pending.size > 0) {
+    return { ok: false, reason: `previous open still pending (${pending.size})` };
+  }
   const viewers = viewersOf(container);
   if (viewers === undefined) {
     return { ok: false, reason: "getViewers failed" };
   }
   if (viewers.length > 0) {
     return { ok: false, reason: `already viewed by ${viewers.length} player(s)` };
-  }
-  const pending = pendingOpen.get(container);
-  if (pending && pending.size > 0) {
-    return { ok: false, reason: `previous open still pending (${pending.size})` };
   }
   return { ok: true };
 }
@@ -211,56 +216,85 @@ function openFor(player, size, mode, ticks) {
   // the kind classification of this run. No viewers exist at this point.
   fillContainer(container, size, mode);
 
-  try {
-    container.open(player);
-    log(`OPEN_CALLED size=${size} mode=${mode} (open() returned without throwing)`);
-  } catch (error) {
-    reply(player, `OPEN_FAILED size=${size} mode=${mode} error=${describeError(error)}`);
-    return;
-  }
-
-  // 画面が出ないときの切り分け用: 次の tick で engine が view を登録したかを見る。
-  system.run(() => {
-    const viewers = viewersOf(container);
-    log(
-      `VIEWERS_AFTER_OPEN size=${size} mode=${mode} viewers=${
-        viewers === undefined ? "unavailable" : viewers.length
-      } (0 なら engine が open を受理していない)`,
-    );
-  });
-
+  // 実機では open() 直後が UserBusy（チャット画面が閉じ切っていない）で
+  // 拒否されることがある。viewers が付くまで数 tick 再試行する。
   const key = keyFor(size, mode);
-  const generation = (openGenerations.get(key) ?? 0) + 1;
-  openGenerations.set(key, generation);
-  const id = playerId(player);
-  if (id !== undefined) {
-    lastKeyByPlayer.set(id, key);
-    let pending = pendingOpen.get(container);
-    if (!pending) {
-      pending = new Set();
-      pendingOpen.set(container, pending);
-    }
-    pending.add(id);
-  }
-  reply(
-    player,
-    `OPEN_REQUESTED size=${size} mode=${mode} ticks=${ticks} generation=${generation} (display is not guaranteed)`,
-  );
+  let attempts = 0;
 
-  system.runTimeout(() => {
-    if (openGenerations.get(key) !== generation) {
-      log(`AUTOCLOSE skip stale size=${size} mode=${mode} generation=${generation}`);
+  const accept = () => {
+    const generation = (openGenerations.get(key) ?? 0) + 1;
+    openGenerations.set(key, generation);
+    const id = playerId(player);
+    if (id !== undefined) {
+      lastKeyByPlayer.set(id, key);
+      let pending = pendingOpen.get(container);
+      if (!pending) {
+        pending = new Set();
+        pendingOpen.set(container, pending);
+      }
+      pending.add(id);
+    }
+    log(`OPEN_ACCEPTED size=${size} mode=${mode} attempts=${attempts} generation=${generation}`);
+    reply(
+      player,
+      `OPEN_REQUESTED size=${size} mode=${mode} ticks=${ticks} generation=${generation} attempts=${attempts} (display is not guaranteed)`,
+    );
+    system.runTimeout(() => {
+      if (openGenerations.get(key) !== generation) {
+        log(`AUTOCLOSE skip stale size=${size} mode=${mode} generation=${generation}`);
+        return;
+      }
+      let requested = 0;
+      try {
+        requested = container.close(player);
+      } catch (error) {
+        log(`AUTOCLOSE_FAILED size=${size} mode=${mode} error=${describeError(error)}`);
+        return;
+      }
+      log(`AUTOCLOSE size=${size} mode=${mode} close(player) requested=${requested}`);
+    }, ticks);
+  };
+
+  const acceptedNow = () => {
+    const current = viewersOf(container);
+    return current !== undefined && current.length > 0;
+  };
+
+  const attemptOpen = () => {
+    if (stopReason) {
+      log(`OPEN_ABORTED size=${size} mode=${mode} reason=stopped`);
       return;
     }
-    let requested = 0;
+    if (acceptedNow()) {
+      accept();
+      return;
+    }
+    if (attempts >= MAX_OPEN_ATTEMPTS) {
+      log(
+        `OPEN_NOT_ACCEPTED size=${size} mode=${mode} attempts=${attempts} (viewers が付かない。Beta APIs と画面の有無を確認)`,
+      );
+      reply(player, `OPEN_FAILED size=${size} mode=${mode} reason=not-accepted`);
+      return;
+    }
+    attempts += 1;
     try {
-      requested = container.close(player);
+      container.open(player);
     } catch (error) {
-      log(`AUTOCLOSE_FAILED size=${size} mode=${mode} error=${describeError(error)}`);
+      log(
+        `OPEN_ATTEMPT_FAILED size=${size} mode=${mode} attempt=${attempts} error=${describeError(error)}`,
+      );
+      reply(player, `OPEN_FAILED size=${size} mode=${mode} error=${describeError(error)}`);
       return;
     }
-    log(`AUTOCLOSE size=${size} mode=${mode} close(player) requested=${requested}`);
-  }, ticks);
+    log(`OPEN_CALLED size=${size} mode=${mode} attempt=${attempts} (open() returned without throwing)`);
+    if (acceptedNow()) {
+      accept();
+      return;
+    }
+    system.runTimeout(attemptOpen, OPEN_RETRY_TICKS);
+  };
+
+  attemptOpen();
 }
 
 function closePlayer(player) {

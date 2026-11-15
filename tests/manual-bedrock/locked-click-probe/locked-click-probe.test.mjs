@@ -111,21 +111,30 @@ function loadProbe(options = {}) {
   // create() の戻り値と同一とは限らない。title だけが作成時の安定した識別子。
   const makeContainer = ({ size, title }) => {
     const calls = { opened: 0, closed: 0 };
+    const viewers = new Set();
     const container = {
       size,
       title,
       calls,
-      open() {
+      open(viewer) {
         openCalls += 1;
         calls.opened += 1;
+        // 実機では open 受理後 getViewers() に実行者が入る。プローブはこれで
+        // 「受理されたか」を判定するので、モックも同じ契約にする。
+        if (viewer) viewers.add(viewer);
       },
       close() {
         closeCalls += 1;
         calls.closed += 1;
+        viewers.clear();
         return 1;
       },
       getViewers() {
-        return [];
+        return [...viewers];
+      },
+      // close イベントを発火するテスト用フック（実機の close 相当）。
+      clearViewers() {
+        viewers.clear();
       },
       getItem(slot) {
         return items[slot];
@@ -197,6 +206,12 @@ function loadProbe(options = {}) {
       }
     },
     fireClose({ who = player, reason = 'ServerClosed', contents, container: closedContainer = created[0] } = {}) {
+      // 別参照でも title が一致すれば同じ画面が閉じたことになるので、
+      // 対応する container の viewers も解除する。
+      const matching = created.find((candidate) => candidate.title === closedContainer?.title);
+      if (matching && typeof matching.clearViewers === 'function') {
+        matching.clearViewers();
+      }
       // 実機の event.items は container.size と同じ長さ。items は 54 固定の
       // モック配列なので、size を超える分を close 内容に混ぜない。
       const closeContents =
