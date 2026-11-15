@@ -361,6 +361,71 @@ test("VirtualInventory stores clones and reports slot changes", () => {
   assert.equal(changes.length, 2);
 });
 
+test("VirtualInventory rejects a bad clone before changing the slot", () => {
+  const inventory = new VirtualInventory(2);
+  inventory.setItem(0, new ItemBuilder("minecraft:diamond", 3).build());
+  const changes = [];
+  inventory.subscribe((change) => changes.push(change));
+
+  // clone() returning undefined used to be stored as an empty slot without an
+  // error, silently deleting the item that was there.
+  assert.throws(
+    () => inventory.setItem(0, { typeId: "minecraft:stone", clone: () => undefined }),
+    /did not return a valid ItemStack/,
+  );
+  assert.equal(inventory.getItem(0).typeId, "minecraft:diamond");
+  assert.equal(inventory.getItem(0).amount, 3);
+
+  // clone() returning the original object would store the caller's stack by
+  // reference, so mutating it later would change the inventory with no event.
+  const aliased = new ItemBuilder("minecraft:emerald").build();
+  aliased.clone = () => aliased;
+  assert.throws(() => inventory.setItem(1, aliased), /independent copy/);
+  assert.equal(inventory.getItem(1), undefined);
+  assert.equal(changes.length, 0);
+});
+
+test("setItem does not write when cloning the previous value fails", () => {
+  // A decoded stack can pass deserialize's shallow check while its stored
+  // clone() throws on the next read. Before setItem() cloned the previous
+  // value first, the new item was already written when the change event clone
+  // threw: the call reported failure, the slot had changed, and no listener
+  // was notified.
+  const codec = {
+    encode: () => ({}),
+    decode: () => ({
+      typeId: "minecraft:diamond",
+      clone: () => ({
+        typeId: "minecraft:diamond",
+        clone: () => {
+          throw new Error("stored clone failed");
+        },
+      }),
+    }),
+  };
+  const inventory = VirtualInventory.deserialize(
+    {
+      version: INVENTORY_SNAPSHOT_VERSION,
+      size: 1,
+      slots: [{ slot: 0, item: {} }],
+    },
+    codec,
+  );
+  const changes = [];
+  inventory.subscribe((change) => changes.push(change));
+
+  assert.throws(
+    () => inventory.setItem(0, new ItemBuilder("minecraft:stone").build()),
+    /stored clone failed/,
+  );
+  // The stone must not have replaced the unreadable previous value.
+  assert.throws(() => inventory.getItem(0), /stored clone failed/);
+  assert.equal(changes.length, 0);
+  // serialize() reads through the same clone boundary instead of encoding an
+  // undefined stack for a slot it cannot read.
+  assert.throws(() => inventory.serialize(codec), /stored clone failed/);
+});
+
 test("VirtualInventory validates size and slot bounds", () => {
   assert.throws(() => new VirtualInventory(-1), RangeError);
   assert.throws(() => new VirtualInventory(1.5), RangeError);
@@ -661,6 +726,19 @@ test("deserialize rejects a decoded stack whose clone is not a valid ItemStack",
         }),
       }),
     /clone failed/,
+  );
+
+  // A codec that returns its own cached stack from clone() would make the
+  // restored inventory and the codec share one object.
+  const aliased = new ItemBuilder("minecraft:stone").build();
+  aliased.clone = () => aliased;
+  assert.throws(
+    () =>
+      VirtualInventory.deserialize(snapshot, {
+        encode: () => ({}),
+        decode: () => aliased,
+      }),
+    /cannot be cloned for slot 0/,
   );
 });
 

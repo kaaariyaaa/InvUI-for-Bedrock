@@ -49,8 +49,41 @@ export interface Inventory {
   subscribe(listener: InventoryListener): () => void;
 }
 
+function isCloneableItemStack(value: unknown): value is ItemStack {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as ItemStack).typeId === "string" &&
+    typeof (value as ItemStack).clone === "function"
+  );
+}
+
+function cloneItem(item: ItemStack): ItemStack;
+function cloneItem(item: undefined): undefined;
+function cloneItem(item: ItemStack | undefined): ItemStack | undefined;
+/**
+ * The single `ItemStack.clone()` boundary. A clone must be an independent,
+ * usable stack: `clone()` returning `undefined`, a non-stack, or the original
+ * object would silently empty a slot, make reads throw later, or alias the
+ * caller's stack into the inventory. Reject it before the caller can write.
+ */
 function cloneItem(item: ItemStack | undefined): ItemStack | undefined {
-  return item === undefined ? undefined : item.clone();
+  if (item === undefined) {
+    return undefined;
+  }
+  if (!isCloneableItemStack(item)) {
+    throw new TypeError("InvUI: value is not an ItemStack.");
+  }
+  const clone = item.clone();
+  if (clone === item) {
+    throw new TypeError(
+      "InvUI: ItemStack.clone() must return an independent copy, not the original stack.",
+    );
+  }
+  if (!isCloneableItemStack(clone)) {
+    throw new TypeError("InvUI: ItemStack.clone() did not return a valid ItemStack.");
+  }
+  return clone;
 }
 
 function assertSlot(size: number, slot: number): void {
@@ -67,15 +100,6 @@ function assertCodec<T>(codec: InventoryItemCodec<T>): void {
   ) {
     throw new TypeError("InvUI: inventory codec must implement encode() and decode().");
   }
-}
-
-function isCloneableItemStack(value: unknown): value is ItemStack {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as ItemStack).typeId === "string" &&
-    typeof (value as ItemStack).clone === "function"
-  );
 }
 
 /**
@@ -112,10 +136,16 @@ export class VirtualInventory implements Inventory {
 
   setItem(slot: number, item: ItemStack | undefined): void {
     assertSlot(this.size, slot);
-    const previous = this.items[slot];
-    const next = cloneItem(item);
-    this.items[slot] = next;
-    this.emit(slot, previous, next);
+    // Clone everything the change event needs before writing. A clone that
+    // fails after the write would report failure for a slot that did change
+    // and notify no listener, so the write is the last thing that can fail.
+    const previous = cloneItem(this.items[slot]);
+    const stored = cloneItem(item);
+    // Keep the event value separate from the stored stack so a listener cannot
+    // mutate inventory contents through the change object.
+    const current = cloneItem(stored);
+    this.items[slot] = stored;
+    this.emit(slot, previous, current);
   }
 
   clear(): void {
@@ -147,7 +177,7 @@ export class VirtualInventory implements Inventory {
     for (let slot = 0; slot < this.size; slot++) {
       const item = this.items[slot];
       if (item !== undefined) {
-        occupied.push({ slot, item: item.clone() });
+        occupied.push({ slot, item: cloneItem(item) });
       }
     }
     const slots = occupied.map(({ slot, item }) => ({
@@ -215,13 +245,14 @@ export class VirtualInventory implements Inventory {
       if (!isCloneableItemStack(item)) {
         throw new TypeError(`InvUI: item codec returned an invalid ItemStack for slot ${slot}.`);
       }
-      // `setItem()` stores `item.clone()`, so validate the clone that will
-      // actually be stored. A decoded stack whose clone() returns something
-      // else would otherwise be stored as an empty slot, silently dropping the
-      // snapshot entry. Clone every entry before writing so a failure at any
-      // slot cannot leave a partially restored inventory.
+      // Validate the clone that will actually be stored and read back. A
+      // decoded stack whose clone() returns an empty slot, something else, or
+      // the original object would otherwise be stored as an unreadable or
+      // aliased slot, silently dropping the snapshot entry. Clone every entry
+      // before writing so a failure at any slot cannot leave a partially
+      // restored inventory.
       const clone = item.clone();
-      if (!isCloneableItemStack(clone)) {
+      if (!isCloneableItemStack(clone) || clone === item) {
         throw new TypeError(
           `InvUI: item codec returned an ItemStack that cannot be cloned for slot ${slot}.`,
         );
@@ -246,12 +277,7 @@ export class VirtualInventory implements Inventory {
   }
 
   private emit(slot: number, previous: ItemStack | undefined, current: ItemStack | undefined): void {
-    const change: InventoryChange = {
-      inventory: this,
-      slot,
-      previous: cloneItem(previous),
-      current: cloneItem(current),
-    };
+    const change: InventoryChange = { inventory: this, slot, previous, current };
     for (const listener of [...this.listeners]) {
       try {
         listener(change);
