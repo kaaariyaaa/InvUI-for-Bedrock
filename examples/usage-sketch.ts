@@ -8,7 +8,8 @@
  * - VirtualContainer は Bedrock Preview/Beta の Experimental API を前提とした設計です。
  * - クリック、アイテム保護、JSON UI、InventoryLink の移動は実機未検証であり、安全に利用できません。
  *   このスケッチのクリック処理を、動作する機能として本番設計へ持ち込まないでください。
- * - 実アダプタでは Window.open() が WindowOpenRejectedError で reject します（画面は開きません）。
+ * - 既定の実アダプタは実画面を開きます（canOpenScreens = true、実機未検証）。
+ *   canOpenScreens = false のアダプタを注入した場合だけ WindowOpenRejectedError で reject します。
  */
 
 import type { Player } from "@minecraft/server";
@@ -90,14 +91,15 @@ export async function openShop(player: Player): Promise<void> {
     })
     .build();
 
-  // 実機未検証。実アダプタ（canOpenScreens = false）では open() が
-  // WindowOpenRejectedError で reject し、Container は作成・表示されない。
-  // 既定拒否は正常な経路なので、await して catch し、未処理 rejection を残さない。
+  // 実機未検証。既定の実アダプタ（canOpenScreens = true）は Container を作成して
+  // VirtualContainer.open() を呼ぶ。canOpenScreens = false のアダプタでは
+  // WindowOpenRejectedError で reject する。どちらも正常な経路なので、await して
+  // catch し、未処理 rejection を残さない。
   try {
     await window.open();
   } catch (error) {
-    // 既定の実アダプタではここに WindowOpenRejectedError が来る。
-    // 画面が開かないだけで、Window は作成も表示もされていない。
+    // 画面を開けなかった（拒否、または実機で open が失敗した）。
+    // ここでは状態を変えず、呼び出し元へ知らせるだけにする。
     console.warn("InvUI: 画面を開けませんでした", error);
   }
 }
