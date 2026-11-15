@@ -33,34 +33,12 @@
  * `world.virtualContainerManager.create()` so layout sizes and titles can be
  * checked against the documented 1..54 / 256-byte limits.
  *
- * Chat input is wired automatically: the first successful `open()` installs a
- * single `world.beforeEvents.chatSend` subscription and registers the open
- * Window for its viewer. `Window.close()` and every layout page/line/tab change
- * invalidate the bridge generation, so a queued notification can never click a
- * closed, reopened, or replaced screen. Every successful `open()` also mints a
- * new `_inputSessionId`: the chat notification must name the current open, so a
- * delayed line from an earlier open (or from before a script reload, when
- * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
- * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
- * or slot-element change; a state change advances it as soon as `setState()`
- * accepts it, so a line minted for the page still on screen fails even before
- * the render catches up. The new generation names a layout that has no button
- * on screen yet, so chat input and `handleClick()` fail closed until the render
- * applies and writes it (`#layoutPresented`), and across a container
- * regeneration until the replacement is shown: the player can only click what
- * is displayed, never a button of the pending page or of a screen that is
- * still being built. The old three-field notification form has no generation
- * and is not accepted.
- * Nothing is installed when the game API (or a test double) omits
- * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
- * input fails closed.
- *
- * The notification is a player-typed chat line. Every field except the sender
- * id is attacker controlled and can be typed by hand, so the bridge's checks
- * are consistency checks, not authentication. No code here produces the JSON UI
- * `button.send` payload either: design 10.4 does not guarantee a notification
- * is generated at all, so an Item click must still work without one. Like the
- * screen path, this is NOT verified on a real device.
+ * Click detection: without a JSON UI notification, a take from a button-mode
+ * slot is routed through `handleClick()` after the slot is restored. It is a
+ * heuristic (a shift-click or drag is indistinguishable from a click, and a
+ * click that moves no item is not seen); `handleClick()` still re-validates the
+ * presented layout, generation, slot mapping, and mode. The chat-notification
+ * input bridge has been removed.
  *
  * `world.afterEvents.playerLeave` closes the Window of the viewer that left
  * with `PlayerLeft`, whether it is still `opening` or already `open`. The event
@@ -121,11 +99,8 @@ import type {
   VirtualContainerItemChangeAfterEvent,
   VirtualContainerOptions,
 } from "@minecraft/server";
-import { connectChatSendInput, createChatInputBridge } from "./chat-input-bridge.js";
-import type { ChatInputBridge, ChatInputClickOutcome } from "./chat-input-bridge.js";
 import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
-import type { InputSlotMode } from "./input.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
 import { BedrockWorldStateStore } from "./bedrock-store.js";
@@ -464,97 +439,6 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
 export const minecraftVirtualContainerAdapter = new MinecraftVirtualContainerAdapter();
 
 /**
- * Open Windows tracked for chat input, one set shared by the whole module so
- * the before-event is subscribed exactly once. The bridge filters by viewer id,
- * so a message from another player never reaches a Window it does not own.
- */
-const chatInputWindows = new Set<Window>();
-let chatInputBridge: ChatInputBridge | undefined;
-/** Latches the feature-detection failure: never retried, never thrown at open(). */
-let chatInputUnavailable = false;
-
-/**
- * Installs the chat input bridge on first use, or returns undefined when the
- * game API is absent (older `@minecraft/server`, test doubles, or a world with
- * the event disabled). The failure is latched so opening Windows stays cheap
- * and chat input fails closed instead of breaking screen handling.
- */
-function ensureChatInputBridge(): ChatInputBridge | undefined {
-  if (chatInputBridge) {
-    return chatInputBridge;
-  }
-  if (chatInputUnavailable) {
-    return undefined;
-  }
-  const gameSystem: typeof server.system | undefined = server.system;
-  let chatSend: typeof world.beforeEvents.chatSend | undefined;
-  try {
-    chatSend = world.beforeEvents?.chatSend;
-  } catch {
-    chatSend = undefined;
-  }
-  if (
-    !gameSystem ||
-    typeof gameSystem.run !== "function" ||
-    !chatSend ||
-    typeof chatSend.subscribe !== "function"
-  ) {
-    chatInputUnavailable = true;
-    return undefined;
-  }
-  try {
-    const bridge = createChatInputBridge({
-      windows: () => chatInputWindows,
-      // The Window exposes the modes of its current layout; a missing or
-      // throwing probe becomes [] in the bridge and rejects every slot.
-      slotModes: (window) => window._inputSlotModes?.() ?? [],
-    });
-    connectChatSendInput({ world, system: gameSystem }, bridge, (error) => {
-      console.error("InvUI: chat input dispatch failed.", error);
-    });
-    chatInputBridge = bridge;
-    return bridge;
-  } catch (error) {
-    // A broken event signal must not make open() fail: disable chat input.
-    console.error(
-      "InvUI: chat input bridge could not be installed; chat input is disabled.",
-      error,
-    );
-    chatInputUnavailable = true;
-    return undefined;
-  }
-}
-
-function registerChatInputWindow(window: Window): void {
-  ensureChatInputBridge();
-  chatInputWindows.add(window);
-}
-
-/** Close path: stop routing chat to the Window before handlers can reopen it. */
-function forgetChatInputWindow(window: Window): void {
-  if (!chatInputWindows.delete(window)) {
-    return;
-  }
-  try {
-    chatInputBridge?.invalidate(window);
-  } catch {
-    // Invalidation is best effort; the Window is already out of the registry.
-  }
-}
-
-/** Page/line/tab change: old notifications must not click the new layout. */
-function invalidateChatInputWindow(window: Window): void {
-  if (!chatInputWindows.has(window)) {
-    return;
-  }
-  try {
-    chatInputBridge?.invalidate(window);
-  } catch {
-    // Best effort: handleClick() still re-validates the slot and layout.
-  }
-}
-
-/**
  * Windows that are `opening` or `open` and must be closed when their viewer's
  * session ends (leave, death, dimension change, spectator) or the world shuts
  * down, one set shared by the module so each game event is subscribed once for
@@ -565,7 +449,7 @@ const lifecycleWindows = new Set<Window>();
 
 interface AfterEventSubscriptionState {
   subscribed: boolean;
-  /** Latches the feature-detection failure, like the chat input bridge. */
+  /** Latches the feature-detection failure for this signal. */
   unavailable: boolean;
 }
 
@@ -830,11 +714,16 @@ function ensureShutdownSubscription(): void {
  *   slot whose current content still matches the event's `itemStack` is
  *   written, and only when a same-tick screen change of the same item type
  *   exists. An item the player already had is left alone because the revert
- *   writes the slot's own previous stack, not an "empty" value.
+ *   writes the slot's own previous stack, not an "empty" value;
+ * - the undocumented event slot mapping is confirmed against the live
+ *   container, and when two candidate slots hold the same item, the last known
+ *   inventory contents pick the one that actually changed.
  *
- * Deferring the player-side write to the next tick removes the event-order
- * dependency: whichever of the container event and the player event arrives
- * first, both are recorded before reconciliation.
+ * The player-side write is deferred out of the event handler, so a player
+ * event delivered later in the same tick is still recorded. Unmatched changes
+ * are retried for a few ticks (the Window stays tracked while it settles):
+ * this covers a player event delivered after the first pass and a cursor item
+ * the game returns to the inventory when the screen closes.
  *
  * ponytail: one deferred reconciliation from event payloads, no per-tick
  * inventory scan. Bedrock has no item identity, so a scan would have to guess
@@ -849,6 +738,10 @@ interface ScreenItemChange {
   readonly typeId: string;
   /** Amount of this type still to match against player-side changes. */
   remaining: number;
+  /** Physical container slot the change came from, for diagnostics. */
+  readonly slot: number;
+  /** Tick the change was recorded; retries stop after a few ticks. */
+  readonly createdTick: number;
 }
 
 /** One changed player inventory slot, as reported by the after-event. */
@@ -870,6 +763,16 @@ interface CursorItemChangeRecord {
   matched: boolean;
 }
 
+/** A slot whose leaked stack may be written back by the engine/client. */
+interface RevertedSlotWatch {
+  readonly slot: number;
+  /** State the slot must be returned to. */
+  readonly expected: ItemStack | undefined;
+  /** Stacks that may be written back into the slot. */
+  readonly leaked: ItemStack[];
+  expiresAt: number;
+}
+
 /** One item entity the viewer dropped, as reported by `entityItemDrop`. */
 interface DroppedItemChangeRecord {
   readonly entity: Entity;
@@ -889,6 +792,35 @@ const playerSlotOffsets = new Map<PlayerInventoryType, number>();
 
 /** Above this many unpaired records the oldest are dropped (see #pruneGuardRecords). */
 const MAX_SCREEN_GUARD_RECORDS = 128;
+
+/**
+ * Ticks an unmatched container change is retried before it is given up as a
+ * leak. The player-side event can be delivered after the end-of-tick `run`
+ * callback, and closing the screen can return a cursor item to the inventory
+ * one tick later; both would be missed by a single pass.
+ */
+const SCREEN_GUARD_RETRY_TICKS = 5;
+
+/** Ticks a reverted slot is re-checked for the same stack coming back. */
+const SCREEN_GUARD_WATCH_TICKS = 60;
+
+/**
+ * Ticks a removed take is remembered. If a later player-side change reports
+ * the removed stack as its `beforeItemStack`, that stack was the engine/client
+ * writing the taken item back, not a new item; the revert uses the remembered
+ * pre-take state instead of re-adding it.
+ */
+const SCREEN_GUARD_RECENT_TAKE_TICKS = 200;
+
+/** `system.currentTick`, or 0 in an environment without the scheduler. */
+function currentTick(): number {
+  try {
+    const tick = server.system?.currentTick;
+    return typeof tick === "number" ? tick : 0;
+  } catch {
+    return 0;
+  }
+}
 
 /** Read `ItemStack.typeId` without letting a stale stack throw. */
 function stackType(item: ItemStack | undefined): string | undefined {
@@ -989,6 +921,28 @@ function sameItemContent(
     return leftType === undefined && rightType === undefined;
   }
   return leftType === rightType && stackAmount(left) === stackAmount(right);
+}
+
+/** Diagnostic rendering of one stack, for guard warnings only. */
+function describeStack(item: ItemStack | undefined): string {
+  const typeId = stackType(item);
+  return typeId === undefined ? "empty" : `${typeId} x${stackAmount(item)}`;
+}
+
+/** Diagnostic rendering of the player's 36 inventory slots. */
+function describePlayerInventory(player: Player): string {
+  const container = playerInventoryContainer(player);
+  if (!container) {
+    return "unavailable";
+  }
+  const parts: string[] = [];
+  for (let slot = 0; slot < container.size; slot += 1) {
+    const item = readContainerItem(container, slot);
+    if (stackType(item) !== undefined) {
+      parts.push(`${slot}:${describeStack(item)}`);
+    }
+  }
+  return parts.length === 0 ? "empty" : parts.join(",");
 }
 
 /** Windows whose screen can emit a move the guard must reconcile. */
@@ -1507,22 +1461,11 @@ export class MergedWindowBuilder extends WindowBuilder {
   }
 }
 
-let nextWindowId = 1;
-let nextInputSessionId = 1;
+/** Result of routing one click; see `_inputClick`. */
+type InputClickOutcome = "clicked" | "discarded" | "failed";
 
-/**
- * Mints the input session id of one open cycle. `Window.id` cannot be used:
- * after a script reload it starts at `window-1` again, so a delayed
- * notification from the previous run could match. The wall clock, a
- * process-local counter, and a random tail keep the id unique per open; the
- * format fits the notification grammar and is not a secret or authentication.
- */
-function createInputSessionId(): string {
-  const time = Date.now().toString(36);
-  const counter = (nextInputSessionId++).toString(36);
-  const random = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-  return `session-${time}-${counter}-${random}`;
-}
+let nextWindowId = 1;
+
 
 export class Window {
   readonly id = `window-${nextWindowId++}`;
@@ -1532,31 +1475,28 @@ export class Window {
   #lowerGui: Gui | undefined;
 
   #status: WindowStatus = "created";
-  /** Per-open chat input session id; see `_inputSessionId`. */
-  #inputSessionId: string | undefined;
   /**
-   * Generation of the current clickable layout; see `_inputLayoutGeneration`.
-   * Starts at 0 for each open and advances on a page/line/tab or slot-element
-   * change. A chat notification names this value, so one sent for the previous
-   * layout cannot click a button that now occupies the same slot.
+   * Generation of the current clickable layout. Starts at 0 for each open and
+   * advances on a page/line/tab or slot-element change, so a click queued
+   * against the previous layout is discarded when it runs.
    */
   #inputLayoutGeneration = 0;
   /**
    * Layout the current state resolves to while `#layout` still shows an earlier
    * one (a `setState()` page/line/tab change whose refresh microtask has not run
    * yet). It exists so the generation advances once per logical layout (and an
-   * A -> B -> A round trip in one timing still invalidates B's line), but it is
-   * not a click target: while it is set, `#inputLayout()` returns undefined and
-   * chat input and `handleClick()` fail closed until the render applies it.
-   * Otherwise a line minted right after `setState()` could run a new page's
-   * button while the old page is still on screen.
+   * A -> B -> A round trip in one timing still invalidates B's layout), but it
+   * is not a click target: while it is set, `#inputLayout()` returns undefined
+   * and `handleClick()` fails closed until the render applies it. Otherwise a
+   * click made right after `setState()` could run a new page's button while the
+   * old page is still on screen.
    */
   #inputPendingLayout: ResolvedGuiLayout | undefined;
   /**
    * Logical slots of `#layout` whose last render attempt failed or whose write
    * threw. They still show whatever the container had before (the previous
-   * layout's item after a mapping change), so chat input and `handleClick()`
-   * treat them as non-buttons until a later write succeeds. Without this the
+   * layout's item after a mapping change), so `handleClick()` treats them as
+   * non-buttons until a later write succeeds. Without this the
    * gate would open for a layout where a failed slot was never drawn, and a
    * click could run the new page's handler while the player sees the old item.
    */
@@ -1688,6 +1628,27 @@ export class Window {
   #guardReconcileToken = 0;
   /** True while the guard writes to the player's inventory/cursor. */
   #applyingGuard = false;
+  /**
+   * Recently reverted slots. The engine (or the client's predicted inventory)
+   * can put the taken stack back into the slot a moment later, often when the
+   * next container move is processed. Each watch re-clears the slot while it
+   * still holds the exact stack that was removed.
+   *
+   * ponytail: a fixed 3s watch on one slot. A legitimate pickup of the same
+   * stack into that slot inside the window is indistinguishable and would be
+   * removed too; shorten the window or add real item identity if that is ever
+   * observed.
+   */
+  #guardWatches: RevertedSlotWatch[] = [];
+  /** Recently removed takes, used to recognise the same stack coming back. */
+  #recentTakes: RevertedSlotWatch[] = [];
+  /**
+   * Last known player inventory contents (type and amount), used only to
+   * disambiguate the undocumented event slot mapping when two candidate slots
+   * hold the same item after a change. Refreshed while the Window is open and
+   * after a reconciliation that matched every change.
+   */
+  #inventorySnapshot: Array<ItemStack | undefined> | undefined;
   /** Set when an item change through the screen must not be rendered over. */
   #renderingHalted = false;
   /** Per-slot render tokens so an older async provider cannot overwrite a newer result. */
@@ -1795,62 +1756,6 @@ export class Window {
     return this.#inputPendingLayout === undefined && this.#layoutPresented
       ? this.#layout
       : undefined;
-  }
-
-  /**
-   * Internal: mode of every logical slot of the layout on screen, used by the
-   * automatic chat input bridge. Returns null when there is no presented layout
-   * (the state's layout is still pending, its render has not completed, or a
-   * regeneration has not shown the replacement yet), which the bridge treats as
-   * "no slot is a button" (fail closed).
-   */
-  _inputSlotModes(): readonly InputSlotMode[] | null {
-    const layout = this.#inputLayout();
-    if (!layout) {
-      return null;
-    }
-    return layout.slots.map((element, slot) => {
-      if (this.#unrenderedSlots.has(slot)) {
-        // The slot shows an earlier render (or nothing); do not offer it.
-        return "display";
-      }
-      if (isButtonElement(element)) {
-        return "button";
-      }
-      if (isInventoryLinkElement(element)) {
-        return "inventory";
-      }
-      return "display";
-    });
-  }
-
-  /**
-   * Internal: identifies the current open cycle to the chat input bridge.
-   * Changes on every successful `open()`. `Window.id` stays the public,
-   * stable `window-N` identity and is deliberately not used for this: it is
-   * reused across script reloads, where a delayed notification could match.
-   * Not part of the exported API; no UI payload is generated yet.
-   */
-  get _inputSessionId(): string | undefined {
-    return this.#inputSessionId;
-  }
-
-  /**
-   * Internal: generation of the current clickable layout for the chat input
-   * bridge. It changes when the page/line/tab or the slot-element mapping
-   * changes, and starts again at 0 for each open (the session id already
-   * distinguishes opens). A state change advances it as soon as `setState()`
-   * accepts the change, not when the render catches up, so a line minted for
-   * the page still on screen is already stale. The new generation names a
-   * layout that is not displayed yet, so input is rejected until the render
-   * applies and writes it (`#inputPendingLayout` and `#layoutPresented` keep the
-   * gap fail closed). A notification
-   * that names an older generation is rejected even if the same slot is a
-   * button again, so a line minted before a page change cannot be applied after
-   * it. Not part of the exported API.
-   */
-  get _inputLayoutGeneration(): number | undefined {
-    return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
   }
 
   /**
@@ -2148,17 +2053,10 @@ export class Window {
         this.#layoutPresented = false;
         this.#scheduleRefresh();
       }
-      // A new open cycle is a new input session: a notification naming the
-      // previous session (or a previous script reload's `window-N`) must fail.
-      // The layout generation is per open too, and is reset before open
-      // handlers can change the page.
-      this.#inputSessionId = createInputSessionId();
+      // The layout generation is per open, and is reset before open handlers
+      // can change the page.
       this.#inputLayoutGeneration = 0;
       this.#inputPendingLayout = undefined;
-      // Register before open handlers run: a handler may immediately render a
-      // button the player can click. Registration also installs the single
-      // chatSend subscription on the first successful open.
-      registerChatInputWindow(this);
       this.#runOpenHandlers();
     } catch (error) {
       // The failing operation may have reported an error (for example a
@@ -3290,12 +3188,12 @@ export class Window {
   }
 
   /**
-   * Internal: routes one click and reports whether a handler was invoked, for
-   * the automatic chat input bridge. `handleClick()` keeps the public boolean
-   * form; the boolean alone cannot tell a discarded click (safe to retry) from
-   * a handler that ran and threw (replaying it would repeat its side effects).
+   * Internal: routes one click and reports whether a handler was invoked.
+   * `handleClick()` keeps the public boolean form; the boolean alone cannot
+   * tell a discarded click (safe to retry) from a handler that ran and threw
+   * (replaying it would repeat its side effects).
    */
-  async _inputClick(slot: number): Promise<ChatInputClickOutcome> {
+  async _inputClick(slot: number): Promise<InputClickOutcome> {
     const layout = this.#status === "open" ? this.#inputLayout() : undefined;
     if (!layout || !this.#stateHandle) {
       return "discarded";
@@ -3529,10 +3427,14 @@ export class Window {
   }
 
   /**
-   * A player changed the container through the screen. This is not a click:
-   * restore the slot from the event's `beforeItemStack` and reconcile the item
-   * the player gained (or placed) on the next tick. The change is not reported
-   * when the restore succeeds; only a container write that throws fails closed.
+   * A player changed the container through the screen. Restore the slot from
+   * the event's `beforeItemStack` and reconcile the item the player gained (or
+   * placed) on the next tick. The change is not reported when the restore
+   * succeeds; only a container write that throws fails closed.
+   *
+   * A take from a button-mode slot is also dispatched as a click (see
+   * #dispatchItemChangeClick): without a JSON UI click notification, the item
+   * move is the only click signal available.
    *
    * The `opening` status is covered too: `openContainer` may dispatch the event
    * synchronously, before `open()` sets `open`. Dropping that event would let
@@ -3572,15 +3474,59 @@ export class Window {
       this.#performClose("ServerClosed", true);
       return;
     }
-    this.#recordScreenItemChange(event.beforeItemStack, event.itemStack);
+    this.#recordScreenItemChange(event.slot, event.beforeItemStack, event.itemStack);
     if (!this.#restoreScreenSlot(generation, container, event.slot, event.beforeItemStack)) {
       return;
     }
+    this.#dispatchItemChangeClick(event);
     this.#queueGuardReconcile();
+  }
+
+  /**
+   * A take from a button-mode slot is the only click signal available without
+   * a JSON UI notification. Route it through `handleClick()`, which applies the
+   * usual layout-generation, presented-layout, slot mapping, and mode checks.
+   *
+   * This is a heuristic for designs without a click bridge: it cannot tell a
+   * click from a shift-click or drag, and a click that moves no item is not
+   * seen. Only takes are considered (a stack placed into a button slot is not a
+   * click).
+   */
+  #dispatchItemChangeClick(event: WindowContainerItemChangeEvent): void {
+    const layout = this.#inputLayout();
+    if (!layout) {
+      return;
+    }
+    const before = event.beforeItemStack;
+    if (before === undefined) {
+      return;
+    }
+    const after = event.itemStack;
+    if (
+      after !== undefined &&
+      stackType(after) === stackType(before) &&
+      stackAmount(after) >= stackAmount(before)
+    ) {
+      return;
+    }
+    const row = Math.floor(event.slot / PHYSICAL_COLUMNS);
+    const column = event.slot % PHYSICAL_COLUMNS;
+    if (row < 0 || row >= layout.height || column < 0 || column >= layout.width) {
+      return;
+    }
+    const logical = row * layout.width + column;
+    if (this.#unrenderedSlots.has(logical)) {
+      return;
+    }
+    if (!isButtonElement(layout.slots[logical])) {
+      return;
+    }
+    void this.handleClick(logical);
   }
 
   /** Split one container change into the item types the screen lost or gained. */
   #recordScreenItemChange(
+    slot: number,
     before: ItemStack | undefined,
     after: ItemStack | undefined,
   ): void {
@@ -3589,30 +3535,36 @@ export class Window {
     if (beforeType !== undefined && beforeType === afterType) {
       const lost = stackAmount(before) - stackAmount(after);
       if (lost > 0) {
-        this.#screenChanges.push({ kind: "take", typeId: beforeType, remaining: lost });
+        this.#pushScreenChange("take", beforeType, lost, slot);
       } else if (lost < 0) {
-        this.#screenChanges.push({
-          kind: "placement",
-          typeId: afterType,
-          remaining: -lost,
-        });
+        this.#pushScreenChange("placement", afterType, -lost, slot);
       }
       return;
     }
     if (beforeType !== undefined) {
-      this.#screenChanges.push({
-        kind: "take",
-        typeId: beforeType,
-        remaining: stackAmount(before),
-      });
+      this.#pushScreenChange("take", beforeType, stackAmount(before), slot);
     }
     if (afterType !== undefined) {
-      this.#screenChanges.push({
-        kind: "placement",
-        typeId: afterType,
-        remaining: stackAmount(after),
-      });
+      this.#pushScreenChange("placement", afterType, stackAmount(after), slot);
     }
+  }
+
+  #pushScreenChange(
+    kind: "take" | "placement",
+    typeId: string,
+    amount: number,
+    slot: number,
+  ): void {
+    if (amount <= 0) {
+      return;
+    }
+    this.#screenChanges.push({
+      kind,
+      typeId,
+      remaining: amount,
+      slot,
+      createdTick: currentTick(),
+    });
   }
 
   /**
@@ -3705,22 +3657,23 @@ export class Window {
     this.#playerChanges = [];
     this.#cursorChanges = [];
     this.#dropChanges = [];
-    if (screenChanges.length === 0) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
+    if (screenChanges.length === 0 && this.#guardWatches.length === 0) {
       return;
     }
     const container = playerInventoryContainer(this.viewer);
     const cursor = this.#cursorInventory();
-    if (!container && !cursor) {
-      return;
-    }
     const netScreenChanges = this.#collapseScreenChanges(screenChanges);
     const netPlayerChanges = this.#collapsePlayerChanges(playerChanges);
     const netCursorChanges = this.#collapseCursorChanges(cursorChanges);
     this.#applyingGuard = true;
     try {
+      const watchesActive = this.#verifyGuardWatches();
+      if (netScreenChanges.length === 0) {
+        if (watchesActive) {
+          this.#queueGuardReconcile();
+        }
+        return;
+      }
       for (const screenChange of netScreenChanges) {
         if (screenChange.kind === "take") {
           this.#revertGainedByPlayer(
@@ -3741,9 +3694,143 @@ export class Window {
           );
         }
       }
+
+      // Keep unmatched changes for a few ticks: the player-side event can
+      // arrive after this pass, and closing the screen can return a cursor
+      // item to the inventory on a later tick. The window stays tracked for
+      // those events (see #teardown), even after it closed.
+      const now = currentTick();
+      const carried: ScreenItemChange[] = [];
+      for (const change of netScreenChanges) {
+        if (change.remaining <= 0) {
+          continue;
+        }
+        if (now - change.createdTick <= SCREEN_GUARD_RETRY_TICKS) {
+          carried.push(change);
+          continue;
+        }
+        const detail = netPlayerChanges
+          .map(
+            (record) =>
+              `${record.inventoryType}:${record.slot} ${describeStack(record.before)} -> ${describeStack(record.after)}`,
+          )
+          .join("; ");
+        console.warn(
+          `InvUI: could not remove ${change.typeId} x${change.remaining} taken from screen slot ${change.slot}; the item may remain with the player. playerChanges=[${detail}] inventory=[${describePlayerInventory(this.viewer)}]`,
+        );
+      }
+      if (carried.length > 0) {
+        this.#screenChanges = carried.concat(this.#screenChanges);
+        this.#queueGuardReconcile();
+        return;
+      }
+      if (this.#status !== "opening" && this.#status !== "open") {
+        itemGuardWindows.delete(this);
+        return;
+      }
+      this.#refreshInventorySnapshot();
     } finally {
       this.#applyingGuard = false;
     }
+  }
+
+  /**
+   * Remember a take that was just removed from `slot`. The watch re-clears the
+   * slot if the engine/client writes the stack back, and the recent-take list
+   * lets a later event's `before` be recognised as that ghost instead of being
+   * restored.
+   */
+  #watchRevertedSlot(
+    slot: number,
+    expected: ItemStack | undefined,
+    leaked: ItemStack | undefined,
+  ): void {
+    if (leaked === undefined || stackType(leaked) === undefined) {
+      return;
+    }
+    let expectedCopy: ItemStack | undefined;
+    let leakedCopy: ItemStack;
+    try {
+      expectedCopy = expected === undefined ? undefined : expected.clone();
+      leakedCopy = leaked.clone();
+    } catch {
+      return;
+    }
+    const now = currentTick();
+
+    const index = this.#guardWatches.findIndex((watch) => watch.slot === slot);
+    if (index >= 0) {
+      const existing = this.#guardWatches[index];
+      // Keep the first `expected` (the true pre-take state). A later take in
+      // the same slot may have written a ghost `before`, which must not become
+      // the value the slot is restored to.
+      if (!existing.leaked.some((item) => sameItemContent(item, leakedCopy))) {
+        existing.leaked.push(leakedCopy);
+      }
+      existing.expiresAt = Math.max(
+        existing.expiresAt,
+        now + SCREEN_GUARD_WATCH_TICKS,
+      );
+    } else {
+      this.#guardWatches.push({
+        slot,
+        expected: expectedCopy,
+        leaked: [leakedCopy],
+        expiresAt: now + SCREEN_GUARD_WATCH_TICKS,
+      });
+    }
+
+    this.#recentTakes = this.#recentTakes.filter((record) => now <= record.expiresAt);
+    this.#recentTakes.push({
+      slot,
+      expected: expectedCopy === undefined ? undefined : expectedCopy.clone(),
+      leaked: [leakedCopy.clone()],
+      expiresAt: now + SCREEN_GUARD_RECENT_TAKE_TICKS,
+    });
+    this.#queueGuardReconcile();
+  }
+
+  /**
+   * Remove the watched stack again when the engine/client puts it back into
+   * the reverted slot (often while the next container move is processed).
+   * Returns true while any watch is still active so the next tick is queued.
+   */
+  #verifyGuardWatches(): boolean {
+    if (this.#guardWatches.length === 0) {
+      return false;
+    }
+    const container = playerInventoryContainer(this.viewer);
+    if (!container) {
+      this.#guardWatches = [];
+      return false;
+    }
+    const now = currentTick();
+    const keep: RevertedSlotWatch[] = [];
+    for (const watch of this.#guardWatches) {
+      if (now > watch.expiresAt) {
+        continue;
+      }
+      const current = readContainerItem(container, watch.slot);
+      if (watch.leaked.some((item) => sameItemContent(current, item))) {
+        try {
+          container.setItem(watch.slot, watch.expected);
+        } catch (error) {
+          this.#report(error, "itemChange", watch.slot);
+          continue;
+        }
+        // Keep watching for a moment in case the engine writes it back again.
+        watch.expiresAt = Math.max(watch.expiresAt, now + 5);
+        keep.push(watch);
+        continue;
+      }
+      if (sameItemContent(current, watch.expected)) {
+        keep.push(watch);
+        continue;
+      }
+      // The slot now holds something else (the player moved on): stop.
+    }
+    this.#guardWatches = keep;
+    return keep.length > 0;
   }
 
   /**
@@ -3778,6 +3865,8 @@ export class Window {
           kind: change.kind,
           typeId: change.typeId,
           remaining: leftover,
+          slot: change.slot,
+          createdTick: change.createdTick,
         });
       }
     }
@@ -3863,7 +3952,7 @@ export class Window {
       ) {
         continue;
       }
-      if (!container || !this.#revertPlayerSlot(container, change)) {
+      if (!container || !this.#revertPlayerSlot(container, change, true)) {
         continue;
       }
       change.matchedGain = true;
@@ -3916,6 +4005,53 @@ export class Window {
       change.matched = true;
       screenChange.remaining -= amount;
     }
+    if (screenChange.remaining <= 0 || !container) {
+      return;
+    }
+    this.#revertSnapshotGain(screenChange, container);
+  }
+
+  /**
+   * Last resort when the player-side event is missing (or arrives later than
+   * every retry): compare the live player inventory with the snapshot taken
+   * before the screen change and revert a slot whose gain matches the item the
+   * screen lost. The slot is only touched when its item type matches and the
+   * gain is no larger than what is still unaccounted for.
+   */
+  #revertSnapshotGain(screenChange: ScreenItemChange, container: Container): void {
+    const snapshot = this.#inventorySnapshot;
+    if (snapshot === undefined) {
+      return;
+    }
+    const size = Math.min(container.size, snapshot.length);
+    for (let slot = 0; slot < size && screenChange.remaining > 0; slot += 1) {
+      const current = readContainerItem(container, slot);
+      if (stackType(current) !== screenChange.typeId) {
+        continue;
+      }
+      const known = snapshot[slot];
+      const knownAmount =
+        stackType(known) === screenChange.typeId ? stackAmount(known) : 0;
+      const gained = stackAmount(current) - knownAmount;
+      if (gained <= 0 || gained > screenChange.remaining) {
+        continue;
+      }
+      let restore: ItemStack | undefined;
+      try {
+        restore = known === undefined ? undefined : known.clone();
+      } catch {
+        restore = known;
+      }
+      try {
+        container.setItem(slot, restore);
+      } catch (error) {
+        this.#report(error, "itemChange", slot);
+        continue;
+      }
+      snapshot[slot] = restore;
+      this.#watchRevertedSlot(slot, restore, current);
+      screenChange.remaining -= gained;
+    }
   }
 
   /**
@@ -3963,7 +4099,7 @@ export class Window {
       ) {
         continue;
       }
-      if (!container || !this.#revertPlayerSlot(container, change)) {
+      if (!container || !this.#revertPlayerSlot(container, change, false)) {
         continue;
       }
       change.matchedLoss = true;
@@ -4013,7 +4149,11 @@ export class Window {
    * the event's `itemStack`. When two candidates match, or none does, nothing
    * is written: refusing to guess is safer than deleting a player's own stack.
    */
-  #revertPlayerSlot(container: Container, change: PlayerSlotChangeRecord): boolean {
+  #revertPlayerSlot(
+    container: Container,
+    change: PlayerSlotChangeRecord,
+    trackTake: boolean,
+  ): boolean {
     const expected = change.after;
     if (!expected) {
       return false;
@@ -4022,8 +4162,20 @@ export class Window {
     if (slot === undefined) {
       return false;
     }
+    // If the `before` stack is one this guard recently removed from the same
+    // slot, the engine/client has put the ghost back. Revert to the state from
+    // before the take instead of writing the ghost stack back in.
+    const ghost = this.#findRecentTake(slot, change.before);
+    const target = ghost === undefined ? change.before : ghost.expected;
     try {
-      container.setItem(slot, change.before);
+      container.setItem(slot, target);
+      const snapshot = this.#inventorySnapshot;
+      if (snapshot && slot < snapshot.length) {
+        snapshot[slot] = target === undefined ? undefined : target.clone();
+      }
+      if (trackTake) {
+        this.#watchRevertedSlot(slot, target, change.after);
+      }
       return true;
     } catch (error) {
       // The duplicate stays, but the screen content is consistent; closing
@@ -4031,6 +4183,27 @@ export class Window {
       this.#report(error, "itemChange", slot);
       return false;
     }
+  }
+
+  /** A recent take whose removed stack equals `before` in the same slot. */
+  #findRecentTake(
+    slot: number,
+    before: ItemStack | undefined,
+  ): RevertedSlotWatch | undefined {
+    if (before === undefined) {
+      return undefined;
+    }
+    const now = currentTick();
+    this.#recentTakes = this.#recentTakes.filter((record) => now <= record.expiresAt);
+    for (const record of this.#recentTakes) {
+      if (record.slot !== slot) {
+        continue;
+      }
+      if (record.leaked.some((item) => sameItemContent(item, before))) {
+        return record;
+      }
+    }
+    return undefined;
   }
 
   /** Map the event's slot to a container index, confirmed by current content. */
@@ -4064,9 +4237,29 @@ export class Window {
     if (change.inventoryType !== "Hotbar") {
       add(change.slot + 9);
     }
-    const matches = candidates.filter((slot) =>
+    let matches = candidates.filter((slot) =>
       sameTypeAndAmount(readContainerItem(container, slot), expected),
     );
+    if (matches.length > 1) {
+      // Two candidates hold the same item now. The candidate whose last known
+      // content equals the event's `beforeItemStack` is the one that changed.
+      const snapshot = this.#inventorySnapshot;
+      if (snapshot) {
+        const beforeType = stackType(change.before);
+        const beforeAmount = stackAmount(change.before);
+        const byBefore = matches.filter((slot) => {
+          const known = snapshot[slot];
+          const knownType = stackType(known);
+          if (knownType === undefined) {
+            return beforeType === undefined;
+          }
+          return knownType === beforeType && stackAmount(known) === beforeAmount;
+        });
+        if (byBefore.length === 1) {
+          matches = byBefore;
+        }
+      }
+    }
     if (matches.length !== 1) {
       return undefined;
     }
@@ -4139,6 +4332,27 @@ export class Window {
     }
   }
 
+  /** Record the player's current inventory contents (type and amount). */
+  #refreshInventorySnapshot(): void {
+    const container = playerInventoryContainer(this.viewer);
+    if (!container) {
+      this.#inventorySnapshot = undefined;
+      return;
+    }
+    const snapshot: Array<ItemStack | undefined> = [];
+    for (let slot = 0; slot < container.size; slot += 1) {
+      const item = readContainerItem(container, slot);
+      let copy: ItemStack | undefined;
+      try {
+        copy = item === undefined ? undefined : item.clone();
+      } catch {
+        copy = item;
+      }
+      snapshot.push(copy);
+    }
+    this.#inventorySnapshot = snapshot;
+  }
+
   /**
    * Internal: one `playerInventoryItemChange` of any player; the viewer filter
    * and the "screen is open" check happen here. Only recorded, never acted on:
@@ -4148,7 +4362,13 @@ export class Window {
     if (this.#applyingGuard) {
       return;
     }
-    if (this.#status !== "opening" && this.#status !== "open") {
+    // Keep recording after a close while a screen change is still pending:
+    // closing with an item on the cursor returns it to the inventory then.
+    if (
+      this.#status !== "opening" &&
+      this.#status !== "open" &&
+      this.#screenChanges.length === 0
+    ) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -4182,6 +4402,9 @@ export class Window {
       matchedLoss: false,
     });
     this.#pruneGuardRecords();
+    if (this.#screenChanges.length > 0) {
+      this.#queueGuardReconcile();
+    }
   }
 
   /** Internal: one `playerCursorItemGrab`; see {@link _onViewerInventoryChange}. */
@@ -4189,7 +4412,11 @@ export class Window {
     if (this.#applyingGuard) {
       return;
     }
-    if (this.#status !== "opening" && this.#status !== "open") {
+    if (
+      this.#status !== "opening" &&
+      this.#status !== "open" &&
+      this.#screenChanges.length === 0
+    ) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -4206,6 +4433,9 @@ export class Window {
     }
     this.#cursorChanges.push({ kind: "grab", item, matched: false });
     this.#pruneGuardRecords();
+    if (this.#screenChanges.length > 0) {
+      this.#queueGuardReconcile();
+    }
   }
 
   /** Internal: one `playerCursorItemRelease`; see {@link _onViewerInventoryChange}. */
@@ -4213,7 +4443,11 @@ export class Window {
     if (this.#applyingGuard) {
       return;
     }
-    if (this.#status !== "opening" && this.#status !== "open") {
+    if (
+      this.#status !== "opening" &&
+      this.#status !== "open" &&
+      this.#screenChanges.length === 0
+    ) {
       return;
     }
     if (!isSamePlayer(event.player, this.viewer)) {
@@ -4230,6 +4464,9 @@ export class Window {
     }
     this.#cursorChanges.push({ kind: "release", item, matched: false });
     this.#pruneGuardRecords();
+    if (this.#screenChanges.length > 0) {
+      this.#queueGuardReconcile();
+    }
   }
 
   /**
@@ -4241,7 +4478,11 @@ export class Window {
     if (this.#applyingGuard) {
       return;
     }
-    if (this.#status !== "opening" && this.#status !== "open") {
+    if (
+      this.#status !== "opening" &&
+      this.#status !== "open" &&
+      this.#screenChanges.length === 0
+    ) {
       return;
     }
     const viewerId = this.#viewerId ?? readId(this.viewer);
@@ -4272,6 +4513,9 @@ export class Window {
       this.#dropChanges.push({ entity: itemEntity, item, matched: false });
     }
     this.#pruneGuardRecords();
+    if (this.#screenChanges.length > 0) {
+      this.#queueGuardReconcile();
+    }
   }
 
   /**
@@ -4284,6 +4528,9 @@ export class Window {
   #registerForLifecycleClose(): void {
     lifecycleWindows.add(this);
     itemGuardWindows.add(this);
+    // A new open starts with no watch from the previous screen.
+    this.#guardWatches = [];
+    this.#recentTakes = [];
     ensurePlayerLeaveSubscription();
     ensureEntityDieSubscription();
     ensurePlayerDimensionChangeSubscription();
@@ -4296,6 +4543,7 @@ export class Window {
     } catch {
       this.#viewerId = undefined;
     }
+    this.#refreshInventorySnapshot();
   }
 
   /**
@@ -4612,17 +4860,17 @@ export class Window {
    *
    * The state is accepted synchronously by `setState()` but the rendered layout
    * is only replaced asynchronously. In between, the old generation still names
-   * the old layout, so a notification minted from the just-read generation would
-   * pass validation and could invoke the button the *previous* page had in that
-   * slot. Advancing here makes that line fail as stale; remembering the layout
-   * also keeps input fail closed (`#inputPendingLayout`) until the render
-   * displays it, so the new generation cannot run an unseen button either.
+   * the old layout, so a click captured against the just-read generation could
+   * invoke the button the *previous* page had in that slot. Advancing here
+   * makes that click stale; remembering the layout also keeps input closed
+   * (`#inputPendingLayout`) until the render displays it, so the new generation
+   * cannot run an unseen button either.
    *
    * The layout is compared against the last one the generation was advanced for
    * (`#inputPendingLayout`) so an A -> B -> A state round trip in one timing
    * advances twice: the B layout was the logical clickable layout in between,
-   * and a line minted for it must not become valid again when the state returns
-   * to A. This mirrors the render-side counter in `#applyLayout`.
+   * and a click queued for it must not become valid again when the state
+   * returns to A. This mirrors the render-side counter in `#applyLayout`.
    */
   #noteInputLayoutChange(): void {
     const handle = this.#stateHandle;
@@ -4642,7 +4890,6 @@ export class Window {
       return;
     }
     this.#inputLayoutGeneration += 1;
-    invalidateChatInputWindow(this);
     this.#inputPendingLayout =
       this.#layout !== undefined && sameClickableLayout(this.#layout, layout)
         ? undefined
@@ -4883,15 +5130,14 @@ export class Window {
         ? !sameClickableLayout(pending, layout)
         : previous !== undefined && !sameClickableLayout(previous, layout)
     ) {
-      // Advance the wire generation before invalidating the queue: a line
-      // minted for the previous layout must fail even if it is delivered only
-      // after this change (the queue epoch alone cannot catch that).
+      // Advance the generation before the layout changes: a click queued for
+      // the previous layout must fail even if it runs only after this change
+      // (the queue epoch alone cannot catch that).
       this.#inputLayoutGeneration += 1;
-      invalidateChatInputWindow(this);
     }
     // Move element subscriptions as soon as the new layout exists. Waiting for
-    // async renders would let a notification hit the previous slot mapping and
-    // be lost for the slot's new position (design 11.4).
+    // async renders would let an update hit the previous slot mapping and be
+    // lost for the slot's new position (design 11.4).
     this.#subscribeToUpdates();
   }
 
@@ -5350,21 +5596,32 @@ export class Window {
    * execution forbids. Everything else is local and released either way.
    */
   #teardown(restricted = false): void {
-    // Drop the Window from chat routing and lifecycle handling first: a close
-    // handler may reopen it, and the reopened generation must be registered
-    // afresh (with its own viewer id) instead of inheriting this teardown.
-    forgetChatInputWindow(this);
+    // Drop the Window from lifecycle handling first: a close handler may
+    // reopen it, and the reopened generation must be registered afresh (with
+    // its own viewer id) instead of inheriting this teardown.
     lifecycleWindows.delete(this);
-    itemGuardWindows.delete(this);
-    // A reconciliation queued for the old generation must not touch the
-    // player after a close/reopen; the token invalidates it.
-    this.#guardReconcileToken += 1;
-    this.#guardReconcileQueued = false;
-    this.#applyingGuard = false;
-    this.#screenChanges = [];
-    this.#playerChanges = [];
-    this.#cursorChanges = [];
-    this.#dropChanges = [];
+    // Keep the guard alive while a screen change is still unmatched: closing
+    // the screen can return an item from the cursor to the inventory, and the
+    // player-side event for that arrives after this teardown. The queued
+    // reconciliation removes the Window from the set when it settles.
+    const keepGuard = !restricted && this.#screenChanges.length > 0;
+    if (keepGuard) {
+      itemGuardWindows.add(this);
+      this.#queueGuardReconcile();
+    } else {
+      itemGuardWindows.delete(this);
+      // A reconciliation queued for the old generation must not touch the
+      // player after a close/reopen; the token invalidates it.
+      this.#guardReconcileToken += 1;
+      this.#guardReconcileQueued = false;
+      this.#applyingGuard = false;
+      this.#screenChanges = [];
+      this.#playerChanges = [];
+      this.#cursorChanges = [];
+      this.#dropChanges = [];
+    }
+    this.#guardWatches = [];
+    this.#recentTakes = [];
 
     // Detach every handle before calling it. An adapter or element unsubscribe
     // may throw, and its error handler can close and reopen the Window: the
