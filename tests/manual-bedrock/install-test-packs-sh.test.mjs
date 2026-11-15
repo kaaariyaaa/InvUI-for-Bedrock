@@ -171,6 +171,21 @@ test('既知候補を自動検出し、選んだパックだけをコピーす�
   assert.match(result.stdout, /実機未検証/);
 });
 
+test('bedrock-on-linux の深い com.mojang を自動検出し、無いパックフォルダを作る', () => {
+  const home = makeHome();
+  const deep = path.join(
+    home,
+    '.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/steamuser/AppData/Roaming/Minecraft Bedrock/Users/11964040473149336764/games/com.mojang',
+  );
+  fs.mkdirSync(path.join(deep, 'minecraftpe'), { recursive: true });
+
+  const result = runScript({ home, input: '3\n' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assertPackCopied(deep, PACKS[2]);
+  assert.ok(fs.existsSync(path.join(deep, 'behavior_packs')), 'behavior_packs を作る');
+  assert.ok(fs.existsSync(path.join(deep, 'resource_packs')), 'resource_packs を作る');
+});
+
 test('all は 7 パックすべてをコピーする', () => {
   const home = makeHome();
   const com = makeComMojang(path.join(home, '.local/share/mcpelauncher/games/com.mojang'));

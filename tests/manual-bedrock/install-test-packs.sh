@@ -26,6 +26,32 @@ CANDIDATES=(
   "${HOME:-}/.config/mcpelauncher/games/com.mojang"
 )
 
+# bedrock-on-linux / Proton 系は 1 ユーザーごとに深い場所へ置くので、グロブで拾う。
+# （"Minecraft Bedrock" とユーザー ID 部分は環境ごとに違うため固定文字列にしない）
+# パスに空白が入るため compgen で展開する。
+PATTERNS=(
+  "${HOME:-}/.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+  "${HOME:-}/.local/share/bedrock-on-linux/*/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+  "${HOME:-}/.steam/steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+  "${HOME:-}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+  "${HOME:-}/.wine/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+)
+
+SEEN=' '
+while IFS= read -r candidate; do
+  [ -n "$candidate" ] && [ -d "$candidate" ] || continue
+  # 複数プロファイルや重複パス（symlink）は 1 つに畳む。Shared は共有プロファイルなので除く。
+  case "$candidate" in */Users/Shared/*) continue ;; esac
+  resolved=$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")
+  case "$SEEN" in *" $resolved "*) continue ;; esac
+  SEEN="$SEEN$resolved "
+  CANDIDATES+=("$candidate")
+done < <(
+  for pattern in "${PATTERNS[@]}"; do
+    compgen -G "$pattern" || true
+  done
+)
+
 fail() {
   printf '\n[ERROR] %s\n' "$1" >&2
   exit 1
@@ -45,7 +71,9 @@ elif [ -n "${MC_COMOJANG:-}" ]; then
 else
   FOUND=()
   for candidate in "${CANDIDATES[@]}"; do
-    if [ -d "$candidate/behavior_packs" ] && [ -d "$candidate/resource_packs" ]; then
+    # パック未導入の com.mojang もあるので、ゲームが作るフォルダでも判定する。
+    if { [ -d "$candidate/behavior_packs" ] && [ -d "$candidate/resource_packs" ]; } ||
+       [ -d "$candidate/minecraftpe" ]; then
       FOUND+=("$candidate")
     fi
   done
@@ -80,9 +108,12 @@ else
 fi
 
 GLOBAL=${GLOBAL%/}
-if [ ! -d "$GLOBAL/behavior_packs" ] || [ ! -d "$GLOBAL/resource_packs" ]; then
-  fail "behavior_packs と resource_packs がないため com.mojang として使えません: $GLOBAL"
+if [ ! -d "$GLOBAL" ]; then
+  fail "com.mojang が見つかりません: $GLOBAL"
 fi
+# パック未導入の環境ではフォルダが無いので作る（既存ファイルは触らない）。
+mkdir -p "$GLOBAL/behavior_packs" "$GLOBAL/resource_packs" ||
+  fail "パックフォルダを作成できません: $GLOBAL"
 
 # --- パック一覧と選択 -----------------------------------------------------------
 
