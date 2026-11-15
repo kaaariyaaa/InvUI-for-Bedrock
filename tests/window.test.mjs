@@ -17,6 +17,7 @@ const playerDimensionChangeCallbacks = new Set();
 const playerGameModeChangeCallbacks = new Set();
 const shutdownCallbacks = new Set();
 export const scheduledRuns = [];
+export const dynamicProperties = new Map();
 
 export function emitShutdown() {
   for (const callback of [...shutdownCallbacks]) callback({});
@@ -108,6 +109,16 @@ export class ItemStack {
 }
 
 export const world = {
+  getDynamicProperty(identifier) {
+    return dynamicProperties.get(identifier);
+  },
+  setDynamicProperty(identifier, value) {
+    if (value === undefined) {
+      dynamicProperties.delete(identifier);
+    } else {
+      dynamicProperties.set(identifier, value);
+    }
+  },
   beforeEvents: {
     chatSend: {
       subscribe(callback) {
@@ -230,6 +241,13 @@ const noShutdownSource = mockSource.replace(
   "",
 );
 const noShutdownUrl = `data:text/javascript;base64,${Buffer.from(noShutdownSource).toString("base64")}`;
+// Same double without world dynamic properties, for the default-manager
+// fallback (a reduced world or test double keeps the previous in-memory manager).
+const noDynamicSource = mockSource.replace(
+  /  getDynamicProperty\(identifier\) \{[\s\S]*?\n  \},\n  setDynamicProperty\(identifier, value\) \{[\s\S]*?\n  \},\n/,
+  "",
+);
+const noDynamicUrl = `data:text/javascript;base64,${Buffer.from(noDynamicSource).toString("base64")}`;
 // The shutdown latch is permanent per Window module instance, so a shutdown
 // test must emit into its own double: the shared double would latch every
 // already-loaded module (including the default one) and break any test that
@@ -256,7 +274,9 @@ registerHooks({
             ? noLifecycleUrl
             : parentUrl.includes("no-shutdown")
             ? noShutdownUrl
-            : shutdownTag
+            : parentUrl.includes("no-dynamic-properties")
+              ? noDynamicUrl
+              : shutdownTag
               ? shutdownMockUrl(shutdownTag)
               : mockUrl,
         shortCircuit: true,
@@ -308,6 +328,7 @@ const {
 } = await load("../src/window");
 const {
   createdContainers,
+  dynamicProperties,
   emitChatSend,
   emitEntityDie,
   emitPlayerDimensionChange,
@@ -1290,6 +1311,132 @@ test("persisted records with the previous schema token are rejected", async () =
       error instanceof StateConflictError && error.code === "SCHEMA_MISMATCH",
   );
   assert.equal(window.status, "closed");
+});
+
+test("the default state manager persists through the world's dynamic properties", async () => {
+  const gui = Gui.normal({ structure: ["a"] });
+  const key = "default-store-persist";
+  const first = Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("persistent")
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+  await first.open();
+  first.setState({ page: 2 });
+  assert.ok(
+    [...dynamicProperties.values()].some((raw) => raw.includes(key)),
+    "the default manager writes to the world's dynamic properties",
+  );
+  first.close();
+
+  // A fresh Window module has its own default manager, which stands in for a
+  // script reload: it can only find the state through the world store.
+  const reloadedModule = await import(
+    new URL("../src/window.ts?default-state-store", import.meta.url).href
+  );
+  const reloaded = reloadedModule.Window.builder()
+    .setViewer(player)
+    .setUpperGui(gui)
+    .setStateScope("shared")
+    .setStateKey(key)
+    .setStateLifetime("persistent")
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+  await reloaded.open();
+  assert.deepEqual(reloaded.getState(), { page: 2 });
+  reloaded.close();
+});
+
+test("a world without dynamic properties keeps the previous default manager", async () => {
+  const { Window: ReducedWorldWindow } = await import(
+    new URL("../src/window.ts?no-dynamic-properties", import.meta.url).href
+  );
+  const window = ReducedWorldWindow.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .build();
+
+  await window.open();
+  assert.equal(window.status, "open");
+  window.close();
+});
+
+test("a persistent save failure from setState keeps the state and reaches onError", async () => {
+  let writes = 0;
+  const records = new Map();
+  const store = {
+    getItem: (key) => records.get(key) ?? null,
+    setItem(key, value) {
+      writes += 1;
+      if (writes > 1) {
+        throw new Error("store unavailable");
+      }
+      records.set(key, value);
+    },
+    removeItem: (key) => records.delete(key),
+  };
+  const errors = [];
+  const manager = new StateManager(store, {
+    onError: (error) => errors.push(error),
+  });
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setStateScope("shared")
+    .setStateKey("save-failure")
+    .setStateLifetime("persistent")
+    .setStateManager(manager)
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  assert.throws(() => window.setState({ page: 2 }), /store unavailable/);
+  assert.deepEqual(window.getState(), {}, "the failed change is not committed");
+  assert.equal(errors.length, 1, "the failure is reported to the state manager");
+  assert.match(errors[0].message, /store unavailable/);
+  assert.equal(
+    JSON.parse([...records.values()][0]).guiState.page,
+    undefined,
+    "the last committed record is left for restore",
+  );
+  window.close();
+});
+
+test("a failing initial persistent save during open reaches the Window error handler", async () => {
+  const store = {
+    getItem: () => null,
+    setItem() {
+      throw new Error("store unavailable");
+    },
+    removeItem() {},
+  };
+  const manager = new StateManager(store);
+  const errors = [];
+  const window = Window.builder()
+    .setViewer(player)
+    .setUpperGui(Gui.normal({ structure: ["a"] }))
+    .setStateScope("shared")
+    .setStateKey("open-save-failure")
+    .setStateLifetime("persistent")
+    .setStateManager(manager)
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await assert.rejects(() => window.open(), /store unavailable/);
+  assert.equal(window.status, "closed");
+  assert.deepEqual(
+    errors.map(({ context }) => context.operation),
+    ["open"],
+    "the failed save is reported to the Window, not only thrown",
+  );
 });
 
 test("clicks route to the Item at the slot only while open", async () => {

@@ -61,8 +61,11 @@ export interface StoredGuiState {
 
 /**
  * Synchronous persistence port. `getItem` returns `null`/`undefined` when the
- * key is absent. Implementations may throw; the error propagates to the caller
- * and the in-memory state is not committed.
+ * key is absent. Implementations may throw; a `setItem` failure is reported
+ * through {@link StateManagerOptions.onError} (or the log when none is
+ * configured) and then propagates to the caller, and the in-memory state is
+ * not committed. The last successfully written record stays in the store, so
+ * the change can be retried and a reload restores that record.
  *
  * Writes are not rolled back. A store that throws after partially applying a
  * write can leave the new record in place while the in-memory state keeps the
@@ -83,7 +86,8 @@ export interface StateManagerOptions {
    * subscriber throwing. With {@link StateManagerOptions.quarantineCorrupt}
    * enabled, a recovered corrupt record is reported here; otherwise corrupt
    * persisted data is surfaced as a {@link StateCorruptionError} from
-   * `acquire`.
+   * `acquire`. A failed store save is reported here as well, before the
+   * original error propagates to the caller (see {@link StateStore}).
    */
   onError?: (error: unknown) => void;
   /**
@@ -230,9 +234,13 @@ export interface StateHandle {
    * afterwards.
    *
    * A throwing store write aborts the commit: in-memory state and subscribers
-   * stay on the previous value. The write itself is not rolled back, so a
-   * store that partially applied it and then threw may already hold the new
-   * record (see {@link StateStore}).
+   * stay on the previous value, and the failure is reported through
+   * {@link StateManagerOptions.onError} (or logged when none is configured)
+   * before the original error propagates. The last committed record stays in
+   * the store, so the caller can retry the same patch and a reload restores
+   * that record. The write itself is not rolled back, so a store that partially
+   * applied it and then threw may already hold the new record (see
+   * {@link StateStore}).
    *
    * The identity is locked while the store write runs: a store hook that
    * reentrantly calls `acquire`, `migrate`, `remove`, or `set` for the same
@@ -976,7 +984,10 @@ export class StateManager {
    * Registers a Window's interest in a state identity and returns its lease.
    * The state starts from the live value, then persisted data (applying a
    * declared {@link StateManagerOptions.migrations} match when one exists),
-   * then `initial`.
+   * then `initial`. A persistent `initial` is written before the handle is
+   * returned; if that write fails, the failure is reported through
+   * {@link StateManagerOptions.onError} (or logged) and `acquire` throws
+   * without registering the state, so a retry starts from the store again.
    *
    * Acquiring an identity whose automatic-migration callback,
    * {@link migrate} callback, {@link remove} store call, persistent
@@ -1153,7 +1164,7 @@ export class StateManager {
         schema: normalized.schema,
         guiState,
       };
-      this.#store.setItem(storageKeyOf(identity), JSON.stringify(record));
+      this.#writeRecord(identity, record);
     } finally {
       this.#mutating.delete(identity);
     }
@@ -1499,11 +1510,6 @@ export class StateManager {
     >,
     state: StateSnapshot,
   ): void {
-    if (this.#store === undefined) {
-      throw new StateValidationError(
-        "persistent lifetime requires an injected state store",
-      );
-    }
     const record: StoredGuiState = {
       version: STATE_STORAGE_VERSION,
       scope: entry.scope,
@@ -1513,10 +1519,33 @@ export class StateManager {
       schema: entry.schema,
       guiState: state,
     };
-    this.#store.setItem(
-      storageKeyOf(identity),
-      JSON.stringify(record),
-    );
+    this.#writeRecord(identity, record);
+  }
+
+  /**
+   * Writes one complete persisted record and reports a store failure through
+   * the manager's error channel before rethrowing it.
+   *
+   * The in-memory state has not been committed when this throws, so the last
+   * successfully written record stays in the store, survives a reload, and the
+   * failed change can be retried once the store recovers. Reporting here keeps
+   * a save failure from ending as a bare exception (design 14.2): the
+   * configured `onError`, or the log when none is configured, always sees it.
+   */
+  #writeRecord(identity: string, record: StoredGuiState): void {
+    const store = this.#store;
+    if (store === undefined) {
+      throw new StateValidationError(
+        "persistent lifetime requires an injected state store",
+      );
+    }
+    const value = JSON.stringify(record);
+    try {
+      store.setItem(storageKeyOf(identity), value);
+    } catch (error) {
+      this._reportError(error);
+      throw error;
+    }
   }
 
   /**
@@ -1623,7 +1652,7 @@ export class StateManager {
       schema: normalized.schema,
       guiState,
     };
-    store.setItem(storageKeyOf(identity), JSON.stringify(record));
+    this.#writeRecord(identity, record);
     return guiState;
   }
 

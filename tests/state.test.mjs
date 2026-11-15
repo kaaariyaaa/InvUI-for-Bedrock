@@ -2895,20 +2895,88 @@ test("tabs and children round-trip through StateManager and persist", () => {
   reloaded.release();
 });
 
-test("store write failure aborts the change", () => {
+test("store write failure aborts the change and is reported", () => {
   const store = new MemoryStore();
-  const manager = new StateManager(store);
+  const errors = [];
+  const manager = new StateManager(store, {
+    onError: (error) => errors.push(error),
+  });
   const handle = manager.acquire({
     ownerId: "p",
     lifetime: "persistent",
     initial: { page: 1 },
   });
+  const { storageKey } = store.findRecord((entry) => entry.key === "default");
 
+  const setItem = store.setItem.bind(store);
   store.setItem = () => {
     throw new Error("disk full");
   };
   assert.throws(() => handle.set({ page: 2 }), /disk full/);
   assert.equal(handle.get().page, 1, "state is unchanged when persistence fails");
+  assert.equal(errors.length, 1, "the save failure is reported, not only thrown");
+  assert.match(errors[0].message, /disk full/);
+  assert.deepEqual(
+    JSON.parse(store.getItem(storageKey)).guiState,
+    { page: 1 },
+    "the last committed record is left for restore",
+  );
+
+  // The failed change is still in the caller's hands: retrying the same patch
+  // once the store recovers commits it normally.
+  store.setItem = setItem;
+  assert.deepEqual(handle.set({ page: 2 }), { page: 2 });
+  assert.deepEqual(JSON.parse(store.getItem(storageKey)).guiState, { page: 2 });
+  handle.release();
+});
+
+test("a failing initial persistent save is reported and leaves no live entry", () => {
+  const store = new MemoryStore();
+  const storageKey = `invui:gui-state:${JSON.stringify([
+    "player",
+    "p",
+    "seed-fail",
+  ])}`;
+  const setItem = store.setItem.bind(store);
+  let fail = true;
+  store.setItem = (key, value) => {
+    if (fail) {
+      fail = false;
+      throw new Error("quota exceeded");
+    }
+    setItem(key, value);
+  };
+  const errors = [];
+  const manager = new StateManager(store, {
+    onError: (error) => errors.push(error),
+  });
+
+  assert.throws(
+    () =>
+      manager.acquire({
+        ownerId: "p",
+        key: "seed-fail",
+        lifetime: "persistent",
+        initial: { page: 3 },
+      }),
+    /quota exceeded/,
+  );
+  assert.equal(errors.length, 1, "the failed seed write is reported to onError");
+  assert.match(errors[0].message, /quota exceeded/);
+  assert.equal(store.getItem(storageKey), null, "nothing was persisted");
+
+  const handle = manager.acquire({
+    ownerId: "p",
+    key: "seed-fail",
+    lifetime: "persistent",
+    initial: { page: 3 },
+  });
+  assert.deepEqual(handle.get(), { page: 3 }, "a retry starts from initial");
+  assert.deepEqual(
+    JSON.parse(store.getItem(storageKey)).guiState,
+    { page: 3 },
+    "the retry persists the initial state",
+  );
   handle.release();
 });
 
