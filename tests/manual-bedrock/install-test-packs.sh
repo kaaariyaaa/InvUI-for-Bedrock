@@ -40,13 +40,14 @@ PATTERNS=(
   "${HOME:-}/.steam/steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
   "${HOME:-}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
   "${HOME:-}/.wine/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
+  "${HOME:-}/.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang"
+  "${HOME:-}/.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/Shared/games/com.mojang"
 )
 
 SEEN=' '
 while IFS= read -r candidate; do
   [ -n "$candidate" ] && [ -d "$candidate" ] || continue
-  # 複数プロファイルや重複パス（symlink）は 1 つに畳む。Shared は共有プロファイルなので除く。
-  case "$candidate" in */Users/Shared/*) continue ;; esac
+  # 複数プロファイルや重複パス（symlink）は 1 つに畳む。
   resolved=$(readlink -f "$candidate" 2>/dev/null || printf '%s' "$candidate")
   case "$SEEN" in *" $resolved "*) continue ;; esac
   SEEN="$SEEN$resolved "
@@ -140,16 +141,25 @@ GLOBAL=${GLOBAL%/}
 if [ ! -d "$GLOBAL" ]; then
   fail "com.mojang が見つかりません: $GLOBAL"
 fi
-# パック未導入の環境ではフォルダが無いので作る（既存ファイルは触らない）。
-mkdir -p "$GLOBAL/behavior_packs" "$GLOBAL/resource_packs" ||
+# どこに置くか: development_* があるプロファイル（bedrock-on-linux の Shared など）は
+# そちらに置く。無ければ通常の behavior_packs / resource_packs を作る。
+if [ -d "$GLOBAL/development_behavior_packs" ] || [ -d "$GLOBAL/development_resource_packs" ]; then
+  BP_DIR="$GLOBAL/development_behavior_packs"
+  RP_DIR="$GLOBAL/development_resource_packs"
+else
+  BP_DIR="$GLOBAL/behavior_packs"
+  RP_DIR="$GLOBAL/resource_packs"
+fi
+mkdir -p "$BP_DIR" "$RP_DIR" ||
   fail "パックフォルダを作成できません: $GLOBAL"
+echo "コピー先: $BP_DIR / $RP_DIR"
 
 # --- パック一覧と選択 -----------------------------------------------------------
 
 echo '利用可能なパック:'
 for entry in "${PACKS[@]}"; do
   IFS='|' read -r index kind src dest <<< "$entry"
-  if [ "$kind" = 'BP' ]; then root="$GLOBAL/behavior_packs"; else root="$GLOBAL/resource_packs"; fi
+  if [ "$kind" = 'BP' ]; then root="$BP_DIR"; else root="$RP_DIR"; fi
   tag=''
   if [ -d "$root/$dest" ]; then tag=' (installed)'; fi
   printf '  %s  [%s] %s%s\n' "$index" "$kind" "$src" "$tag"
@@ -214,7 +224,7 @@ for entry in "${PACKS[@]}"; do
     *" $index "*) ;;
     *) continue ;;
   esac
-  if [ "$kind" = 'BP' ]; then root="$GLOBAL/behavior_packs"; else root="$GLOBAL/resource_packs"; fi
+  if [ "$kind" = 'BP' ]; then root="$BP_DIR"; else root="$RP_DIR"; fi
   target="$root/$dest"
   if [ -d "$target" ]; then
     echo "[INFO] 更新: $target （既存ファイルは上書き）"
