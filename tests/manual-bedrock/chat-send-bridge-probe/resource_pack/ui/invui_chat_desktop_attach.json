@@ -12,5 +12,25 @@
         ]
       }
     ]
+  },
+  "panel_top_half": {
+    "modifications": [
+      {
+        "array_name": "controls",
+        "operation": "insert_back",
+        "value": [
+          {
+            "invui_chat_slot_press_grid@invui_chat_press.slot_grid": {
+              "anchor_from": "top_left",
+              "anchor_to": "top_left",
+              "offset": [
+                7,
+                10
+              ]
+            }
+          }
+        ]
+      }
+    ]
   }
 }

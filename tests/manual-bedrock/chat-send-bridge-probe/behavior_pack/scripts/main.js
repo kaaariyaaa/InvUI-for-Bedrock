@@ -11,6 +11,8 @@
 import { world, system, ItemStack } from '@minecraft/server';
 
 const PREFIX = '!invui:';
+// One-click transport uses only disposable, server-minted stacks. Never refill them while the UI is open.
+const TRANSPORT_STACK_SIZE = 64;
 // Chat may still be covering the screen when chatSend runs. Retry for up to
 // ~12 seconds, spaced by 10 ticks (~0.5 seconds at 20 TPS).
 const OPEN_RETRY_INTERVAL_TICKS = 10;
@@ -105,11 +107,12 @@ function createSession(player) {
   const container = manager.create({ size, title: 'InvUI Chat Probe' });
   // Every item is an expendable visual token. Never replenish on itemChange.
   for (let i = 0; i < size; i++) {
-    const stack = new ItemStack(i % 2 ? 'minecraft:paper' : 'minecraft:stick', 1);
+    const stack = new ItemStack(i % 2 ? 'minecraft:paper' : 'minecraft:stick', TRANSPORT_STACK_SIZE);
     stack.nameTag = `slot ${i}`;
     container.setItem(i, stack);
   }
-  const state = { container, sessionId, generation: 0, hits: 0, attempts: 0, retryRunId: undefined };
+  const state = { container, sessionId, generation: 0, hits: 0, attempts: 0, retryRunId: undefined,
+    remaining: Array.from({ length: size }, () => TRANSPORT_STACK_SIZE) };
   sessions.set(player.id, state);
   lastSequence.set(player.id, -1);
   message(player, `Opening size ${size}: retry every 10 ticks for up to 12 seconds. Current session=${sessionId}; generation=0.`);
@@ -202,14 +205,45 @@ try {
     }
   });
 } catch (error) { console.warn('No virtualContainerClose support:',error); }
+/**
+ * Button-drop fallback, when the chat-screen-only button.send action cannot
+ * route a slot from a container screen. No slot is replenished while open.
+ * A rejected/abnormal change closes the session instead of copying items.
+ *
+ * This is a controlled, disposable-world implementation, NOT item protection:
+ * a player can still move the stack by a different input. We only route a
+ * one-item reduction of the exact server-minted stack at the right slot.
+ */
 try {
   world.afterEvents.virtualContainerItemChange.subscribe(ev => {
-    const s=sessions.get(ev.player.id);
-    if (s && s.container===ev.container) {
-      message(ev.player,`Container item moved at slot ${ev.slot}; closing to avoid rewriting the slot.`);
-      forgetSession(ev.player.id, s);
-      try { s.container.close(ev.player); } catch {}
+    const st = sessions.get(ev.player.id);
+    if (!st || st.container !== ev.container) return;
+    const slot = ev.slot;
+    const before = ev.beforeItemStack;
+    const after = ev.itemStack;
+    const expectedKind = slot % 2 ? 'minecraft:paper' : 'minecraft:stick';
+    const expectedTag = `slot ${slot}`;
+    const isPress = Number.isSafeInteger(slot) && slot >= 0 && slot < st.remaining.length &&
+      before?.typeId === expectedKind && after?.typeId === expectedKind &&
+      before?.nameTag === expectedTag && after?.nameTag === expectedTag &&
+      Number.isSafeInteger(before.amount) && Number.isSafeInteger(after.amount) &&
+      before.amount === st.remaining[slot] && before.amount > 1 &&
+      after.amount === before.amount - 1;
+
+    if (!isPress) {
+      message(ev.player,`Unexpected item change at slot ${slot}; closing without replenishing or replacing items.`);
+      forgetSession(ev.player.id, st);
+      try { st.container.close(ev.player); } catch {}
+      return;
     }
+
+    st.remaining[slot] = after.amount;
+    const sequence = (lastSequence.get(ev.player.id) ?? -1) + 1;
+    // The event already names the player and slot. Resolve the CURRENT
+    // session on the server, rather than requiring JSON UI to mint IDs.
+    acceptClick(ev.player, {
+      sessionId: st.sessionId, generation: st.generation, slot, sequence,
+    });
   });
 } catch (error) { console.warn('No virtualContainerItemChange support:',error); }
 try {
