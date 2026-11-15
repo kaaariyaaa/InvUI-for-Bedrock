@@ -7,18 +7,8 @@ set -u
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GLOBAL=''
 
-# 番号|種別|このスクリプト隣のコピー元|コピー先フォルダ名
-PACKS=(
-  '1|BP|probe/behavior_pack|invui_probe'
-  '2|BP|locked-click-probe/behavior_pack|locked_click_probe'
-  '3|RP|chest-resource-pack|invui_chest_probe'
-  '4|RP|data-driven-resource-pack|invui_data_driven_probe'
-  '5|RP|button-send-resource-pack|invui_button_send_probe'
-  '6|RP|edit-box-resource-pack|invui_edit_box_probe'
-  '7|RP|protection-resource-pack|invui_protection_probe'
-  '8|BP|chat-send-bridge-probe/behavior_pack|invui_chat_send_bridge_probe_bp'
-  '9|RP|chat-send-bridge-probe/resource_pack|invui_chat_send_bridge_probe_rp'
-)
+# manifest.json を持つパックを起動時に自動検出する（下の discover_packs）。
+PACKS=()
 
 # mcpelauncher 系の既定候補。behavior_packs と resource_packs の両方があるものだけ使う。
 CANDIDATES=(
@@ -69,6 +59,71 @@ cancel() {
   echo '取消しました。何も変更していません。'
   exit 0
 }
+
+
+# --- パックの自動検出 ---------------------------------------------------------
+#
+# tests/manual-bedrock 以下の manifest.json を再帰的に探す。
+# module.type=script/data は BP、resources は RP として分類する。
+# 新しいパックを追加したとき、このインストーラーの一覧を更新する必要はない。
+# 既存パックは従来のコピー先名を維持して重複インストールを避ける。
+#
+pack_destination_name() {
+  local src=$1
+  case "$src" in
+    probe/behavior_pack) printf '%s' 'invui_probe' ;;
+    locked-click-probe/behavior_pack) printf '%s' 'locked_click_probe' ;;
+    chest-resource-pack) printf '%s' 'invui_chest_probe' ;;
+    data-driven-resource-pack) printf '%s' 'invui_data_driven_probe' ;;
+    button-send-resource-pack) printf '%s' 'invui_button_send_probe' ;;
+    edit-box-resource-pack) printf '%s' 'invui_edit_box_probe' ;;
+    protection-resource-pack) printf '%s' 'invui_protection_probe' ;;
+    chat-send-bridge-probe/behavior_pack) printf '%s' 'invui_chat_send_bridge_probe_bp' ;;
+    chat-send-bridge-probe/resource_pack) printf '%s' 'invui_chat_send_bridge_probe_rp' ;;
+    *)
+      local name
+      name=${src//\//__}
+      name=${name//-/_}
+      name=${name//[^a-zA-Z0-9_]/_}
+      printf 'invui_%s' "$name"
+      ;;
+  esac
+}
+
+PACKS=()
+while IFS= read -r -d '' manifest; do
+  src_dir=${manifest%/manifest.json}
+  src=${src_dir#"$HERE"/}
+
+  # 区切り文字を含むパスは一覧形式に入れられないためスキップする。
+  if [[ "$src" == *'|'* ]]; then
+    printf '[WARN] パスに | を含むためスキップ: %s\n' "$src" >&2
+    continue
+  fi
+
+  if grep -Eq '"type"[[:space:]]*:[[:space:]]*"(script|data)"' "$manifest"; then
+    kind=BP
+  elif grep -Eq '"type"[[:space:]]*:[[:space:]]*"resources"' "$manifest"; then
+    kind=RP
+  else
+    printf '[WARN] BP/RP の種類を判定できないためスキップ: %s\n' "$src" >&2
+    continue
+  fi
+
+  dest=$(pack_destination_name "$src")
+  # 異なる名前が同じコピー先に正規化された場合は上書きを防ぐ。
+  for existing in "${PACKS[@]}"; do
+    IFS='|' read -r _ old_kind _ old_dest <<< "$existing"
+    if [ "$kind" = "$old_kind" ] && [ "$dest" = "$old_dest" ]; then
+      fail "コピー先名が重複: $src -> $dest"
+    fi
+  done
+  PACKS+=("$(("${#PACKS[@]}" + 1))|$kind|$src|$dest")
+done < <(find "$HERE" -type f -name manifest.json -print0 | LC_ALL=C sort -z)
+
+if [ "${#PACKS[@]}" -eq 0 ]; then
+  fail "インストール対象のパックが見つかりません: $HERE"
+fi
 
 # --- com.mojang の場所を決める（引数 > MC_COMOJANG > 既知候補） -----------------
 
