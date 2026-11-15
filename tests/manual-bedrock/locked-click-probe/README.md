@@ -5,7 +5,7 @@
 
 ## 準備
 
-1. `locked-click-probe.mcpack` を Minecraft Preview で開いて取り込み、使い捨てワールドで有効化する。Windows は `install-to-world.bat` で既存ワールドへ直接導入してもよい（フォルダ配置のみ。bat も実機未検証）。
+1. `locked-click-probe.mcpack` を Minecraft Preview で開いて取り込み、使い捨てワールドで有効化する。Windows は `../install-test-packs.bat` でグローバルパックへ配置し、ワールド設定で有効化してもよい（bat は実機未検証）。
 2. ワールド設定で Beta APIs / Experimental API を有効化する。`manifest.json` の `min_engine_version` は仮置きの `[1, 26, 70]` なので、ゲーム版に合わせる。
 3. 通常のチェストでアイテム移動が従来どおり動くこと、`!lockprobe help` がチャットに返ることを確認する（返らなければパックが読み込まれていない）。
 4. 画面を開く前に、カーソルにアイテムを持たない。サーバー側 auto close でカーソル上のアイテムが失われ得る（未検証）。
