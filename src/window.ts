@@ -2735,10 +2735,11 @@ export class Window {
    * one that carries handlers, returns false without enqueueing anything.
    *
    * Clicks run on the state handle's queue, so shared-state windows process
-   * them in order (design 12.1). The slot, display generation, and mode are
+   * them in order (design 12.1). The whole slot mapping and the mode are
    * checked again when the queued task actually runs: a click that waited
-   * behind a close, reopen, page/tab change, or a slot that turned display
-   * while waiting is discarded instead of invoking a stale handler.
+   * behind a close, reopen, page/line/tab change, a swapped slot element, or a
+   * slot that turned display while waiting is discarded instead of invoking a
+   * handler for a layout that is no longer current.
    */
   async handleClick(slot: number): Promise<boolean> {
     return (await this._inputClick(slot)) === "clicked";
@@ -2789,7 +2790,12 @@ export class Window {
           layout.tab !== currentLayout.tab ||
           layout.width !== currentLayout.width ||
           layout.height !== currentLayout.height ||
-          currentLayout.slots[slot] !== element
+          // Compare the whole mapping, not only this slot: a change that
+          // swapped another slot is a new clickable layout (the wire layout
+          // generation advances for it too), and a handler may read the rest
+          // of the layout. A notification accepted before that change must not
+          // run its handler after it (design 10.5, 12.3).
+          !sameSlotElements(layout.slots, currentLayout.slots)
         ) {
           return false;
         }

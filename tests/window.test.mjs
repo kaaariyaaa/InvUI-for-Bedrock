@@ -6727,6 +6727,77 @@ test("a slot element swap on the same page invalidates a notification queued for
   window.close();
 });
 
+test("a layout change after a chat click is accepted still discards it", async () => {
+  const viewer = { id: "chat-other-slot", name: "OtherSlot" };
+  const adapter = new InMemoryTestAdapter();
+  const gate = deferred();
+  const started = deferred();
+  const clicked = [];
+  const target = Item.builder()
+    .setItemProvider(() => stack("minecraft:target"))
+    .addClickHandler(() => clicked.push("target"))
+    .build();
+  const blocker = Item.builder()
+    .setItemProvider(() => stack("minecraft:blocker"))
+    .addClickHandler(async () => {
+      started.resolve();
+      await gate.promise;
+    })
+    .build();
+  const firstOther = Item.simple(() => stack("minecraft:first_other"));
+  const secondOther = Item.simple(() => stack("minecraft:second_other"));
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.normal({
+        structure: ["abcd"],
+        ingredients: { a: blocker, b: firstOther, d: target },
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+
+  // Hold the shared state queue with a running click, so the chat click below
+  // is accepted (and validated) but cannot run its handler yet.
+  const running = window.handleClick(0);
+  await tick();
+  await started.promise;
+
+  emitChatSend(chatPayload(window, 3, 1), { id: viewer.id });
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+
+  // Same page and same target Item, but slot `b` is replaced: the clickable
+  // layout is a new generation. The accepted notification must not run.
+  window.setUpperGui(
+    Gui.normal({
+      structure: ["abcd"],
+      ingredients: { a: blocker, b: secondOther, d: target },
+    }),
+  );
+  await tick();
+  assert.equal(window._inputLayoutGeneration, 1, "the slot swap advances the layout generation");
+
+  gate.resolve();
+  await running;
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(clicked, [], "a click accepted before the layout change must not run after it");
+
+  // The notification is retryable with the new generation.
+  await sendChat(window, 3, 2);
+  await flushChatInput();
+  assert.deepEqual(clicked, ["target"]);
+
+  window.close();
+});
+
 test("playerLeave closes only the leaving viewer's open Window and releases it", async () => {
   const adapter = new InMemoryTestAdapter();
   const otherAdapter = new InMemoryTestAdapter();
