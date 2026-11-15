@@ -1,7 +1,7 @@
 # Documentation
 
-- [API reference](api.md) — public TypeScript APIs exported from `src/index.ts`
-- [Status and limitations](status.md) — current implementation, missing functionality, and safety
-- [Development](development.md) — setup, build, packaging, and the inspection CLI
+- [API reference](api.md)
+- [Status and limitations](status.md)
+- [Development](development.md)
 
-Start with the [project README](../README.md). In-game behavior has not been verified.
+[Project README](../README.md)
