@@ -1783,6 +1783,15 @@ export class Window {
           }
         }
         this.#applyLayout(layout);
+        // Moving the element subscriptions reports a failed subscribe or
+        // unsubscribe, and that handler may close and reopen the Window. The
+        // rest of this pass belongs to the generation that is gone: starting
+        // its render batch would bump the render epoch and discard the
+        // reopened generation's in-flight provider results, leaving its screen
+        // blank (the same hazard #refresh guards against).
+        if (generation !== this.#generation || this.#status !== "opening") {
+          return;
+        }
         await this.#renderAll(generation);
         if (generation !== this.#generation || this.#status !== "opening") {
           return;
@@ -2012,6 +2021,13 @@ export class Window {
         return;
       }
       this.#applyLayout(layout);
+      // A subscription report may have closed and reopened the Window. This
+      // regeneration belongs to the generation that is gone; rendering its
+      // batch now would bump the render epoch and discard the reopened
+      // generation's in-flight provider results, leaving its screen blank.
+      if (generation !== this.#generation || this.#status !== "open") {
+        return;
+      }
       await this.#renderAll(generation);
     } catch (error) {
       // #renderAll normally reports per-slot failures instead of throwing. If
@@ -2863,6 +2879,12 @@ export class Window {
         if (containerSizeOf(next) === container.size) {
           // The state settled back to the current size: no regeneration needed.
           this.#applyLayout(next);
+          // A subscription report may have closed and reopened the Window; do
+          // not start this pass's render batch for the generation that is gone
+          // (it would discard the reopened generation's in-flight results).
+          if (generation !== this.#generation || this.#status !== "open") {
+            return;
+          }
           try {
             await this.#renderAll(generation);
           } catch (error) {
