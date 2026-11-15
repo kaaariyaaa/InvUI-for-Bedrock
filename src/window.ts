@@ -30,8 +30,10 @@
  * accepts it, so a line minted for the page still on screen fails even before
  * the render catches up. The new generation names a layout that has no button
  * on screen yet, so chat input and `handleClick()` fail closed until the render
- * applies it: the player can only click what is displayed, never a button of
- * the pending page. The old three-field notification form has no generation
+ * applies and writes it (`#layoutPresented`), and across a container
+ * regeneration until the replacement is shown: the player can only click what
+ * is displayed, never a button of the pending page or of a screen that is
+ * still being built. The old three-field notification form has no generation
  * and is not accepted.
  * Nothing is installed when the game API (or a test double) omits
  * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
@@ -1203,6 +1205,21 @@ export class Window {
    */
   #inputPendingLayout: ResolvedGuiLayout | undefined;
   /**
+   * True once the layout in `#layout` has been written to the container that is
+   * on screen. `#applyLayout` clears it, and the render pass that follows sets
+   * it again once every provider of that pass settled. A container
+   * regeneration keeps it clear from the swap until the replacement is opened.
+   * Input fails closed in between: a slot of the applied layout (or of the
+   * layout the screen still shows) is not on screen yet.
+   */
+  #layoutPresented = false;
+  /**
+   * True while `#regenerateContainer` has replaced `#container` but has not
+   * shown the replacement yet. The old screen is still visible, so a render
+   * into the replacement must not mark its layout as presented.
+   */
+  #containerSwapPending = false;
+  /**
    * Viewer id captured at registration: playerLeave and entityDie are matched
    * against it rather than against a possibly invalid player object.
    */
@@ -1378,23 +1395,27 @@ export class Window {
   }
 
   /**
-   * The layout input may target: the one the render applied and that is on
-   * screen. While `#inputPendingLayout` is set, the state names a different
-   * layout whose render has not caught up, so there is no clickable layout to
-   * target and both `_inputSlotModes()` and `_inputClick()` fail closed. Running
-   * a pending page's button before it is displayed would invoke a handler the
-   * player never saw, which is not the same operation as clicking the button on
-   * screen.
+   * The layout input may target: the one the render applied *and* wrote to the
+   * screen. While `#inputPendingLayout` is set the state names a different
+   * layout whose render has not caught up; while `#layoutPresented` is false
+   * the applied layout (or the regeneration's replacement) is not on screen
+   * yet. In both cases there is no clickable layout to target and both
+   * `_inputSlotModes()` and `_inputClick()` fail closed. Running a button
+   * before it is displayed would invoke a handler the player never saw, which
+   * is not the same operation as clicking the button on screen.
    */
   #inputLayout(): ResolvedGuiLayout | undefined {
-    return this.#inputPendingLayout === undefined ? this.#layout : undefined;
+    return this.#inputPendingLayout === undefined && this.#layoutPresented
+      ? this.#layout
+      : undefined;
   }
 
   /**
    * Internal: mode of every logical slot of the layout on screen, used by the
-   * automatic chat input bridge. Returns null when there is no rendered layout
-   * or the state's layout is still pending, which the bridge treats as "no slot
-   * is a button" (fail closed).
+   * automatic chat input bridge. Returns null when there is no presented layout
+   * (the state's layout is still pending, its render has not completed, or a
+   * regeneration has not shown the replacement yet), which the bridge treats as
+   * "no slot is a button" (fail closed).
    */
   _inputSlotModes(): readonly InputSlotMode[] | null {
     const layout = this.#inputLayout();
@@ -1431,7 +1452,8 @@ export class Window {
    * accepts the change, not when the render catches up, so a line minted for
    * the page still on screen is already stale. The new generation names a
    * layout that is not displayed yet, so input is rejected until the render
-   * applies it (`#inputPendingLayout` keeps the gap fail closed). A notification
+   * applies and writes it (`#inputPendingLayout` and `#layoutPresented` keep the
+   * gap fail closed). A notification
    * that names an older generation is rejected even if the same slot is a
    * button again, so a line minted before a page change cannot be applied after
    * it. Not part of the exported API.
@@ -1584,6 +1606,10 @@ export class Window {
     this.#renderingHalted = false;
     this.#screenRequested = false;
     this.#schemaFault = false;
+    // Presentation state belongs to the generation that is gone.
+    this.#layoutPresented = false;
+    this.#containerSwapPending = false;
+    this.#inputPendingLayout = undefined;
     const generation = ++this.#generation;
 
     try {
@@ -1714,6 +1740,9 @@ export class Window {
       // change altered its size; it retries PreviousScreenClosing itself.
       if (this.#refreshPending) {
         this.#refreshPending = false;
+        // The screen shows the layout from before that change until the
+        // scheduled refresh applies and renders the new one.
+        this.#layoutPresented = false;
         this.#scheduleRefresh();
       }
       // A new open cycle is a new input session: a notification naming the
@@ -1901,6 +1930,11 @@ export class Window {
     this.#writeCache = new SlotWriteCache();
     this.#renderedWidth = undefined;
     this.#title = title;
+    // The old screen is still the one the player sees until the replacement
+    // renders and is opened. Input fails closed in between, and a render into
+    // the replacement must not present it (see #presentLayout).
+    this.#containerSwapPending = true;
+    this.#layoutPresented = false;
 
     try {
       // The replacement is not shown yet, but its close/item events must be
@@ -1925,6 +1959,9 @@ export class Window {
         this.#writeCache = previousCache;
         this.#renderedWidth = previousLayout.width;
         this.#title = previousTitle;
+        // The old screen is current again; the scheduled refresh presents it
+        // once the restored layout has been rendered.
+        this.#containerSwapPending = false;
         this.#applyLayout(previousLayout);
         // The replacement was never shown and the old container is current
         // again: its subscription must not outlive the failed swap.
@@ -1998,6 +2035,12 @@ export class Window {
       }
       throw error;
     }
+
+    // The replacement is on screen now, so input may target its layout again.
+    // A refresh that ran during the open may already have applied a newer one;
+    // present whatever is current.
+    this.#containerSwapPending = false;
+    this.#presentLayout(generation, this.#layout, nextContainer);
 
     // The regeneration completed: the old screen was closed and its
     // `#retiringContainer` ownership cleared before it was replaced, so its
@@ -2128,7 +2171,11 @@ export class Window {
       this.#scheduleRefresh();
       return;
     }
-    this.#queueChangedSlots(previousLayout, layout);
+    const queued = this.#queueChangedSlots(previousLayout, layout);
+    if (queued === 0) {
+      // Every slot is already on screen: the applied layout is presented.
+      this.#presentLayout(generation, layout, this.#container);
+    }
   }
 
   /**
@@ -2463,7 +2510,8 @@ export class Window {
    * in-flight provider result stays valid; #queueSlotRender bumps the per-slot
    * token for changed slots so an older result cannot overwrite them. The
    * slots join the normal refresh flush, so a notification or state change in
-   * the same timing still renders each slot once.
+   * the same timing still renders each slot once. Returns how many slots were
+   * queued, so the caller can present immediately when none were.
    *
    * Skipping an unchanged slot is only safe because the caller accepts the
    * same state schema: the schema contains the Structure rows, so both layouts
@@ -2471,12 +2519,14 @@ export class Window {
    * slot in both. The Window's state is also unchanged on this path; a clamped
    * page/line/tab forces a full refresh instead (see setUpperGui).
    */
-  #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
+  #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): number {
     const cache = this.#writeCache;
+    let queued = 0;
     for (let slot = 0; slot < next.slots.length; slot += 1) {
       const physicalSlot = physicalSlotOf(next, slot);
       if (previous.slots[slot] !== next.slots[slot]) {
         this.#queueSlotRender(slot);
+        queued += 1;
         continue;
       }
       // An unchanged slot that is not known to be clear may still need one
@@ -2485,11 +2535,14 @@ export class Window {
       if (next.slots[slot] === null) {
         if (cache === undefined || cache.shouldWrite(physicalSlot, undefined)) {
           this.#queueSlotRender(slot);
+          queued += 1;
         }
       } else if (cache !== undefined && cache.needsRetry(physicalSlot)) {
         this.#queueSlotRender(slot);
+        queued += 1;
       }
     }
+    return queued;
   }
 
   /**
@@ -2658,6 +2711,8 @@ export class Window {
     notified: ReadonlySet<number>,
   ): Promise<void> {
     const cache = this.#writeCache;
+    const container = this.#container;
+    const generation = this.#generation;
     const renders: Array<Promise<void>> = [];
     for (let slot = 0; slot < next.slots.length; slot += 1) {
       const element = next.slots[slot];
@@ -2681,7 +2736,11 @@ export class Window {
       }
       renders.push(this.#renderSlot(slot));
     }
-    await Promise.all(renders);
+    try {
+      await Promise.all(renders);
+    } finally {
+      this.#presentLayout(generation, next, container);
+    }
   }
 
   /**
@@ -3341,6 +3400,8 @@ export class Window {
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
     this.#inputPendingLayout = undefined;
+    this.#layoutPresented = false;
+    this.#containerSwapPending = false;
   }
 
   #acquireState(
@@ -3626,10 +3687,19 @@ export class Window {
     if (!layout) {
       return;
     }
+    const container = this.#container;
+    const generation = this.#generation;
+    const renders: Array<Promise<void>> = [];
     for (const slot of slots) {
       if (slot < layout.slots.length) {
-        void this.#renderSlot(slot);
+        renders.push(this.#renderSlot(slot));
       }
+    }
+    if (renders.length > 0) {
+      // A GUI swap can apply a layout and queue only its changed slots; the
+      // applied layout becomes clickable when those writes settled.
+      const present = (): void => this.#presentLayout(generation, layout, container);
+      void Promise.all(renders).then(present, present);
     }
   }
 
@@ -3638,6 +3708,9 @@ export class Window {
     const pending = this.#inputPendingLayout;
     this.#inputPendingLayout = undefined;
     this.#layout = layout;
+    // The applied layout is not on screen until the pass that follows writes
+    // it; see #presentLayout. Input fails closed in the gap.
+    this.#layoutPresented = false;
     // A page/line/tab change or a different slot element mapping is a new
     // clickable layout: notifications accepted against the previous one must
     // not run against this one. Content-only re-renders that keep every slot
@@ -3666,9 +3739,37 @@ export class Window {
     this.#subscribeToUpdates();
   }
 
+  /**
+   * Mark the applied layout as presented after a render pass settled. A pass
+   * that lost its generation, container, or layout to a newer one, or that
+   * rendered while a regeneration still swaps the screen, must not open the
+   * input gate for a screen that is not shown.
+   */
+  #presentLayout(
+    generation: number,
+    layout: ResolvedGuiLayout | undefined,
+    container: VirtualContainer | undefined,
+  ): void {
+    if (
+      layout === undefined ||
+      container === undefined ||
+      generation !== this.#generation ||
+      this.#renderingHalted ||
+      (this.#status !== "opening" && this.#status !== "open") ||
+      this.#containerSwapPending ||
+      this.#container !== container ||
+      this.#layout !== layout ||
+      this.#inputPendingLayout !== undefined
+    ) {
+      return;
+    }
+    this.#layoutPresented = true;
+  }
+
   async #renderAll(generation: number): Promise<void> {
     const layout = this.#layout;
-    if (!layout || this.#renderingHalted) {
+    const container = this.#container;
+    if (!layout || !container || this.#renderingHalted) {
       return;
     }
     // A narrower Structure reuses the same container: the columns beyond its
@@ -3689,7 +3790,13 @@ export class Window {
       }
       renders.push(this.#renderSlot(slot, epoch));
     }
-    await Promise.all(renders);
+    try {
+      await Promise.all(renders);
+    } finally {
+      // A rejected pass still settles the update: keep the window usable
+      // instead of leaving input closed until some later pass happens.
+      this.#presentLayout(generation, layout, container);
+    }
   }
 
   /**

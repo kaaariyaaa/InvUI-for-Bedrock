@@ -5791,6 +5791,11 @@ test("a failed title regeneration keeps the old container and title", async () =
   assert.equal(adapter.closed.length, 0);
   assert.equal(errors.length, 1);
   assert.equal(errors[0].context.operation, "titleChange");
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["display"],
+    "the old screen is presented again after the failed regeneration",
+  );
   window.close();
 });
 
@@ -6825,6 +6830,226 @@ test("handleClick during the state-to-render gap does not run a button that is n
   await tick();
   assert.equal(await window.handleClick(0), true, "the displayed page 1 accepts the click");
   assert.deepEqual(clicks, ["page1"]);
+  window.close();
+});
+
+test("input stays closed from applyLayout until the applied layout's async render completes", async () => {
+  const viewer = { id: "chat-apply-gap", name: "ApplyGap" };
+  const clicks = [];
+  let resolvePageOne;
+  const pageZero = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(() => clicks.push("page0"))
+    .build();
+  const pageOne = Item.builder()
+    .setItemProvider(
+      () => new Promise((resolve) => {
+        resolvePageOne = resolve;
+      }),
+    )
+    .addClickHandler(() => clicks.push("page1"))
+    .build();
+  const window = Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [pageZero, pageOne],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  window.setState({ page: 1 });
+  // The refresh microtask has applied page 1, but its provider is still
+  // pending: page 0 is what the player actually sees.
+  for (let i = 0; i < 10 && resolvePageOne === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolvePageOne, "the page-1 render started");
+  assert.equal(window._inputLayoutGeneration, 1);
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "the applied page is not clickable before its render completed",
+  );
+  assert.equal(
+    await window.handleClick(0),
+    false,
+    "a click on the still-displayed page 0 must not run page 1's button",
+  );
+  const line = chatPayload(window, 0, 1);
+  assert.equal(emitChatSend(line, { id: viewer.id }).cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, []);
+
+  resolvePageOne(stack("minecraft:page_1"));
+  await tick();
+  await tick();
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  assert.equal(await window.handleClick(0), true, "the rendered page 1 accepts the click");
+  assert.deepEqual(clicks, ["page1"]);
+  window.close();
+});
+
+test("input stays closed across a title regeneration until the replacement is shown", async () => {
+  const clicks = [];
+  let calls = 0;
+  let resolveButton;
+  const button = Item.builder()
+    .setItemProvider(() => {
+      calls += 1;
+      if (calls === 1) {
+        return stack("minecraft:button");
+      }
+      return new Promise((resolve) => {
+        resolveButton = resolve;
+      });
+    })
+    .addClickHandler(() => clicks.push("click"))
+    .build();
+  const window = Window.builder()
+    .setViewer({ id: "title-presentation", name: "TitlePresentation" })
+    .setTitle("Old")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: button } }))
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const regeneration = window.setTitle("New");
+  for (let i = 0; i < 20 && resolveButton === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolveButton, "the replacement is rendering");
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "the old screen must fail closed while the replacement is not shown",
+  );
+  assert.equal(await window.handleClick(0), false);
+  assert.deepEqual(clicks, []);
+
+  resolveButton(stack("minecraft:button"));
+  await regeneration;
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  assert.equal(await window.handleClick(0), true, "the shown replacement accepts the click");
+  assert.deepEqual(clicks, ["click"]);
+  window.close();
+});
+
+test("a same-size GUI swap keeps input closed until its changed slots rendered", async () => {
+  const clicks = [];
+  let resolveButton;
+  const oldButton = Item.builder()
+    .setItemProvider(() => stack("minecraft:old"))
+    .addClickHandler(() => clicks.push("old"))
+    .build();
+  const newButton = Item.builder()
+    .setItemProvider(
+      () => new Promise((resolve) => {
+        resolveButton = resolve;
+      }),
+    )
+    .addClickHandler(() => clicks.push("new"))
+    .build();
+  const window = Window.builder()
+    .setViewer({ id: "gui-swap-presentation", name: "GuiSwapPresentation" })
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: oldButton } }))
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  window.setUpperGui(
+    Gui.normal({ structure: ["a"], ingredients: { a: newButton } }),
+  );
+  for (let i = 0; i < 10 && resolveButton === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolveButton, "the swapped slot is rendering");
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "the swapped layout is not clickable before its changed slot rendered",
+  );
+  assert.equal(await window.handleClick(0), false);
+  assert.deepEqual(clicks, []);
+
+  resolveButton(stack("minecraft:new"));
+  await tick();
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  assert.equal(await window.handleClick(0), true);
+  assert.deepEqual(clicks, ["new"]);
+  window.close();
+});
+
+test("a close and reopen during a pending render keeps the new screen's input usable", async () => {
+  const clicks = [];
+  let calls = 0;
+  let resolvePageOne;
+  const pageZero = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(() => clicks.push("page0"))
+    .build();
+  const pageOne = Item.builder()
+    .setItemProvider(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          resolvePageOne = resolve;
+        });
+      }
+      return stack("minecraft:page_1");
+    })
+    .addClickHandler(() => clicks.push("page1"))
+    .build();
+  const window = Window.builder()
+    .setViewer({ id: "close-during-render", name: "CloseDuringRender" })
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [pageZero, pageOne],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const session = window._inputSessionId;
+  window.setState({ page: 1 });
+  for (let i = 0; i < 10 && resolvePageOne === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolvePageOne, "the page-1 render is pending");
+  assert.equal(window._inputSlotModes(), null);
+
+  window.close();
+  await window.open();
+  assert.equal(window.status, "open");
+  assert.notEqual(window._inputSessionId, session, "the reopen starts a new session");
+  assert.notEqual(
+    window._inputSlotModes(),
+    null,
+    "the reopened screen is presented instead of inheriting the old gate",
+  );
+  assert.equal(await window.handleClick(0), true);
+  assert.equal(clicks.length, 1);
+
+  // The abandoned old pass resolving later must not touch the reopened screen.
+  resolvePageOne(stack("minecraft:stale_page"));
+  await tick();
+  await tick();
+  assert.equal(window.status, "open");
+  assert.notEqual(window._inputSlotModes(), null);
   window.close();
 });
 
@@ -8163,6 +8388,11 @@ test("a reopen from a subscribe error during a refresh keeps the reopened render
     window.container.items[0]?.typeId,
     "minecraft:second",
     "the reopened generation's resolved item is on screen",
+  );
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["display"],
+    "the reopened layout is presented instead of inheriting the old pass",
   );
   window.close("PlayerClosed");
   assert.equal(
