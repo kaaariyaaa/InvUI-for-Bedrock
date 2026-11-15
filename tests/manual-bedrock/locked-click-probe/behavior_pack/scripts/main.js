@@ -54,12 +54,16 @@ const MAX_TICKS = 2400;
 // open() は UserBusy（画面が閉じ切っていない）で拒否されることがあるので再試行する。
 const MAX_OPEN_ATTEMPTS = 12;
 const OPEN_RETRY_TICKS = 2;
+// UserBusy（チャット画面が閉じ切っていない）で閉じられたときの再 open 上限。
+const MAX_BUSY_REOPENS = 12;
 const MAX_LOG_TEXT = 96;
 const ITEM_TYPES = ["minecraft:stick", "minecraft:paper"];
 const MODES = new Set(["slot", "inventory", "plain"]);
 
 /** @type {Map<string, import("@minecraft/server").VirtualContainer>} */
 const containers = new Map();
+const desiredTicks = new Map();
+const busyReopens = new Map();
 /** @type {WeakMap<import("@minecraft/server").VirtualContainer, Set<string>>} */
 const pendingOpen = new WeakMap();
 /** @type {Map<string, number>} */
@@ -117,6 +121,16 @@ function playerId(player) {
 
 function keyFor(size, mode) {
   return `${size}:${mode}`;
+}
+
+/** title は "Lock probe <size> <mode>"。mode を取り出す。 */
+function modeOfTitle(title) {
+  if (typeof title !== "string") {
+    return DEFAULT_MODE;
+  }
+  const parts = title.split(" ");
+  const last = parts[parts.length - 1];
+  return MODES.has(last) ? last : DEFAULT_MODE;
 }
 
 function fillContainer(container, size, mode) {
@@ -219,6 +233,7 @@ function openFor(player, size, mode, ticks) {
   // 実機では open() 直後が UserBusy（チャット画面が閉じ切っていない）で
   // 拒否されることがある。viewers が付くまで数 tick 再試行する。
   const key = keyFor(size, mode);
+  desiredTicks.set(key, ticks);
   let attempts = 0;
 
   const accept = () => {
@@ -538,6 +553,30 @@ subscribe("virtualContainerClose", () => world.afterEvents.virtualContainerClose
         `nonEmptySlots=${summary.nonEmpty}/${items.length} totals=${summary.totals}`,
     );
   }
+
+  // 実機では open 直後に UserBusy で閉じられる（チャット画面が閉じ切っていない）。
+  // 少し待って開き直す。上限を超えたら諦めてログに残す。
+  if (closedContainer && event.reason !== "UserBusy") {
+    busyReopens.delete(keyFor(containerSize(event.container), modeOfTitle(title)));
+  }
+  if (closedContainer && event.reason === "UserBusy") {
+    const key = keyFor(containerSize(event.container), modeOfTitle(title));
+    const ticks = desiredTicks.get(key);
+    const tries = (busyReopens.get(key) ?? 0) + 1;
+    busyReopens.set(key, tries);
+    const viewer = event.player;
+    if (ticks !== undefined && tries <= MAX_BUSY_REOPENS && viewer) {
+      log(`REOPEN_AFTER_USERBUSY key=${key} attempt=${tries}`);
+      system.runTimeout(() => {
+        if (stopReason) {
+          return;
+        }
+        openFor(viewer, containerSize(event.container), modeOfTitle(title), ticks);
+      }, OPEN_RETRY_TICKS);
+    } else {
+      log(`REOPEN_GAVE_UP key=${key} attempts=${tries} (Beta APIs と画面の有無を確認)`);
+    }
+  }
 });
 
 subscribe("playerCursorItemGrab", () => world.afterEvents.playerCursorItemGrab, (event) => {
@@ -621,6 +660,8 @@ function handleCommand(player, args) {
       reply(player, `OPEN_REJECTED invalid ticks "${safeText(ticksText)}"`);
       return;
     }
+    // 手動の open は再試行回数をリセットする（自動再 open はここを通らない）。
+    busyReopens.delete(keyFor(size, mode));
     openFor(player, size, mode, ticks);
     return;
   }

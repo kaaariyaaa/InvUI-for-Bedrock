@@ -532,6 +532,31 @@ test('複数プレイヤーの pending は互いに独立している', () => {
   assert.match(probe.messages.join('\n'), /OPEN_REJECTED size=9 mode=plain reason=previous open still pending/);
 });
 
+test('UserBusy で閉じられたら少し待って開き直す', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  probe.fireClose({ reason: 'UserBusy' });
+
+  assert.match(probe.logs.join('\n'), /REOPEN_AFTER_USERBUSY key=9:slot attempt=1/);
+  const reopen = probe.timers.find((timer) => timer.ticks === 2);
+  assert.ok(reopen, '再 open が予約される');
+  reopen.run();
+  assert.equal(probe.created[0].calls.opened, 2, 'UserBusy のあと開き直す');
+});
+
+test('UserBusy が続いても上限で打ち切る', () => {
+  const probe = loadProbe();
+  probe.chat('!lockprobe open 9 slot 40');
+  for (let i = 0; i < 20; i += 1) {
+    probe.fireClose({ reason: 'UserBusy' });
+    const reopen = probe.timers.find((timer) => timer.ticks === 2 && !timer.used);
+    if (!reopen) break;
+    reopen.used = true;
+    reopen.run();
+  }
+  assert.match(probe.logs.join('\n'), /REOPEN_GAVE_UP/);
+});
+
 test('close コマンドは Player オブジェクトが変わっても最後に開いた key を閉じる', () => {
   const probe = loadProbe();
   probe.chat('!lockprobe open 9 slot 40');
