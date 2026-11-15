@@ -4170,6 +4170,131 @@ test("opening a shared window with a smaller content range does not rewind the o
   second.close();
 });
 
+test("a content change while another window opens does not rewind the shared page", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const big = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("big", 6),
+  });
+  const first = sharedWindow(big, manager, adapter, "open-content-rewind");
+  await first.open();
+  const firstContainer = adapter.containers[0];
+  first.setState({ page: 2 });
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+
+  // This viewer's content arrives while its screen is still being prepared
+  // (for example an async content load), so its smaller range clamps the page.
+  // open() only resolves: the clamp must not be written back and move the
+  // first viewer, which still has three pages, to page 0.
+  let provoked = false;
+  let small;
+  const loading = Item.simple(() => {
+    if (!provoked) {
+      provoked = true;
+      small.setContent(contentItems("small", 2));
+    }
+    return stack("minecraft:small_0");
+  });
+  small = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [loading, Item.simple(() => stack("minecraft:small_1"))],
+  });
+  const second = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(small)
+    .setStateScope("shared")
+    .setStateKey("open-content-rewind")
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await second.open();
+  await tick();
+  assert.equal(adapter.containers[1].items[0].typeId, "minecraft:small_0");
+  assert.equal(
+    second.getState().page,
+    2,
+    "the opening window only renders its clamp, it does not store it",
+  );
+  assert.equal(first.getState().page, 2);
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+  first.close();
+  second.close();
+});
+
+test("a same-size setUpperGui while opening does not write its clamp to shared state", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const big = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("big", 6),
+  });
+  const first = sharedWindow(big, manager, adapter, "open-gui-swap-rewind");
+  await first.open();
+  const firstContainer = adapter.containers[0];
+  first.setState({ page: 2 });
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+
+  // The second viewer swaps to a GUI with a smaller range while its screen is
+  // still being prepared. The swap resolves a clamp, but open() only resolves:
+  // storing it would move the first viewer, which still has three pages.
+  const small = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: contentItems("small", 2),
+  });
+  let second;
+  let provoked = false;
+  // Page 2 (the shared selection) renders content[4..5], so the item that
+  // swaps the GUI has to sit on this page to run while open() is resolving.
+  const wide = Gui.paged({
+    structure: ["xx"],
+    ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+    content: [
+      ...contentItems("wide", 4),
+      Item.simple(() => {
+        if (!provoked) {
+          provoked = true;
+          second.setUpperGui(small);
+        }
+        return stack("minecraft:wide_4");
+      }),
+      Item.simple(() => stack("minecraft:wide_5")),
+    ],
+  });
+  second = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(wide)
+    .setStateScope("shared")
+    .setStateKey("open-gui-swap-rewind")
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await second.open();
+  await tick();
+  assert.equal(adapter.containers[1].items[0].typeId, "minecraft:small_0");
+  assert.equal(
+    second.getState().page,
+    2,
+    "the opening window only renders its clamp, it does not store it",
+  );
+  assert.equal(first.getState().page, 2);
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+  first.close();
+  second.close();
+});
+
 test("a shared tab change while another window opens does not rewind its nested page", async () => {
   const manager = new StateManager();
   const adapter = new InMemoryTestAdapter();
