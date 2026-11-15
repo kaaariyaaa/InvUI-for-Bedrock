@@ -808,10 +808,6 @@ world.afterEvents.chatSend.subscribe((event) => {
   }
 });
 
-if (!world.virtualContainerManager) {
-  log(
-    "world.virtualContainerManager が見つかりません。Beta/Experimental API と VirtualContainer 対応の Preview/Beta 26.70.24 以降を確認してください。",
-  );
-} else {
-  log("読み込み完了。使い捨てワールドで `!invui help` を実行してください。");
-}
+// 早期実行では World::virtualContainerManager を読めない（ReferenceError）。
+// 実際の確認は最初のコマンド実行時（manager() 内）に回す。
+log("読み込み完了。使い捨てワールドで `!invui help` を実行してください。");
