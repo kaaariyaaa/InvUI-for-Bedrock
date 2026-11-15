@@ -32,7 +32,7 @@ export interface InventoryItemCodec<T = unknown> {
 /** Current snapshot format version. Bump only for a breaking format change. */
 export const INVENTORY_SNAPSHOT_VERSION = 1;
 
-/** JSON-serializable form of a {@link VirtualInventory}. */
+/** JSON-serializable form of a {@link VirtualInventory} or any {@link Inventory}. */
 export interface SerializedVirtualInventory<T = unknown> {
   readonly version: typeof INVENTORY_SNAPSHOT_VERSION;
   readonly size: number;
@@ -118,6 +118,50 @@ const cloneJson = createJsonCloner({
   strict: true,
 });
 
+function assertInventory(inventory: Inventory): void {
+  if (
+    !inventory ||
+    typeof inventory.getItem !== "function" ||
+    !Number.isInteger(inventory.size) ||
+    inventory.size < 0
+  ) {
+    throw new TypeError(
+      "InvUI: serializeInventory requires an Inventory with a non-negative integer size.",
+    );
+  }
+}
+
+/**
+ * Convert any {@link Inventory} (including a read-only adapter) to the same
+ * JSON-serializable snapshot as {@link VirtualInventory.serialize}, design 4.3
+ * / 9.6. Only `size` and `getItem()` are used, so the source inventory is never
+ * written to. Every occupied slot is cloned before the first `encode()` call
+ * and encoded values go through the same strict JSON validation and deep clone.
+ */
+export function serializeInventory<T>(
+  inventory: Inventory,
+  codec: InventoryItemCodec<T>,
+): SerializedVirtualInventory<T> {
+  assertCodec(codec);
+  assertInventory(inventory);
+  const occupied: Array<{ slot: number; item: ItemStack }> = [];
+  for (let slot = 0; slot < inventory.size; slot++) {
+    const item = inventory.getItem(slot);
+    if (item === undefined) {
+      continue;
+    }
+    occupied.push({ slot, item: cloneItem(item) });
+  }
+  const slots = occupied.map(({ slot, item }) => ({
+    slot,
+    item: cloneJson(
+      codec.encode(item),
+      `encoded item for slot ${slot}`,
+    ) as T,
+  }));
+  return { version: INVENTORY_SNAPSHOT_VERSION, size: inventory.size, slots };
+}
+
 /** In-memory Inventory. Not to be confused with Script API VirtualContainer. */
 export class VirtualInventory implements Inventory {
   readonly size: number;
@@ -188,22 +232,7 @@ export class VirtualInventory implements Inventory {
    * `JSON.stringify`.
    */
   serialize<T>(codec: InventoryItemCodec<T>): SerializedVirtualInventory<T> {
-    assertCodec(codec);
-    const occupied: Array<{ slot: number; item: ItemStack }> = [];
-    for (let slot = 0; slot < this.size; slot++) {
-      const item = this.items[slot];
-      if (item !== undefined) {
-        occupied.push({ slot, item: cloneItem(item) });
-      }
-    }
-    const slots = occupied.map(({ slot, item }) => ({
-      slot,
-      item: cloneJson(
-        codec.encode(item),
-        `encoded item for slot ${slot}`,
-      ) as T,
-    }));
-    return { version: INVENTORY_SNAPSHOT_VERSION, size: this.size, slots };
+    return serializeInventory(this, codec);
   }
 
   /**

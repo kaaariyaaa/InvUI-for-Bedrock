@@ -88,6 +88,7 @@ const {
   InventoryLink,
   InventoryLinkMoveRejectedError,
   VirtualInventory,
+  serializeInventory,
 } = await load("../src/inventory");
 
 test("ItemBuilder builds fresh ItemStacks with name, lore, and amount", () => {
@@ -535,6 +536,56 @@ test("VirtualInventory round-trips occupied slots through JSON with a codec", ()
   assert.equal(restored.getItem(1), undefined);
   assert.equal(restored.getItem(2).typeId, "minecraft:diamond");
   assert.equal(restored.getItem(3), undefined);
+});
+
+test("serializeInventory snapshots a read-only Inventory without writing", () => {
+  const items = [
+    new ItemBuilder("minecraft:stone", 3).setName("Rock").build(),
+    undefined,
+    new ItemBuilder("minecraft:diamond").build(),
+  ];
+  const reads = [];
+  const source = {
+    size: 3,
+    getItem(slot) {
+      reads.push(slot);
+      return items[slot]?.clone();
+    },
+    setItem() {
+      throw new Error("serializeInventory must not write");
+    },
+    clear() {
+      throw new Error("serializeInventory must not clear");
+    },
+    subscribe() {
+      return () => {};
+    },
+  };
+
+  const snapshot = serializeInventory(source, plainItemCodec);
+  assert.deepEqual(reads, [0, 1, 2]);
+  assert.equal(snapshot.version, INVENTORY_SNAPSHOT_VERSION);
+  assert.equal(snapshot.size, 3);
+  assert.deepEqual(snapshot.slots.map((entry) => entry.slot), [0, 2]);
+  assert.equal(snapshot.slots[0].item.typeId, "minecraft:stone");
+  assert.equal(snapshot.slots[0].item.nameTag, "Rock");
+
+  const restored = VirtualInventory.deserialize(snapshot, plainItemCodec);
+  assert.equal(restored.getItem(0).nameTag, "Rock");
+  assert.equal(restored.getItem(2).typeId, "minecraft:diamond");
+});
+
+test("serializeInventory rejects invalid inventories and non-cloneable stacks", () => {
+  assert.throws(() => serializeInventory(null, plainItemCodec), TypeError);
+  assert.throws(
+    () => serializeInventory({ size: -1, getItem() {} }, plainItemCodec),
+    TypeError,
+  );
+  const invalid = {
+    size: 1,
+    getItem: () => ({ typeId: "minecraft:stone", amount: 1 }),
+  };
+  assert.throws(() => serializeInventory(invalid, plainItemCodec), /not an ItemStack/);
 });
 
 test("serialize calls encode with a clone and rejects undefined output", () => {
