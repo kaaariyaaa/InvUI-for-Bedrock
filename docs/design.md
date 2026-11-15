@@ -1,5 +1,8 @@
 # InvUI for Bedrock — 全体設計書
 
+> [!NOTE]
+> 計画段階の機能も含む設計書です。現行の実装範囲と未検証事項は [実装状況と制約](status.md) を優先してください。
+
 > **設計バージョン:** 1.2（2026-11-13）  
 > **対象:** Minecraft Bedrock Edition / `@minecraft/server` Experimental / TypeScript  
 > **配布形態:** npmパッケージ＋必要最小限のResource Pack  
@@ -177,7 +180,7 @@ JSON UIの入力通知経路をカプセル化する。候補のチャット通�
 | `VirtualInventory` | メモリ上の保管領域。永続化時にはシリアライズ |
 | `InventoryLink` | GUIスロットと特定の保管領域スロットを対応付ける |
 
-**区別:** ライブラリの`VirtualInventory`は、Script APIの`VirtualContainer`と異なる。前者は論理的な保管データ、後者はプレイヤーに画面を見せるためのコンテナ。
+**区別:** ライブラリの`VirtualInventory`はScript APIの`VirtualContainer`と異なる。前者は論理的な保管データ、後者はプレイヤーに画面を見せるためのコンテナ。
 
 ### 4.4 Window関連
 
@@ -468,11 +471,11 @@ const window = Window.builder()
 
 ### 9.4 管理対象の状態
 
-- `page` — ページ番号。
-- `line` — スクロール開始行・列。
-- `tab` — 選択タブ。
-- `selection` — 選択状態。
-- `data` — 開発者指定のシリアライズ可能な状態。
+- `page`：ページ番号。
+- `line`：スクロール開始行・列。
+- `tab`：選択タブ。
+- `selection`：選択状態。
+- `data`：開発者指定のシリアライズ可能な状態。
 
 表示中かどうか、`Player`参照、`VirtualContainer`参照、入力セッション番号はWindowごとの実行状態とし、共有状態へ入れない。
 
@@ -551,12 +554,14 @@ EventQueueへ投入
 概念上は次のような専用メッセージを生成する。
 
 ```text
-!invui:<session-id>:<slot-index>:<sequence>
+!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>
 ```
 
 Script API側では`world.beforeEvents.chatSend`を用いる。専用プレフィックスのメッセージを検知した場合、通常のチャットへの表示はキャンセルする。
 
-ただし、**チャット送信そのものがチェスト画面で成立するかを実証するまでは、この形式を実装確定としない。** 入力元のJSON UIに適切なチャット欄の内部状態が存在しなければ`button.send`だけでは機能しない可能性がある。
+`layout-generation`は、通知を生成した時点のWindowのクリック可能レイアウトの世代である。サーバー側は`Window._inputLayoutGeneration`（openごとに0から始まり、ページ・行・タブ・スロット要素の変更で進む）と照合する。ページ変更前に送られ、変更後に届いた通知は、新しいページの同じスロットが`button`でも拒否される。世代を持たない旧3フィールド形式`!invui:<session>:<slot>:<sequence>`は受理しない。
+
+ただし、**チャット送信そのものがチェスト画面で成立するかを実証するまでは、この形式を実装確定としない。** 入力元のJSON UIに適切なチャット欄の内部状態が存在しなければ`button.send`だけでは機能しない可能性がある。現時点で通知を自動生成するUIはなく、`layout-generation`も手入力または将来のUIが指定する。
 
 ### 10.5 入力の安全性
 
@@ -564,6 +569,7 @@ Script API側では`world.beforeEvents.chatSend`を用いる。専用プレフ�
 
 - 入力者が開いているWindowを持つこと。
 - Session IDが現在のWindowに一致すること。
+- 通知の`layout-generation`が現在の画面の世代と一致すること。ページ・行・タブ・スロット要素の変更前に生成され、変更後に届いた通知を捨てる。
 - 対象スロットがそのプレイヤーの現在の画面で`button`モードであること。
 - ページ変更後など、古い世代の通知を処理しないこと。
 - 通知の連続処理を制限すること。
@@ -827,7 +833,7 @@ import {
 
 ### 15.4 利用アドオン側のビルド
 
-例（`esbuild`）：
+例（`esbuild`）
 
 ```bash
 npx esbuild src/main.ts \
@@ -838,7 +844,7 @@ npx esbuild src/main.ts \
   --outfile=behavior_pack/scripts/main.js
 ```
 
-実際の`manifest.json`には、そのゲーム版で利用できる`@minecraft/server`の正しい依存バージョンを指定する。
+実際の`manifest.json`にはそのゲーム版で利用できる`@minecraft/server`の正しい依存バージョンを指定する。
 
 ### 15.5 公開時の確認
 
@@ -1027,7 +1033,7 @@ InputBridgeに技術的な問題がある場合、見た目だけ整ったクリ
 | リスク | 影響 | 対策 |
 |---|---|---|
 | `button.send`がチェスト画面で無効 | チャット通知方式が使えない | InputBridgeを抽象化し、代替方式を検討 |
-| JSON UIが通常チェストにも適用される | プレイヤーの通常操作を壊す | InvUI画面の識別を最初に検証 |
+| JSON UIが通常チェストにも適用される | プレイヤーの通常操作ができなくなる | InvUI画面の識別を最初に検証 |
 | JSON UIの入力抑制が機種ごとに異なる | タッチ・コントローラーで誤操作 | 入力方式ごとの実機テスト |
 | `InventoryLink`で移動後に補充すると複製 | アイテム重複・消失 | 事前の完全な制限、移動結果の整合確認 |
 | VirtualContainerの仕様変更 | バージョン間の非互換 | Adapter層分離、対応表、ベータ版運用 |

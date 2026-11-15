@@ -4,3 +4,14 @@ result
 dist/
 *.tsbuildinfo
 *.tgz
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Local-only configuration and example type-check files
+.env.local
+.env.*.local
+tsconfig.examples-check.tmp.json
