@@ -5,7 +5,7 @@
  * 実際の Minecraft は起動しない。確認するのは:
  * - 実行ビットがあり、bash + 標準コマンド（cp -R）だけで動くこと
  * - 削除コマンド（rm など）を持たないこと
- * - 7 パック（BP 2 / RP 5）を列挙し、番号複数指定 / all / Enter 取消を持つこと
+ * - manifest.json を持つすべての BP/RP を再帰的に列挙し、番号複数指定 / all / Enter 取消を持つこと
  * - com.mojang の既知候補検出と、引数 / MC_COMOJANG / 複数候補の番号選択
  * - 選択したパックだけを behavior_packs / resource_packs へ上書きコピーすること
  * - 取消・不正入力・ソース欠落では何も変更しないこと
@@ -30,15 +30,47 @@ const shPath = path.join(here, 'install-test-packs.sh');
 const readmePath = path.join(here, 'README.md');
 const probeReadmePath = path.join(here, 'locked-click-probe', 'README.md');
 
-const PACKS = [
-  { kind: 'BP', src: 'probe/behavior_pack', dst: 'invui_probe' },
-  { kind: 'BP', src: 'locked-click-probe/behavior_pack', dst: 'locked_click_probe' },
-  { kind: 'RP', src: 'chest-resource-pack', dst: 'invui_chest_probe' },
-  { kind: 'RP', src: 'data-driven-resource-pack', dst: 'invui_data_driven_probe' },
-  { kind: 'RP', src: 'button-send-resource-pack', dst: 'invui_button_send_probe' },
-  { kind: 'RP', src: 'edit-box-resource-pack', dst: 'invui_edit_box_probe' },
-  { kind: 'RP', src: 'protection-resource-pack', dst: 'invui_protection_probe' },
-];
+
+const LEGACY_DESTINATIONS = {
+  'probe/behavior_pack': 'invui_probe',
+  'locked-click-probe/behavior_pack': 'locked_click_probe',
+  'chest-resource-pack': 'invui_chest_probe',
+  'data-driven-resource-pack': 'invui_data_driven_probe',
+  'button-send-resource-pack': 'invui_button_send_probe',
+  'edit-box-resource-pack': 'invui_edit_box_probe',
+  'protection-resource-pack': 'invui_protection_probe',
+  'chat-send-bridge-probe/behavior_pack': 'invui_chat_send_bridge_probe_bp',
+  'chat-send-bridge-probe/resource_pack': 'invui_chat_send_bridge_probe_rp',
+};
+
+function discoverPacks(root) {
+  const result = [];
+  const walk = (dir, relative) => {
+    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const itemPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        walk(itemPath, relative ? relative + '/' + item.name : item.name);
+        continue;
+      }
+      if (!item.isFile() || item.name !== 'manifest.json') continue;
+      const manifest = JSON.parse(fs.readFileSync(itemPath, 'utf8'));
+      const types = (manifest.modules ?? []).map((module) => module.type);
+      const kind = types.some((type) => type === 'script' || type === 'data')
+        ? 'BP'
+        : types.includes('resources') ? 'RP' : null;
+      if (!kind) continue;
+      const src = relative;
+      const dst = LEGACY_DESTINATIONS[src]
+        ?? 'invui_' + src.replaceAll('/', '__').replaceAll('-', '_').replace(/[^a-zA-Z0-9_]/g, '_');
+      result.push({ kind, src, dst });
+    }
+  };
+  walk(root, '');
+  result.sort((a, b) => a.src < b.src ? -1 : a.src > b.src ? 1 : 0);
+  return result;
+}
+
+const PACKS = discoverPacks(here);
 
 const sh = fs.readFileSync(shPath, 'utf8');
 
@@ -105,16 +137,14 @@ test('削除コマンドを持たない（rm を使わない）', () => {
   assert.doesNotMatch(sh, /\bfind\b[^\n]*-delete/);
 });
 
-test('全 7 パック（BP 2 / RP 5）を所定のコピー先で列挙する', () => {
+
+test('全ての BP/RP を manifest.json から自動検出し、コピー先を決める', () => {
+  assert.match(sh, /find "\\$HERE" -type f -name manifest\\.json -print0/);
+  assert.ok(PACKS.length >= 9, '既存の手動テストパックも検出する');
   for (const pack of PACKS) {
-    assert.ok(sh.includes(`|${pack.kind}|${pack.src}|${pack.dst}`), `${pack.src} -> ${pack.dst} が一覧にない`);
-    assert.ok(
-      fs.existsSync(path.join(here, pack.src, 'manifest.json')),
-      `${pack.src}/manifest.json が存在する`,
-    );
+    assert.ok(fs.existsSync(path.join(here, pack.src, 'manifest.json')));
+    assert.ok(pack.dst.length > 0);
   }
-  assert.equal(sh.match(/\|BP\|/g)?.length, 2);
-  assert.equal(sh.match(/\|RP\|/g)?.length, 5);
 });
 
 test('番号複数指定・all・Enter 取消を持つ', () => {
@@ -163,7 +193,7 @@ test('既知候補を自動検出し、選んだパックだけをコピーす�
 
   assertPackCopied(com, PACKS[0]);
   assertPackCopied(com, PACKS[2]);
-  for (const pack of [PACKS[1], PACKS[3], PACKS[4], PACKS[5], PACKS[6]]) {
+  for (const pack of PACKS.filter((_, index) => index !== 0 && index !== 2)) {
     assertPackAbsent(com, pack);
   }
   assert.match(result.stdout, /ワールド設定で有効化/);
@@ -186,7 +216,7 @@ test('bedrock-on-linux の深い com.mojang を自動検出し、無いパック
   assert.ok(fs.existsSync(path.join(deep, 'resource_packs')), 'resource_packs を作る');
 });
 
-test('all は 7 パックすべてをコピーする', () => {
+test('all は検出したすべてのパックをコピーする', () => {
   const home = makeHome();
   const com = makeComMojang(path.join(home, '.local/share/mcpelauncher/games/com.mojang'));
 
@@ -299,24 +329,24 @@ test('com.mojang が無ければ候補を列挙して exit 1', () => {
   assert.doesNotMatch(result.stdout, /利用可能なパック/);
 });
 
-test('ソース欠落はコピー前に検出し、何も変更しない', () => {
+
+test('BP/RP を判定できない manifest は対象外にする', () => {
   const sandbox = makeTempDir('invui-pack-sh-sandbox-');
   const script = path.join(sandbox, 'install-test-packs.sh');
   fs.copyFileSync(shPath, script);
   fs.chmodSync(script, 0o755);
   fs.mkdirSync(path.join(sandbox, 'probe/behavior_pack'), { recursive: true });
   fs.writeFileSync(path.join(sandbox, 'probe/behavior_pack/manifest.json'), '{}');
-  // locked-click-probe は置かない（選択 2 が欠落）。
 
   const com = makeComMojang(path.join(makeTempDir('invui-sandbox-com-'), 'com.mojang'));
   const result = runScript({
     home: makeHome(),
     args: [com],
-    input: '1 2\n',
+    input: '1\\n',
     script,
   });
   assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stderr, /manifest\.json がない/);
+  assert.match(result.stderr, /種類を判定できない/);
+  assert.match(result.stderr, /インストール対象のパックが見つかりません/);
   assertPackAbsent(com, PACKS[0]);
-  assertPackAbsent(com, PACKS[1]);
 });
