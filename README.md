@@ -2,9 +2,6 @@
 
 A TypeScript GUI library for Minecraft Bedrock Edition Script API, based on [InvUI for Java Edition](https://github.com/NichtStudioCode/InvUI).
 
-> [!CAUTION]
-> The experimental `VirtualContainer` API restores item changes after they occur. Item duplication or loss is possible. Use disposable worlds for testing.
-
 ## Features
 
 - Normal, paged, scrolling, and tabbed GUIs
