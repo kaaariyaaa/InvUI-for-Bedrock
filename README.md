@@ -240,11 +240,11 @@ const inventory = new PlayerInventory(player); // 読み取り専用。変更通
 const link = new InventoryLink(inventory, 0);  // スロット 0 を GUI 要素として表示
 ```
 
-- **読み取り専用です。** `getItem(slot)` は clone を返し、`slot` が非整数・負数・`size` 以上なら `RangeError` を投げます。`setItem()` と `clear()` は常に `PlayerInventoryReadOnlyError`（`INVUI_PLAYER_INVENTORY_READ_ONLY`）を投げ、実コンテナへは書き込みません。`PlayerInventory.writable` は `false` 固定です。
+- **読み取り専用です。** `getItem(slot)` は clone を返し、`slot` が非整数・負数・`size` 以上なら `RangeError` を投げます。clone は `VirtualInventory` と同じ検証を通るため、コンテナ上のスタックの `clone()` が `undefined` や非スタック、元のオブジェクト自身を返す場合は、占有スロットを空として返したり実スタックを渡したりせず `TypeError` を投げます（`Window` の描画はその slot を表示失敗として扱い、直前の表示を保持します）。`setItem()` と `clear()` は常に `PlayerInventoryReadOnlyError`（`INVUI_PLAYER_INVENTORY_READ_ONLY`）を投げ、実コンテナへは書き込みません。`PlayerInventory.writable` は `false` 固定です。
 - **生成時の検証**: `new PlayerInventory(player, options)` は、`player.id` を空でない文字列として読めない場合に `TypeError`、`getComponent("inventory")` かその `container` を読めない場合に `Error` を投げます。`options` がオブジェクトでない場合、`changes` が `subscribe()` を持たない場合も `TypeError` です。`size` はそのコンテナの実際のサイズです。
 - **移動はできません。** `PlayerInventory` を `InventoryLink` に渡すと、`link.setItem()` は `PlayerInventoryReadOnlyError` で失敗し、`link.moveTo()` は移動自体が無効なため `InventoryLinkMoveRejectedError` を投げます。`PlayerInventory` は `Inventory` の書き込みメソッドを実装していますが、それは `InventoryLink` の読み取り経路を通すためだけで、成功する書き込み経路ではありません。
 - **変更通知は明示注入だけです。** Bedrock には、このアダプタが使う絶対スロット番号と一致することを保証する文書化された変更イベントがありません（`PlayerInventoryType` は hotbar と main inventory を分け、インデックス空間は未規定）。そのため自動接続はせず、`new PlayerInventory(player, { changes: source })` のように、イベントから絶対スロットへの変換を確認済みの `PlayerInventoryChangeSource` を呼び出し側が渡します。
-- **任意のイベントブリッジ（`createPlayerInventoryChangeSource`）も用意しています。** `world.afterEvents.playerInventoryItemChange` を購読し、呼び出し側が渡した `mapSlot(inventoryType, slot)` の結果を絶対スロットとして転送します。対応表は Bedrock のドキュメントにないため、**実機で確認した mapper を明示的に渡す必要があり、既定の mapper はありません**（未検証の例をそのまま使わないでください）。このブリッジは通知の転送だけで、コンテナへの読み書き・アイテム移動は一切しません（`PlayerInventory` は読み取り専用のまま）。player id を読めないイベント、mapper の例外・非整数・負数の結果、`undefined` を返したイベントは破棄します。`createPlayerInventoryChangeSource` も `src/index.ts` から公開しています。**実機未検証です。**
+- **任意のイベントブリッジ（`createPlayerInventoryChangeSource`）も用意しています。** `world.afterEvents.playerInventoryItemChange` を購読し、呼び出し側が渡した `mapSlot(inventoryType, slot)` の結果を絶対スロットとして転送します。対応表は Bedrock のドキュメントにないため、**実機で確認した mapper を明示的に渡す必要があり、既定の mapper はありません**（未検証の例をそのまま使わないでください）。このブリッジは通知の転送だけで、コンテナへの読み書き・アイテム移動は一切しません（`PlayerInventory` は読み取り専用のまま）。player id を読めないイベント、mapper の例外・非整数・負数の結果、`undefined` を返したイベント、イベントのスタックが安全に clone できないイベントは破棄します。`createPlayerInventoryChangeSource` も `src/index.ts` から公開しています。**実機未検証です。**
 
 ```ts
 const inventory = new PlayerInventory(player, { changes: verifiedSource });
@@ -266,7 +266,7 @@ const inventory = new PlayerInventory(player, { changes });
 - **イベント解除は `subscribe()` の戻り値ではなく `signal.unsubscribe(callback)` で行います。** beta の `PlayerInventoryItemChangeAfterEventSignal.subscribe()` は解除関数ではなく**渡したコールバック自身**を返します（型も `(arg0: PlayerInventoryItemChangeAfterEvent) => void`）。戻り値を解除関数として呼ぶと、リスナーが解除されないまま偽イベントとして再実行されるため、ブリッジは戻り値を無視して `unsubscribe(callback)` を呼びます。ブリッジが返す購読解除関数は冪等で、二重解除でも `unsubscribe` は一度しか呼びません。`subscribe()` / `unsubscribe()` を持たない signal、関数でない `mapSlot`、関数でない listener を渡した場合も購読前に `TypeError` を投げ、`PlayerInventory` 側は `console.error` に記録して表示を継続します。
 - `PlayerInventoryChangeSource.subscribe(listener)` は購読解除関数を返す必要があります。`changes` を省略した場合、`subscribe()` は購読解除関数を返しますが**一度も発火しません**（表示は `refresh()`・状態更新・GUI 変更時の再描画で更新されます）。
 - 注入した source が投げた例外、購読解除関数を返さない場合、購読解除時の例外は `console.error` に記録し、表示は継続します。最後の購読者が解除されると source の購読も解除します。
-- source から届いた変更のうち、`playerId` がこのインスタンスの `playerId` と一致し、`slot` が整数で `0 <= slot < size` のものだけを転送します。`previous` / `current` は clone して渡し、リスナーの例外は `console.error` に記録して他のリスナーへの配送を続けます。
+- source から届いた変更のうち、`playerId` がこのインスタンスの `playerId` と一致し、`slot` が整数で `0 <= slot < size` のものだけを転送します。`previous` / `current` は `VirtualInventory` と同じ検証付き clone を経て渡し、安全に clone できない変更は `console.error` に記録して破棄します（実スタックをリスナーへ渡しません）。リスナーの例外は `console.error` に記録して他のリスナーへの配送を続けます。
 - **実機未検証です。** 実装とテストは Node.js 上のモックに対するもので、実機で `getComponent("inventory").container` から同じスロット番号で読めるか、注入した source のマッピングが正しいかは確認していません。`size` はコンテナの実際のサイズで、固定の 36 ではありません。実機のアイテム保護・移動の安全性を提供するものではありません。
 
 ## 必要環境
