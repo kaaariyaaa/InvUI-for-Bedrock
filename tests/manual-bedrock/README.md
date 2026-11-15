@@ -1,280 +1,94 @@
 # Bedrock 実機テスト手順（フェーズ0）
 
-このディレクトリは、InvUI for Bedrock の**実機未検証機能**を安全に検証するための手順と合否基準をまとめたものです。設計書のフェーズ0（技術検証）に対応します。
-
 > [!WARNING]
-> **実機では未検証です。コアの画面は既定で開き、アイテム保護はありません。Resource Pack の画面接続は変更中です。**
->
-> - **`Window.open()` は既定で実画面を開きます。** 実アダプタ（`minecraftVirtualContainerAdapter`）は `canOpenScreens = true` を返し、`Window.open()` が `world.virtualContainerManager.create()` で `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` が `VirtualContainer.close()` を呼びます。`open()` を許可するテスト用アダプタの注入は不要です。`WindowOpenRejectedError` は、利用者が `setContainerAdapter()` で `canOpenScreens = false` のアダプタを渡した場合にだけ発生します。
-> - **この open 経路は実機未検証です。** 画面が実際に表示されるか、`close()` がいつ完了するかは確認していません。`close()` は要求時点で返り、close イベントは別 tick になることがあるため、直後の再 `open()` は失敗し得ます。
-> - **表示専用アイテムの保護はありません。** 画面を開くと表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、入力抑制も JSON UI もないためプレイヤーが取り出せます。さらに `refresh()` や状態更新の再描画で同じアイテムが再設定されるため、**取り出しと再描画の組み合わせでアイテムが複製され得ます**。逆に、プレイヤーが入れたアイテムを再描画が上書きすると**消失**し得ます。保護を実装するまで、この経路は安全ではありません。
-> - **itemChange の検出は保護ではありません。** 既定のアダプタは `world.afterEvents.virtualContainerItemChange` を購読し、画面からの変更を `Window` が `WindowItemChangeDangerError` としてエラーハンドラーへ通知し、再描画を停止して close を要求します。ただし `after` イベントなので変更はすでに起きており、取り消しも変更前への復元もできません。close の成否も未検証です。
-> - **raw probe とコアの試験は別物です。** [`probe/`](probe/README.md) の raw probe は InvUI コアもアダプタも使わず、`world.virtualContainerManager` から `VirtualContainer` を直接開くため、`VirtualContainer` 単体の表示・close reason・itemChange を確認できます（未実施）。一方、DISP 以降のコア試験は `Window.open()` 経由で、InvUI のレイアウト・描画・将来の保護を対象にします。**raw probe の結果をコアの合格に流用せず、その逆もしないでください。**
-> - **Resource Pack の画面接続は変更中で、適用可否は未検証です。** `resource_pack/ui/invui_connect.json` と `invui_connect_data_driven.json`（[`resource_pack/experimental/connect-data-driven/`](../../resource_pack/experimental/connect-data-driven/README.md)）が `data_driven_container` の `desktop_panel` / `pocket_panel` へ差し込む試験的接続で、作業ツリーの `ui/_ui_defs.json` はこれを登録済みです。接続は警告ラベルと `invui_probe_root` を `insert_front` で、**透明ブロッカー**（`invui_connect_probe.grid_blocker`）を `insert_back` で差し込みます。ただし `VirtualContainer` を特定できないため、**そのパネルを使う全画面（通常のコンテナを含み得る）に適用され得ます**。接続が実際に効くか、ブロッカーが入力を遮断するか、適用範囲、通常チェストへの影響は未検証で、ファイル構成も変更中です。**試験時に実際の `_ui_defs.json` と導入ファイルを確認して記録し、「接続済み」「未接続」のどちらも既定事実として扱わないでください。**
-> - **`InventoryLink.moveTo()` は常に拒否されます**（`InventoryLinkMoveRejectedError`）。クリック入力は、`Window` が `world.beforeEvents.chatSend` で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を受け取って `handleClick()` へ流す受信経路だけが自動接続されています（Node.js テスト済み・実機未検証）。UI 側がその通知を自動生成する実装はなく、通知は手入力で偽装できます。
-> - **実機での実験は使い捨てワールドだけで行ってください。** 本番ワールド・配布用ワールド・共有サーバーでは実行しないでください。
-> - [`button-send-resource-pack/`](button-send-resource-pack/README.md) は、クリック通知の候補である `button.send` を単独で観察する**実験用 Resource Pack（使い捨てワールド専用）**です。クリック通知は未検証であり、通知文字列を自動で設定する仕組みはなく、入力抑制・アイテム保護もありません。`chest-resource-pack/` や `data-driven-resource-pack/` など**他の Resource Pack との併用は禁止**です。このキットが存在することは、クリック通知の試験を実施済みという意味ではありません。
-> - [`edit-box-resource-pack/`](edit-box-resource-pack/README.md) は、入力欄（`edit_box`）と `button.send` の組み合わせを観察する**実験用 Resource Pack（使い捨てワールド専用）**です。**未検証**であり、`#message_text_box` と `always_listening` を使うため**チャット入力を奪い得ます**。バニラのチェストパネルを対象とするため**通常のチェストにも表示される可能性があり、移動が壊れたら即時中止**してください。**アイテム保護はありません。** `button-send-resource-pack/` など**他の Resource Pack との併用は禁止**です。導入だけで試験実施済みにはなりません。
-> - 現時点で自動で実施できるのは CLI と自動テストだけです。CLI は既定でどのファイルにも書き込まず、`--install-resource-pack` を明示した場合だけ `ui/invui.json` と試験的接続の `ui/invui_connect*.json` を追加します（`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` は変更しません）。`generate-resource-pack` の生成物だけは接続登録済みの `ui/_ui_defs.json` を含みます。実機のクリック・アイテム保護・`InventoryLink` の安全性を、自動テストで代替しないでください。
+> **すべて実機未検証。使い捨てワールド専用。** 本番・配布用ワールドや共有サーバーでは実施しない。表示専用アイテムは保護されておらず、取り出し＋再描画で複製、再描画で消失し得る。価値のあるアイテムは使わない。
 
-## 1. 目的
+## 手順（この順で）
 
-次の未確定事項を、実際のゲームで確認します。
+前の段階が不合格なら次へ進まない。
 
-1. `VirtualContainer` のチェスト画面で、`button.send` などによる入力通知が成立するか。
-2. JSON UI による通常操作の抑制と透明ボタンの重ね合わせが、PC・タッチ・コントローラーで機能するか。覆った範囲のボタンや inventory slot を巻き込まないか、プレイヤー側の操作を妨げないか。
-3. InvUI の画面だけに JSON UI を適用し、通常のチェストへ影響させない判定ができるか。
-4. `InventoryLink` のアイテム移動を有効化した場合に、重複・消失を防げるか（現行コアでは移動自体を拒否）。
-5. 9 / 27 / 54 スロットと各入力方式で表示が整合するか。
+### 1. 準備
 
-これらは設計書の採用候補であり、**検証前の機能を「動作確認済み」として扱いません。** 個々の API の存在や挙動も、この手順の結果で確認する対象です。
+- テスト用ワールドを複製し、バックアップを取る。Preview/Beta で Experimental API を有効化する。
+- ゲーム版・`@minecraft/server` 版・プラットフォーム・入力方式・パックの版/ハッシュを記録する。
+- 静的検査だけなら CLI（既定で書き込みなし）:
 
-## 2. 安全上の注意
+  ```bash
+  node bin/cli.js init --behavior-pack <BP> --resource-pack <RP> --json
+  ```
 
-- **使い捨てのテスト用ワールド**で実施する。本番ワールドや配布用ワールド、通常プレイヤーが入るサーバーでは行わない。試験後はワールドごと破棄してよい状態にする。
-- 実施前にワールドと Resource Pack / Behavior Pack のバックアップを取る。
-- 検証には価値のないアイテムだけを使う。`InventoryLink` の試験でも、回収不能になってもよいアイテムのみを使う。
-- **表示専用アイテムは保護されていない。** 画面を開いたとき `setItem()` で置かれるだけで、プレイヤーは取り出せる。取り出した後に `refresh()` が走ると再設定され、複製が起こり得る。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得る。試験で表示アイテムを使う場合も、使い捨てアイテムだけにする。
-- **コアの画面は既定で開く。テスト用アダプタの注入は不要になった。** `minecraftVirtualContainerAdapter.canOpenScreens` は `true` で、`Window.open()` がそのまま実画面を開こうとする。これは「実機で確認済み」という意味ではなく、使い捨てワールドでのみ行う理由そのものである。`setContainerAdapter()` で `canOpenScreens = false` のアダプタを渡した場合だけ `WindowOpenRejectedError` で拒否される。
-- **Resource Pack の画面接続は変更中。** `ui/invui_connect.json` と `invui_connect_data_driven.json` は `data_driven_container` のパネルへ差し込む試験的接続で、`VirtualContainer` を特定できない。**透明ブロッカーは保護ではなく、覆った範囲のボタンや inventory slot も抑制し得る**一方、プレイヤー側のインベントリ・ホットバーは覆わず、controller・タッチ入力の遮断を保証しない。導入する場合は、実際の `ui/_ui_defs.json` とファイル構成を記録し、通常チェストへの影響を最初に確認する。**ブロッカーがあることを合格の根拠にしない。**
-- マルチプレイで試す場合は、参加者を限定したテスト用サーバーを使う。通常プレイヤーが入れる場所では有効化しない。
-- 既存の `ui/chest_screen.json` を直接書き換えない。バックアップと差分を保持する。CLI は `ui/invui.json` と試験的接続 2 ファイルだけを導入し、`ui/_ui_defs.json` への登録は自動化しない。
-- クリック・アイテム保護・JSON UI・`InventoryLink` は、この手順の合格が確認できるまで**安全に利用できない機能**として扱う。
+  既存 RP へ `ui/invui.json` と試験的接続 2 ファイルを追加する場合のみ `--install-resource-pack` を付ける。`ui/_ui_defs.json` への登録は手動で行い、差分を確認する。
+- 試験マトリクス（9 / 27 / 54 スロット × PC / タッチ / コントローラー）を用意する。
 
-### 即時中止する条件
+### 2. 通常チェストの基準確認（`BASE-01`〜`03`）
 
-次のいずれかが発生したら、その場で試験を中止し、アドオンと Resource Pack を無効化します。続行して「たまたま動いた」を合格にしません。
+接続ファイルを `_ui_defs.json` へ登録する**前と後**で、通常チェストのアイテム移動・ボタン操作が従来どおりできることを確認する。接続は `data_driven_container` のパネルを使う全画面に及び得るため、必ず最初に行う。壊れたら中止して接続を外す。
 
-- 通常のチェスト（InvUI 以外）でアイテム移動が壊れた、または UI が崩れた。
-- 表示専用アイテムが持ち出せた、または操作で増減した。
-- アイテムの複製・消失を確認した。
-- 画面からの変更で `WindowItemChangeDangerError` が通知されなかった、または通知後も画面が操作できた。
-- 画面終了後やページ変更後に、古い通知がクリックとして実行された。
-- チャット通知方式が通常チャットを壊した、または通知がプレイヤーに表示された。
-- クライアントがクラッシュした、またはワールドが破損した。
+### 3. 表示（`DISP-01`〜`03`）
 
-## 3. 実施環境の記録
+`Window.open()` は既定で実画面を開く（テスト用アダプタ不要）。9 / 27 / 54 スロットで、位置・個数・見た目と、最終ページ・未使用スロットが空であることを確認する。各スロット数・入力方式・画面サイズ・UI スケール・言語を記録する。
 
-試験ごとに次を記録します。CLI の検査結果だけでは、ゲーム版や Experimental の状態を確定できません。
+### 4. アイテム保護（`PROT-01`〜`04`）
 
-| 項目 | 記録 |
-|---|---|
-| 実施日 | |
-| 実施者 | |
-| Minecraft の版（Preview/Beta の具体的なビルド） | |
-| `@minecraft/server` の版 | |
-| プラットフォーム（Windows / iOS / Android / Xbox など） | |
-| 入力方式（PC マウス / タッチ / コントローラー） | |
-| Behavior Pack の版・ハッシュ | |
-| Resource Pack の版・ハッシュ（手動 UI を含む） | |
-| `ui/invui_connect*.json` の導入有無 / `ui/_ui_defs.json` への登録有無（接続は変更中・未検証） | |
-| 画面を開いた経路（既定アダプタの `Window.open()` / raw probe の `!invui open` / 独自アダプタ） | |
-| 併用している他の Resource Pack | |
-| ワールドのバックアップ取得 | 済 / 未 |
+表示専用スロットで通常クリック、Shift クリック、ドラッグ、ダブルクリック、ドロップを試し、持ち出せない・増減しないことを確認する。現行コアは無保護なので、保護を組み込んだテストビルドでのみ合格できる。1 つでも持ち出せたら中止し、クリック通知へ進まない。
 
-## 4. 準備
+### 5. クリック通知（`CLICK-01`〜`11`）
 
-1. テスト用ワールドを複製し、バックアップを取る。
-2. 対象の Preview/Beta で Experimental API を有効にする。必要な設定はゲーム版によって異なるため、実際の画面で確認して記録する。
-3. Behavior Pack を配置する。現行コアの `Window.open()` は既定で実画面を開く（`VirtualContainer` を作成して `VirtualContainer.open()` を呼ぶ）ため、`open()` を許可するテスト用アダプタは不要。ただしこの経路は実機未検証でアイテム保護もない。使い捨てワールドでのみ実行する。**InvUI コアを使わない [`probe/`](probe/README.md) の raw probe は、`world.virtualContainerManager` を直接呼んで `VirtualContainer` を開くため、コアのビルドもアダプタも不要**（プローブ README の手順で `behavior_pack/` を配置する）。両者は対象が別であり、raw probe の結果を DISP 以降の合格に流用しない。
-4. **`ui/_ui_defs.json` へ接続ファイルを登録する前に**、通常チェストの基準動作を確認する（手順 A、および CHECKLIST の BASE-04 で導入後に再確認）。
-5. Resource Pack を用意する。`resource_pack/` には `manifest.json`、`ui/_ui_defs.json`、`ui/invui.json`、試験的接続の `ui/invui_connect.json` / `ui/invui_connect_data_driven.json`（[`resource_pack/experimental/connect-data-driven/`](../../resource_pack/experimental/connect-data-driven/README.md)）、**オプトインで未登録**の手入力・静的ペイロード送信プローブ `ui/invui_controls.json` / `ui/invui_controls_data_driven.json` がある。**接続は変更中で、適用可否は未検証**であり、`data_driven_container` のパネルを使う全画面に影響し得る。接続には透明ブロッカーが含まれ、覆った範囲では**ボタンや inventory slot も抑制し得る**一方、プレイヤー側や controller・タッチ入力の遮断は保証しない。手動プローブは chat と同じ text box 名を使い、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を手入力して送信経路だけを観察するもので、slot / session / layout-generation / sequence の自動生成はできない。session-id は open ごとの `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration`（いずれも公開 getter）を開いたスクリプトから表示して取得し、open のたび・ページ変更のたびに読み直す（[resource_pack/README.md](../../resource_pack/README.md) の「session-id と layout-generation の取得手順」）。直前の受理から既定 100 ms（10 回/秒）以内の連投は `rate-limited` として拒否される（open をまたいでも直前の受理時刻を引き継ぐ）。有効化するとキーボード入力を奪い得るため、既定の接続には含めず、使う場合だけ 2 ファイルを `_ui_defs.json` へ登録する。既存 Resource Pack へ入れる場合は、CLI の `--install-resource-pack` で 3 ファイルを追加し、`ui/_ui_defs.json` への登録はバックアップと差分を確認して手動で行う。**作業ツリーの `ui/_ui_defs.json` は接続 2 ファイルを登録済みだが、これは変更中の内容である。**試験時点の実ファイルを確認し、登録の有無を CHECKLIST に記録する。登録してもしなくても、実機で適用されるかは未検証。
-6. 検査だけなら、次の CLI を実行して静的状態を確認できる。既定ではどのファイルにも書き込まない。
+透明ボタン等の入力経路がある場合のみ。1 クリック 1 通知、プレイヤーとスロットの特定、ページ変更・終了後の古い通知の破棄、通常チャットに表示されないこと、連投の重複処理、描画完了前の通知が実行されないことを確認する。
 
-   ```bash
-   node bin/cli.js init \
-     --behavior-pack <Behavior Pack のパス> \
-     --resource-pack <Resource Pack のパス> \
-     --json
-   ```
+`button.send` → チャット通知は候補であり未確定。ライブラリ側は `world.beforeEvents.chatSend` で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を受けて `handleClick()` へ流す受信経路のみ実装済み（Node.js テスト済み・実機未検証）。UI 側の自動生成はなく、通知は手入力で偽装できる。手入力プローブか、通知を生成するテストビルドでのみ実施する。候補の整理は [CLICK-NOTIFICATION-NOTES.md](CLICK-NOTIFICATION-NOTES.md)、カーソル案は [CURSOR-INPUT-NOTES.md](CURSOR-INPUT-NOTES.md) を参照。
 
-   既存 Resource Pack へ `ui/invui.json` と試験的接続 2 ファイルを追加する場合は、`--install-resource-pack` を明示する。追加されるのは `ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` だけで、既存ファイルは上書きしない。内容が異なる同名ファイルが既にあれば競合として中断し、差分を表示して終了コード 1 になる（書き込み前に検査エラーがあれば `blocked` で書き込まない）。`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` は変更しない。`--report` は廃止されており、指定すると引数エラーで失敗する。
+### 6. `InventoryLink`（`INV-01`〜`05`）
 
-   ```bash
-   node bin/cli.js init \
-     --resource-pack <Resource Pack のパス> \
-     --install-resource-pack \
-     --json
-   ```
+必ず最後に、使い捨てアイテムだけで実施する。リンク先と保管領域の間でクリック・ドラッグ・カーソル上アイテム・画面終了・死亡を組み合わせ、増減が一致するか確認する。現行コアの `moveTo()` は常に `InventoryLinkMoveRejectedError` を投げるため、有効化したテストビルドでのみ実施できる。複製・消失が 1 件でもあれば中止し、無効のままにする。
 
-   `generate-resource-pack` は別コマンドで、`manifest.json`、接続登録済みの `ui/_ui_defs.json`、`ui/invui.json`、`ui/invui_connect.json`、`ui/invui_connect_data_driven.json` を新しい出力先へ生成する（既存パスへは書き込まない）。生成物は実機未検証。
+### 7. ライフサイクル（`LIFE-01`〜`07`）
 
-   保存する場合は、利用者が標準出力をリダイレクトしてください。検査エラーがある場合は終了コード 1 になります。
+死亡、ディメンション移動、切断、スペクテイター切替、shutdown、スクリプト再読み込みを試す。退出は `PlayerLeft`、死亡は `PlayerDied`、ディメンション移動は `ServerClosed`、スペクテイターは `PlayerSpectating` で 1 回だけ close され、購読が解放され、自動再オープンしないことを確認する。shutdown は restricted execution のため close ハンドラーから `VirtualContainer.close()` や `unsubscribe()` を呼ばない。再読み込み時の後始末は未対応で、合格根拠にしない。
 
-7. 試験マトリクスを用意する。
+### 8. 競合（`COMPAT-01`〜`03`）
 
-| スロット数 | PC マウス | タッチ | コントローラー |
+他の Resource Pack と併用し、通常チェスト・InvUI 画面・UI の表示崩れ、ボタン操作を接続の登録前後で比較する。`button-send-resource-pack/` は単独使用前提なので併用しない。
+
+## プローブ一覧
+
+| プローブ | 何を確かめるか | 導入方法 | 参照先 |
 |---|---|---|---|
-| 9 | 未実施 | 未実施 | 未実施 |
-| 27 | 未実施 | 未実施 | 未実施 |
-| 54 | 未実施 | 未実施 | 未実施 |
+| `probe/` | `VirtualContainer` 単体の表示・close reason・itemChange、`!invui` チャット通知の受信観測 | BP をワールドへ配置（コア不要） | [README](probe/README.md) |
+| `locked-click-probe/` | `ItemLockMode.slot` の通常クリックで itemChange が届くか（観測のみ） | `.mcpack` を取り込むかフォルダ配置 | [README](locked-click-probe/README.md) |
+| `chest-resource-pack/` | `VirtualContainer` が chest 画面を使うか（ラベル） | RP として有効化（単独） | [README](chest-resource-pack/README.md) |
+| `data-driven-resource-pack/` | `data_driven_container` 画面を使うか（ラベル） | RP として有効化（単独） | [README](data-driven-resource-pack/README.md) |
+| `button-send-resource-pack/` | `button.send` が通知を発火するか（陽性対照付き） | RP として有効化（単独、`probe/` とペア） | [README](button-send-resource-pack/README.md) |
+| `edit-box-resource-pack/` | `edit_box` + `button.send` で手入力が送信できるか | RP として有効化（単独。チャット入力を奪い得る） | [README](edit-box-resource-pack/README.md) |
+| `protection-resource-pack/` | JSON UI の重ねだけでアイテム操作を止められるか | RP として有効化（単独。通常チェストにも作用し得る） | [README](protection-resource-pack/README.md) |
 
-入力方式ごとに、対象画面のサイズ・UI スケール・言語設定も記録します。
+各プローブの警告・判定条件は各 README に従う。導入手順の詳細と試験的接続の扱いは [resource_pack/README.md](../../resource_pack/README.md) と [connect-data-driven](../../resource_pack/experimental/connect-data-driven/README.md) を参照。過去の調査経緯は [API-NOTES.md](API-NOTES.md) にある。
 
-## 5. 試験の順序
+## 即時中止する条件
 
-安全性の高い順に進めます。前の段階が不合格なら、後の段階へ進みません。
+- 通常チェスト（InvUI 以外）で移動が壊れた、UI が崩れた。
+- 表示専用アイテムが持ち出せた、または増減した。
+- アイテムの複製・消失を確認した。
+- `WindowItemChangeDangerError` が通知されない、または通知後も操作できた。
+- 画面終了後・ページ変更後に古い通知がクリックとして実行された。
+- 通知方式が通常チャットを壊した、または通知がプレイヤーに表示された。
+- クラッシュした、ワールドが破損した。
 
-### A. 通常チェストの基準確認（JSON UI 導入前後）
+## 判定と記録
 
-通常のチェストを開き、チェスト間・プレイヤーインベントリ間でアイテムを移動する。`ui/_ui_defs.json` へ試験的接続（`ui/invui_connect*.json`）を登録した後も、InvUI 以外のチェストで従来どおり移動できることを確認する。接続は `data_driven_container` のパネルを使う画面全体に及び得るため、この段階を最初に置く。**透明ブロッカーはグリッド付近を覆うため、通常チェストでアイテム操作が止まった場合は、ブロッカーが効いている可能性がある。**その場合は「通常チェストが壊れた」として中止し、接続を外して再確認する。ブロッカーがボタンや inventory slot も抑制していないか、プレイヤー側のインベントリ・ホットバーは操作できるかを記録する。
+- [CHECKLIST.md](CHECKLIST.md) をコピーして記入する。各項目は **合格 / 不合格 / 未実施 / N/A**（N/A は理由必須）。
+- 入力方式ごとに結果を分ける。PC の合格をタッチ・コントローラーの合格にしない。
+- `BASE-*` / `PROT-*` / `INV-*` が 1 つでも不合格なら、そのビルドは配布しない。
+- 全項目合格でも、その版・環境での結果にすぎない。ゲーム版や `@minecraft/server` 版が変わったら再試験する。
+- `InventoryLink` は安全試験を満たすまで無効のままにする。
 
-- 対象 ID: `BASE-01` 〜 `BASE-03`
-- 不合格の場合は中止。画面識別または入力抑制の設計を見直す。
-
-### B. 表示の確認（9 / 27 / 54 スロット）
-
-固定スロットのみの画面を開き、アイテムが正しい位置・個数・見た目で表示されるか、各スロット数・入力方式・画面サイズで確認する。現行コアの `Window.open()` は既定で実画面を開くため、独自アダプタなしで試せるが、**実機で表示されるかは未検証**で、表示アイテムは保護されていない。JSON UI の重ね合わせを使う場合は Resource Pack の接続が必要だが、**接続は変更中で適用可否は未検証**であり、`VirtualContainer` を特定できないため通常のコンテナ画面にも影響し得る（[`resource_pack/experimental/connect-data-driven/`](../../resource_pack/experimental/connect-data-driven/README.md)）。接続には透明ブロッカーが含まれるため、**表示は見えてもグリッド上の操作がブロッカーに吸われ、表示の確認と操作の確認を分けて行えない可能性がある**。ブロッカーがボタンや inventory slot も覆っていないか（desktop は `offset [7, 10]` / `size [162, "100%-24px"]`、pocket は右半分）、プレイヤー側が操作できるかを記録する。接続を使うかどうか、`ui/_ui_defs.json` の登録状態を記録する。**使い捨てワールドでのみ実施する。**
-
-- 対象 ID: `DISP-01` 〜 `DISP-03`
-- あわせて、最終ページ・未使用スロットが空であることを確認する（ページ・タブ・スクロールを使うテストビルドが用意できた場合）。
-
-### C. アイテム保護（表示専用・ボタン用スロット）
-
-表示専用スロットのアイテムについて、通常クリック、Shift クリック相当、ドラッグ、ダブルクリック相当、ドロップ操作を試す。持ち出せないこと、個数が変わらないこと、複製・消失しないことを確認する。現行コアにはアイテム保護の実装がないため、保護を組み込んだテストビルドでのみ合格できる。
-
-現行コアの画面は、表示アイテムを `setItem()` で置くだけで、入力抑制も JSON UI もない。プレイヤーは表示アイテムを取り出せ、その後に `refresh()`（状態更新・購読）が走ると同じアイテムが再設定されるため、**取り出しと再描画の組み合わせで複製が起こり得る**。逆に、プレイヤーが入れたアイテムを再描画が上書きすると**消失し得る**。この試験では、取り出し後に画面を操作して再描画させる手順も試す。
-
-画面からの変更は、既定アダプタの `world.afterEvents.virtualContainerItemChange` 購読によって `WindowItemChangeDangerError` としてエラーハンドラーへ通知され、再描画停止と close 要求が行われる。ただし `after` イベントのため保護ではなく、**通知が来てもアイテムは戻らない**。通知が来なかったこと・close が成功したことを合格根拠にしない。
-
-JSON UI の上重ねだけでコンテナ側グリッドの操作を止められるかを切り分ける実験用 Resource Pack が [`protection-resource-pack/`](protection-resource-pack/README.md) です。**保護の実装ではなく、使い捨てワールド専用で、通常のチェストの操作にも影響し得ます。** 対象はグリッド全体で、スロット単位・InvUI 限定の抑制は検証できません。同梱の `check.mjs` は JSON 構造だけを検査します。
-
-**既定の接続に含まれる透明ブロッカーも保護ではありません。** ブロッカーはコンテナ側グリッド付近を覆い、スロット系の入力を `button.invui_connect_blocked` へ流しますが、受け側のスクリプトはありません。覆った範囲では**ボタンや inventory slot も抑制し得る**一方、**プレイヤー側のインベントリ・ホットバーは範囲外**で、controller のフォーカス移動、タッチの長押し・ドラッグ、JSON UI を経由しない操作の遮断は保証しません。赤いホバー・押下表示はブロッカーが入力を受けた手がかりにすぎず、アイテムが動かないことの証明ではありません。**ブロッカーが効いたことを `PROT-*` の合格根拠にせず**、ブロッカーの範囲・入力方式ごとの結果をメモに残す。アイテム保護の実装・検証は別途必要です。
-
-`VirtualContainer` の画面で JSON UI の上重ねだけを試す場合は、raw probe の `!invui fill` で中身を入れる。**`fill` は画面を開いていない状態でだけ実行でき（表示中・`open` 直後の pending 中は probe が拒否する）、その後に `!invui open` で開く**。逆順（開いてから fill）にしない。`fill` が拒否されずに書き込まれた場合は中止する。ただしこれは raw probe が開いたコンテナでの観察であり、**コアの `Window` が置く表示アイテムの保護試験ではない**。`PROT-*` はコアの画面に対して実施する。
-
-- 対象 ID: `PROT-01` 〜 `PROT-04`
-- **1 つでも持ち出せたら不合格。** クリック通知の試験へ進まない。
-
-### D. クリック通知
-
-透明ボタン等の入力経路が利用できる場合に限り、通常クリックが Script API へ 1 回だけ届くか確認する。`button.send` → チャット通知は候補であり、採用確定ではありません。ライブラリ側は `Window` が `world.beforeEvents.chatSend` で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を受け取り `handleClick()` へ流す受信経路だけを実装済みです（Node.js テスト済み・実機未検証）。UI 側が通知を自動生成する実装はなく、JSON UI の画面接続も変更中・未検証です。既定接続の透明ブロッカーは押下を `button.invui_connect_blocked` へ流すだけで、クリック通知を送りません。そのため、この試験は手入力プローブ（[`resource_pack/README.md`](../../resource_pack/README.md) の「手動・静的ペイロード送信プローブ」）または通知を生成するテストビルドでのみ実施できます。通知は手入力で偽装でき、sender id 以外は信用できません。チェスト画面で成立しない場合は不合格として記録し、別方式を検討する。
-
-**入力ゲート**: 通知の世代が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは、入力は受理されずハンドラーも実行されません（チャット経路は button が無いものとして拒否、`handleClick()` は `false`）。`placeholder` を指定しない非同期 provider が未解決の間は closed が続き（タイムアウトはない）、provider または `setItem()` が失敗したスロットは後で書き込みが成功するまで button になりません。Container 再生成（`setTitle()` / サイズ変更 / `setUpperGui()`）は swap から新しい画面が開くまで closed です。close・再オープンはゲートをリセットします。closed 中に拒否された通知はハンドラー未実行で sequence を消費しないため、アイテムが表示された後に同じ sequence で送り直せます（rate limit の 100 ms 間隔は別途適用）。これらは Node.js テストのみで実機未検証です。
-
-この観察だけを切り出した実験用 Resource Pack が [`button-send-resource-pack/`](button-send-resource-pack/README.md) です。**使い捨てワールド専用**で、陽性対照ラベルと `button.send` を発火させるボタンを 1 つずつ通常チェスト画面へ差し込むだけで、**通知文字列を自動で設定する仕組みはなく**、入力抑制もアイテム保護もありません。**他の Resource Pack との併用はできません。** 同梱の `check.mjs` は JSON 構造だけを検査し、表示・押下・通知受信は確認しません。導入しただけでは `CLICK-01` 〜 `CLICK-09` を「実施済み」にしないでください。
-
-確認項目:
-
-- 1 クリックにつき通知が 1 回か（`CLICK-01` 〜 `CLICK-03`）
-- 通知からプレイヤーとスロットを特定できるか（`CLICK-04`）
-- ページ変更・画面終了後の古い通知が破棄されるか（`CLICK-05`）
-- 通知文字列が通常チャットとして表示されないか（`CLICK-06`）
-- 同じ通知の連続送信で処理が重複しないか（`CLICK-07`）
-- 描画完了前に送った通知が実行されず、表示後に同じ sequence で送り直すと実行されるか（`CLICK-10`）
-- provider が失敗したスロットが、後でそのスロットが描画されるまでクリックできないか（`CLICK-11`）
-
-### E. `InventoryLink` の安全試験
-
-**必ず最後に、使い捨てアイテムだけで実施する。** リンクされたスロットと保管領域の間で、クリック・ドラッグ・カーソル上アイテム・画面終了・死亡を組み合わせ、増減が一致するか確認する。現行コアの `InventoryLink.moveTo()` は常に `InventoryLinkMoveRejectedError` を投げるため、移動を実装・明示的に有効化したテストビルドでのみ実施できる。それまでは「未実施」のまま残す。
-
-- 対象 ID: `INV-01` 〜 `INV-05`
-- 複製・消失が 1 件でもあれば中止し、`InventoryLink` を無効のままにする。
-
-### F. ライフサイクルと再読み込み
-
-死亡、ディメンション移動、切断、スクリプト再読み込みを試す。切断（退出）時は `world.afterEvents.playerLeave` による自動 close が `PlayerLeft` で 1 回だけ走り、chat 登録・state ハンドル・GUI/要素の購読が解放され、自動再オープンしないことを確認する（実装済み・Node.js テストのみ、実機未検証）。死亡時は同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で 1 回 close し、同じ経路で後始末することを確認する（実装済み・Node.js テストのみ、実機未検証）。ディメンション移動時は同じ `open()` で購読した `world.afterEvents.playerDimensionChange` が対象プレイヤーの Window を `ServerClosed` で 1 回 close し、スペクテイター切替時は `world.afterEvents.playerGameModeChange` が `toGameMode` の `Spectator` だけで `PlayerSpectating` で close することを確認する（どちらも実装済み・Node.js テストのみ、実機未検証。Creative/Survival への変更では close しない）。プレイヤー以外の entity の死亡や他プレイヤーの死亡・ディメンション移動・スペクテイター切替では close しないこと、これらのイベントが届かない環境でも open/close が壊れないことも確認する。
-
-shutdown 時は、最初の `open()` で購読した `system.beforeEvents.shutdown` が `opening` / `open` の全 Window を `ServerClosed` で 1 回だけ close することを確認する（実装済み・Node.js テストのみ、実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばれず、画面とアダプタ購読の破棄はエンジンに任せる。観察できるのは、終了時に close ハンドラーが `ServerClosed` で 1 回だけ呼ばれ、そこで `open()` しても画面が開かず `closed` のままであること、2 回目の shutdown で close ハンドラーが再度呼ばれないこと、shutdown 後に `open()` しても新しい画面が開かないこと。ユーザーの close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）は同じ restricted なコールバック内で実行されるため、close ハンドラーから `VirtualContainer.close()` やイベント `unsubscribe()` を呼ばないこと。shutdown API がない環境では購読を諦め、open/close が壊れないことを確認する。**スクリプト再読み込み時の後始末は未対応**であり、close ハンドラー・状態解放・永続化は保証されないため、再読み込みは shutdown と同じ合格根拠にせず、引き続き観察項目として扱う。終了イベントの重複、古い入力の実行、`persistent` 状態の復元を確認する。画面の自動再オープンは標準保証としない。
-
-- 対象 ID: `LIFE-01` 〜 `LIFE-07`
-
-### G. 競合確認
-
-他の Resource Pack と併用し、通常チェスト・InvUI 画面・UI の表示崩れを確認する。競合をゼロにできるとは保証しない。試験的接続（`ui/invui_connect*.json`）も変更中・未検証の Resource Pack 変更であり、接続の登録前後で通常チェストを比較して影響を切り分ける。**ブロッカーにより通常チェストのボタンや inventory slot が押せなくなる場合がある**ため、アイテム移動だけでなくボタン操作も比較する。ただし [`button-send-resource-pack/`](button-send-resource-pack/README.md) は単独使用が前提の実験キットであり、この競合試験には併用しない（ラベルが同一位置で重なり、由来を切り分けられなくなる）。
-
-- 対象 ID: `COMPAT-01` 〜 `COMPAT-03`
-
-## 6. 判定ルール
-
-- 各項目は **合格 / 不合格 / 未実施 / N/A** で記録する。N/A は理由を必ず書く。
-- 入力方式ごとに結果を分ける。PC で合格しても、タッチ・コントローラーの合格にはしない。
-- 安全性に関わる項目（`BASE-*`、`PROT-*`、`INV-*`）が 1 つでも不合格なら、そのビルドは配布対象にしない。
-- 全項目合格でも、**その試験で使った特定のゲーム版・`@minecraft/server` 版・入力環境**での合格にすぎない。ベータである事実は変わらない。
-- クリック機能は、設計書 10.8 の合格条件を満たすまで正式機能として公開しない。
-- `InventoryLink` は、アイテム安全試験を満たすまで制限付き・無効のままとする。
-
-## 7. 記録と報告
-
-- [CHECKLIST.md](CHECKLIST.md) をコピーし、試験ごとに記入する。
-- 各項目に、再現手順、期待結果、実際の結果、スクリーンショットやログの有無を残す。
-- 不合格時は、どの条件で再現したか（入力方式、スロット数、画面サイズ、操作順）を具体的に書く。
-- CLI の検査結果（`--json`）を残す場合は、標準出力を利用者がリダイレクトして保管する。CLI は既定でファイルを書きません。`--install-resource-pack` 指定時だけ `ui/invui.json` と試験的接続 2 ファイルを追加し、その結果は `resourcePackInstall` に入ります。ただし CLI は実機の入力・表示・アイテム安全を検証しません。
-- ゲーム版や `@minecraft/server` 版が変わったら、同じ結果を流用せず再試験する。
-
-## 8. 自動テスト（実機テストの代替ではない）
-
-CLI の安全側の動作は、次のテストで確認できます。
+## 自動テスト（実機テストの代替ではない）
 
 ```bash
-node tests/manual-bedrock/cli.test.mjs
-# または
 node --test tests/manual-bedrock/cli.test.mjs
-```
-
-確認できること:
-
-- 既定の CLI が Behavior Pack / Resource Pack を変更せず、どのファイルにも書き込まない。
-- `--install-resource-pack` 明示時だけ `ui/invui.json` と試験的接続 2 ファイル（`ui/invui_connect.json`、`ui/invui_connect_data_driven.json`）を追加し、既存ファイル（`manifest.json`、`ui/_ui_defs.json`、`ui/chest_screen.json` を含む）を変更しない。
-- 同内容の導入先ファイルは書き換えず、異なる内容は上書きせず差分を出して中断する。失敗時は追加済みファイル・一時ファイル・作成した空ディレクトリの削除（ロールバック）を**試みる**が、削除権限がない等の場合は**部分適用が残り得る**。自動テストが確認するのはシミュレートした失敗経路だけであり、すべてのファイルシステム障害を再現するものではない。
-- `--json` が単体でパースできる JSON を標準出力へ出し、`status` に `beta-unverified` を含める。
-- 廃止した `--report` を指定すると引数エラーで失敗し、レポートファイルも作らない。
-- 壊れた `manifest.json` で失敗し、パックを変更しない。
-- 未検証・ベータであることを出力に含める。
-
-確認できないこと:
-
-- ゲーム内のクリック、アイテム保護、JSON UI の適用範囲。
-- 入力ゲート（描画完了前・`placeholder` を指定しない未解決 provider・失敗スロット・Container 再生成中は closed）が実機でも成立するか。
-- Resource Pack の試験的接続が実際に画面へ適用されるか、VirtualContainer に限定されるか（VirtualContainer 画面が同パネルを使っているかは未確定）。
-- 透明ブロッカーが入力を遮断するか、覆った範囲のボタンや inventory slot を巻き込まないか、プレイヤー側・controller・タッチでどう振る舞うか。
-- アイテムの複製・消失。
-- 入力方式ごとの挙動。
-
-`button.send` 実験キットの構造検査は、次のコマンドで実行できます。
-
-```bash
 node tests/manual-bedrock/button-send-resource-pack/check.mjs
-```
-
-確認できるのは JSON の整合性（manifest の警告文、`_ui_defs` の参照先、`button.send` だけを発火するボタン、禁止した入力系 control の不在、`chest` / `pocket_containers` への `insert_front`）だけです。表示・押下・通知の受信・通常チェストへの影響は確認しません。
-
-アイテム操作抑制プローブの構造検査は、次のコマンドで実行できます。
-
-```bash
+node tests/manual-bedrock/edit-box-resource-pack/check.mjs
 node tests/manual-bedrock/protection-resource-pack/check.mjs
 ```
 
-確認できるのは JSON の整合性（manifest の警告文、ブロッカーがスロット系の入力だけを no-op へ流すこと、禁止した入力系 control の不在、対象パネルへの `insert_back` と座標、`chest_screen.json` を同梱・登録していないこと）だけです。パックの読み込み、描画、入力の遮断、アイテム保護、通常チェストへの影響は確認しません。
-
-edit_box 実験キットの構造検査は、次のコマンドで実行できます（CI でも他の構造検査と一緒に実行されます）。
-
-```bash
-node tests/manual-bedrock/edit-box-resource-pack/check.mjs
-```
-
-確認できるのは JSON の整合性（manifest の警告文、`_ui_defs` の参照先、入力欄が `#message_text_box` を指定し固定文字・`bindings` を持たないこと、ボタンが `button.send` だけを発火すること、`chest` / `pocket_containers` への `insert_front`）だけです。表示・入力・送信、チャットや通常チェストへの影響、アイテム保護は確認しません。
-
-## 9. 未確定のまま残す事項
-
-以下は、この手順を実施して結果が出るまで確定しません。
-
-- 入力通知方式（`button.send` → チャット通知を採用できるか）
-- 描画完了まで入力を拒否するゲート、失敗スロットを非 clickable にする扱い、`placeholder` を指定しない未解決 provider と Container 再生成中に closed を続ける扱いが、実機の画面更新タイミングでも意図どおり成立するか（Node.js テストのみ、実機未検証）
-- 自動スロットクリック通知の可否。公式 samples と script beta の範囲では、標準表示を保ったまま非破壊・タッチ対応で自動通知する経路は確認できていない。`button.send` / `button.drop_one` / カーソル / マーカーアイテムの各候補と実機で必要な観測項目は [`CLICK-NOTIFICATION-NOTES.md`](CLICK-NOTIFICATION-NOTES.md) を参照。自動通知は実装済みとして扱わない
-- `ItemLockMode.slot` のアイテムを通常クリックしたときに `VirtualContainerItemChangeAfterEvent` が同じ内容で届くか。届けば復元不要のクリック源になり得るため、[`locked-click-probe/`](locked-click-probe/README.md) で単独に観測する（復元・クリック実行・JSON UI なし）。未実施であり、結果が出るまで実装経路にしない。陽性でも設計7.2 により、ロックを表示スロットの読み取り専用化に使わない
-- JSON UI のボタンを `button.slot_N`（N=0〜8）へ mapping したときに `PlayerHotbarSelectedSlotChangeAfterEvent` が発火するか。発火しても 9 値だけで、通常のホットバー入力との区別が必要。詳細は [`CLICK-NOTIFICATION-NOTES.md`](CLICK-NOTIFICATION-NOTES.md) の 9〜11 節
-- カーソル取得（`cursor_inventory`）をクリック源にする案。`ef2e079` の試作は after イベントでの復元が同一指紋の Shift クリック・持ち出しで複製し得るため統合せず、タッチでもカーソルが使われない。調査と観察項目は [`CURSOR-INPUT-NOTES.md`](CURSOR-INPUT-NOTES.md) を参照し、実装・有効化手順として扱わない
-- 表示専用スロットの操作抑制方法（現状は無保護で、取り出し＋再描画による複製、再描画による消失が起こり得る）
-- 既定の `Window.open()` 経路で実機の画面が表示されるか、`close()` がいつ完了するか、直後の再 `open()` が成立するか
-- itemChange 検出（`WindowItemChangeDangerError`）から close 要求までが実機で機能するか
-- Resource Pack の試験的接続（`ui/invui_connect*.json` → `data_driven_container` のパネル）が適用されるか、`VirtualContainer` に限定できるか、通常チェストへの影響。VirtualContainer 画面が同パネルを使っているかは未確定。
-- 透明ブロッカー（`invui_connect_probe.grid_blocker`）が実際にスロット系入力を遮断するか、ボタンや inventory slot も抑制してしまうか、プレイヤー側・controller・タッチ入力を止められるか。遮断は保証されておらず、アイテム保護ではない。
-- 9 / 27 / 54 スロットと画面サイズの整合性
-- raw probe とコアで確認できる範囲の境界（raw probe は `VirtualContainer` 単体、コアはレイアウト・描画・保護。相互に流用不可）
-- テンプレートの `manifest.json`（`version` / `min_engine_version`）が対象ゲーム版で妥当か
-- `InventoryLink` の安全な移動手順
-- shutdown 時に restricted execution の制約（`VirtualContainer.close()` とイベント購読解除を呼ばない）が実機で成立し、close ハンドラーが `ServerClosed` で 1 回だけ走って再 `open()` が抑止されるか。スクリプト再読み込み時の後始末（close ハンドラー・状態解放）は未対応のまま
-- 対応する Minecraft / `@minecraft/server` の版
-
-結果が出るまで、README や CLI の出力に「動作確認済み」「安全」と記載しないでください。実機で試す場合は、結果にかかわらず使い捨てワールドだけで行ってください。
+確認できるのは CLI の安全側の動作（既定で無変更、導入 3 ファイルのみ、競合時中断、`--json` の形式）と、各 Resource Pack の JSON 構造だけ。表示・押下・入力・アイテム保護・通常チェストへの影響は確認できない。
