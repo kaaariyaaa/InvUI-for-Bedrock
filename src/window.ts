@@ -2228,9 +2228,13 @@ export class Window {
     // A different GUI may have a smaller content range. Write back the clamped
     // page/line/tab through the normal refresh path (design 8.4 / 9.5) instead
     // of the in-place slot diff, because that refresh re-resolves and renders
-    // the corrected state.
+    // the corrected state. While `open()` is still resolving, only render the
+    // clamp (see #onGuiChanged): a write here would rewind another viewer of
+    // the same shared state.
     if (layout.statePatch !== undefined) {
-      this.#revalidateStateRanges = true;
+      if (this.#status !== "opening") {
+        this.#revalidateStateRanges = true;
+      }
       this.#scheduleRefresh();
       return;
     }
@@ -3607,7 +3611,14 @@ export class Window {
       this.#failStateSchema("guiChange");
       return;
     }
-    this.#revalidateStateRanges = true;
+    // Opening only resolves, exactly like a tab change (#onStateChanged): a
+    // content change delivered while open() is still resolving must not make
+    // this Window write its own smaller page/line clamp into the shared state
+    // and rewind another viewer. A change seen while the Window is open is
+    // still revalidated here and by the refresh it schedules.
+    if (this.#status !== "opening") {
+      this.#revalidateStateRanges = true;
+    }
     this.#scheduleRefresh();
   }
 
