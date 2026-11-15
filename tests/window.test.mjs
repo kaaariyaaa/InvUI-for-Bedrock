@@ -7053,6 +7053,238 @@ test("a close and reopen during a pending render keeps the new screen's input us
   window.close();
 });
 
+test("a notified slot does not present a layout whose state diff is still rendering", async () => {
+  const clicks = [];
+  let resolveTabOne;
+  const tabZeroButton = Item.builder()
+    .setItemProvider(() => stack("minecraft:tab_0"))
+    .addClickHandler(() => clicks.push("tab0"))
+    .build();
+  const tabOneButton = Item.builder()
+    .setItemProvider(
+      () => new Promise((resolve) => {
+        resolveTabOne = resolve;
+      }),
+    )
+    .addClickHandler(() => clicks.push("tab1"))
+    .build();
+  const fixed = Item.builder()
+    .setItemProvider(() => stack("minecraft:fixed"))
+    .build();
+  const window = Window.builder()
+    .setViewer({ id: "slot-flush-diff", name: "SlotFlushDiff" })
+    .setUpperGui(
+      Gui.tab({
+        tabs: [
+          Gui.normal({ structure: ["ab"], ingredients: { a: tabZeroButton, b: fixed } }),
+          Gui.normal({ structure: ["ab"], ingredients: { a: tabOneButton, b: fixed } }),
+        ],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  window.setState({ tab: 1 });
+  for (let i = 0; i < 10 && resolveTabOne === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolveTabOne, "the tab-1 layout is rendering");
+  // The second slot kept its element; its notification settles one slot while
+  // the tab-1 button of the first slot is still rendering.
+  fixed.notifyWindows();
+  await tick();
+  await tick();
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "one settled slot must not present a layout the state diff is still rendering",
+  );
+  assert.equal(
+    await window.handleClick(0),
+    false,
+    "a click on the still-displayed tab 0 must not run tab 1's button",
+  );
+  assert.deepEqual(clicks, []);
+
+  resolveTabOne(stack("minecraft:tab_1"));
+  await tick();
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button", "display"]);
+  assert.equal(await window.handleClick(0), true);
+  assert.deepEqual(clicks, ["tab1"]);
+  window.close();
+});
+
+test("a refresh during a title regeneration cannot present the replacement early", async () => {
+  const clicks = [];
+  let calls = 0;
+  let resolveReplacement;
+  let resolveRefresh;
+  const button = Item.builder()
+    .setItemProvider(() => {
+      calls += 1;
+      if (calls === 1) {
+        return stack("minecraft:first");
+      }
+      return new Promise((resolve) => {
+        if (calls === 2) {
+          resolveReplacement = resolve;
+        } else {
+          resolveRefresh = resolve;
+        }
+      });
+    })
+    .addClickHandler(() => clicks.push("click"))
+    .build();
+  const window = Window.builder()
+    .setViewer({ id: "swap-refresh-race", name: "SwapRefreshRace" })
+    .setTitle("Old")
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: button } }))
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+
+  await window.open();
+  const regeneration = window.setTitle("New");
+  for (let i = 0; i < 20 && resolveReplacement === undefined; i += 1) {
+    await tick();
+  }
+  assert.ok(resolveReplacement, "the replacement is rendering");
+  // A state change during the replacement render applies a newer layout whose
+  // own render is still pending when the replacement is opened.
+  window.setState({ selection: "changed" });
+  await tick();
+  await tick();
+  assert.ok(resolveRefresh, "the refresh layout is still rendering");
+  assert.equal(window._inputSlotModes(), null);
+
+  resolveReplacement(stack("minecraft:replacement"));
+  await regeneration;
+  await tick();
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "opening the replacement must not present a refresh that is still rendering",
+  );
+  assert.equal(await window.handleClick(0), false);
+  assert.deepEqual(clicks, []);
+
+  resolveRefresh(stack("minecraft:refreshed"));
+  await tick();
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  assert.equal(await window.handleClick(0), true);
+  assert.deepEqual(clicks, ["click"]);
+  window.close();
+});
+
+test("an element whose independence proof throws does not wedge the input gate", async () => {
+  const errors = [];
+  const adapter = new InMemoryTestAdapter();
+  let proofs = 0;
+  const broken = {
+    resolve: () => stack("minecraft:duck"),
+    subscribe: () => () => {},
+    isStateIndependent() {
+      proofs += 1;
+      throw new Error("proof failed");
+    },
+  };
+  const window = Window.builder()
+    .setViewer({ id: "throwing-proof", name: "ThrowingProof" })
+    .setUpperGui(Gui.normal({ structure: ["a"], ingredients: { a: broken } }))
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  assert.deepEqual(window._inputSlotModes(), ["display"]);
+  window.setState({ selection: "changed" });
+  await tick();
+  await tick();
+  await tick();
+  assert.ok(proofs > 0, "the state diff consulted the independence proof");
+  assert.deepEqual(
+    errors,
+    [],
+    "a throwing proof is treated as opaque instead of failing the pass",
+  );
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["display"],
+    "the slot re-rendered and the applied layout settled",
+  );
+  assert.equal(adapter.containers[0].items[0].typeId, "minecraft:duck");
+  window.close();
+});
+
+test("a slot whose provider failed after a mapping change is not clickable", async () => {
+  const clicks = [];
+  const errors = [];
+  let tabOneFails = true;
+  const tabZeroButton = Item.builder()
+    .setItemProvider(() => stack("minecraft:tab_0"))
+    .addClickHandler(() => clicks.push("tab0"))
+    .build();
+  const tabOneButton = Item.builder()
+    .setItemProvider(() => {
+      if (tabOneFails) {
+        throw new Error("tab 1 provider failed");
+      }
+      return stack("minecraft:tab_1");
+    })
+    .addClickHandler(() => clicks.push("tab1"))
+    .build();
+  const adapter = new InMemoryTestAdapter();
+  const window = Window.builder()
+    .setViewer({ id: "failed-slot-present", name: "FailedSlotPresent" })
+    .setUpperGui(
+      Gui.tab({
+        tabs: [
+          Gui.normal({ structure: ["a"], ingredients: { a: tabZeroButton } }),
+          Gui.normal({ structure: ["a"], ingredients: { a: tabOneButton } }),
+        ],
+      }),
+    )
+    .setContainerAdapter(adapter)
+    .setErrorHandler((error, context) => errors.push({ error, context }))
+    .build();
+
+  await window.open();
+  window.setState({ tab: 1 });
+  await tick();
+  await tick();
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].context.operation, "itemProvider");
+  assert.equal(
+    adapter.containers[0].items[0].typeId,
+    "minecraft:tab_0",
+    "the failed slot still shows tab 0's item",
+  );
+  assert.deepEqual(
+    window._inputSlotModes(),
+    ["display"],
+    "the failed slot is not offered as tab 1's button",
+  );
+  assert.equal(
+    await window.handleClick(0),
+    false,
+    "clicking the visible tab 0 item must not run tab 1's handler",
+  );
+  assert.deepEqual(clicks, []);
+
+  tabOneFails = false;
+  tabOneButton.notifyWindows();
+  await tick();
+  await tick();
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  assert.equal(await window.handleClick(0), true);
+  assert.deepEqual(clicks, ["tab1"]);
+  window.close();
+});
+
 test("a page round trip in one timing rejects a line minted for the transient page", async () => {
   const viewer = { id: "chat-setstate-aba", name: "AbaState" };
   const clicks = [];
