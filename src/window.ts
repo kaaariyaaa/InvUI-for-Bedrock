@@ -104,6 +104,7 @@ import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
 import type { InputSlotMode } from "./input.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
+import { BedrockWorldStateStore } from "./bedrock-store.js";
 import { SlotWriteCache } from "./render-cache.js";
 import { StateManager } from "./state.js";
 import type {
@@ -113,6 +114,7 @@ import type {
   StateLifetime,
   StateScope,
   StateSnapshot,
+  StateStore,
 } from "./state.js";
 
 export type WindowCloseReason =
@@ -772,8 +774,34 @@ function ensureShutdownSubscription(): void {
 
 let defaultStateManager: StateManager | undefined;
 
+/**
+ * Store for `defaultManager()`. The real Bedrock world exposes dynamic
+ * properties, so a Window that asks for `persistent` lifetime works without
+ * any setup. A test double or a reduced world that lacks them keeps the
+ * previous in-memory default manager (`persistent` then still needs an
+ * injected `StateManager`), and a world whose property access throws falls
+ * back instead of breaking every Window. The dynamic-property path has not
+ * been verified on a real device.
+ */
+function defaultStateStore(): StateStore | undefined {
+  try {
+    if (
+      typeof world.getDynamicProperty === "function" &&
+      typeof world.setDynamicProperty === "function"
+    ) {
+      return new BedrockWorldStateStore(world);
+    }
+  } catch (error) {
+    console.error(
+      "InvUI: world dynamic properties are unavailable; the default StateManager cannot persist state.",
+      error,
+    );
+  }
+  return undefined;
+}
+
 function defaultManager(): StateManager {
-  defaultStateManager ??= new StateManager();
+  defaultStateManager ??= new StateManager(defaultStateStore());
   return defaultStateManager;
 }
 
@@ -1077,7 +1105,12 @@ export class WindowBuilder {
     return this;
   }
 
-  /** Share one StateManager between Windows. Defaults to a module-level manager. */
+  /**
+   * Share one StateManager between Windows. Defaults to a module-level manager
+   * backed by the world's dynamic properties when the world exposes them, so
+   * `persistent` state works without setup. Pass a manager with your own store
+   * (or `onError`/`migrations` options) to override that.
+   */
   setStateManager(manager: StateManager): this {
     if (!manager || typeof manager.acquire !== "function") {
       throw new TypeError("InvUI: state manager must be a StateManager.");
