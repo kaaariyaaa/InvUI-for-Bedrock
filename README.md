@@ -41,7 +41,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | `Window.open()` | **既定で実画面を開く（実機未検証）**。Container を作成し `VirtualContainer.open()` を呼ぶ。失敗は例外・エラーハンドラーで報告するが、実機での表示は未確認 |
 | 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。Behavior Pack を読み取り専用で静的に検査し、手動で必要な確認を表示する。パック内のファイルは変更しない |
 | 利用イメージ（[examples/README.md](examples/README.md)） | 設計スケッチのみ。型検査は可能、実行は対象外 |
-| 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
+| 全体設計 | README 内に要約（旧設計書は削除） |
 | npm 公開 | 未実施 |
 | ライセンス | MIT（[LICENSE](LICENSE)、npm tarball にも同梱） |
 
@@ -365,7 +365,7 @@ node bin/cli.js init --behavior-pack ./behavior_pack
 | `InventoryLink` のアイテム移動 | 実装なし。`moveTo()` は常に例外 | 複製・消失の可能性を排除できないため無効 |
 | 左・右・Shift・ダブルクリックの区別 | 初期リリース非目標 | 通常クリックのみを設計対象とする |
 
-設計書の合格条件（InvUI 画面だけに適用される、通常チェストが壊れない、表示アイテムを持ち出せない、通知が 1 回だけ届く、通知からプレイヤーとスロットを特定できる、アイテムが消失・複製しない、PC・タッチ・コントローラーで成立する、終了後の遅延入力が処理されない）を満たすまで、クリック機能を正式機能として公開しません。
+設計上の合格条件（InvUI 画面だけに適用される、通常チェストが壊れない、表示アイテムを持ち出せない、通知が 1 回だけ届く、通知からプレイヤーとスロットを特定できる、アイテムが消失・複製しない、PC・タッチ・コントローラーで成立する、終了後の遅延入力が処理されない）を満たすまで、クリック機能を正式機能として公開しません。
 
 ### 実機画面は既定で開く（使い捨てワールドで）
 
@@ -378,7 +378,7 @@ node bin/cli.js init --behavior-pack ./behavior_pack
 
 ## 設計上の前提（実機未検証）
 
-以下は設計書の方針です。実機で確認されるまで動作保証として読み替えないでください。
+以下は設計方針です。実機で確認されるまで動作保証として読み替えないでください。
 
 - `VirtualContainer` は Bedrock Preview/Beta の Experimental API で、メモリ上のコンテナであり、ワールドに保存されない。
 - `size` と `title` は生成後に変更できないため、変更時は画面を開き直す。
@@ -410,7 +410,6 @@ InvUI-for-Bedrock/
 │   ├── inventory.ts              # VirtualInventory / InventoryLink（移動は拒否）
 │   ├── player-inventory.ts       # プレイヤーインベントリの読み取り専用 Inventory（変更通知は明示注入）
 │   ├── json.ts                   # JSON 検証・複製（内部）
-│   ├── input.ts                  # 設計 10.4 の通知パーサと入力受け入れ（非公開）
 │   ├── state.ts                  # StateManager（scope / lifetime / 永続化 / migrate）
 │   ├── bedrock-store.ts          # 動的プロパティを使う StateStore
 │   └── window.ts                 # Window（open は既定で実画面、button take をクリック検知）
@@ -418,7 +417,6 @@ InvUI-for-Bedrock/
 ├── examples/
 │   ├── README.md
 │   └── usage-sketch.ts           # 設計上の利用イメージ（型検査のみ）
-└── InvUI_for_Bedrock_Design.md   # 全体設計書
 ```
 
 `LICENSE` は MIT です（`package.json` の `license` も `MIT`、`files` に `LICENSE` を含めているため npm tarball にも入ります）。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
@@ -440,6 +438,5 @@ MIT です。[LICENSE](LICENSE) を参照してください。
 
 ## 参考
 
-- [設計書](InvUI_for_Bedrock_Design.md)
 - [Java版 InvUI](https://github.com/NichtStudioCode/InvUI)
 - [Minecraft Creator ドキュメント（Script API）](https://learn.microsoft.com/minecraft/creator/scriptapi/)
