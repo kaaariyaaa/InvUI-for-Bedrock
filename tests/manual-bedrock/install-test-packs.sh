@@ -35,6 +35,11 @@ PATTERNS=(
   "${HOME:-}/.steam/steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
   "${HOME:-}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
   "${HOME:-}/.wine/drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/com.mojang"
+  "${HOME:-}/.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
+  "${HOME:-}/.local/share/bedrock-on-linux-preview/compatdata/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
+  "${HOME:-}/.steam/steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
+  "${HOME:-}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/*/pfx/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
+  "${HOME:-}/.wine/drive_c/users/*/AppData/Roaming/Minecraft Bedrock Preview/Users/*/games/com.mojang"
 )
 
 SEEN=' '
@@ -77,6 +82,30 @@ else
       FOUND+=("$candidate")
     fi
   done
+
+  # Preview と Stable の両方が見つかったら、先にどちらかを選ばせる。
+  PREVIEW=()
+  STABLE=()
+  for candidate in "${FOUND[@]}"; do
+    case "$candidate" in
+      *[Pp]review*) PREVIEW+=("$candidate") ;;
+      *) STABLE+=("$candidate") ;;
+    esac
+  done
+  if [ "${#PREVIEW[@]}" -gt 0 ] && [ "${#STABLE[@]}" -gt 0 ]; then
+    printf 'Preview と Stable の両方が見つかりました。どちらに入れますか？\n'
+    printf '  p  Preview (%d)\n' "${#PREVIEW[@]}"
+    printf '  s  Stable (%d)\n' "${#STABLE[@]}"
+    printf '選択 [p/s]: '
+    if ! read -r edition; then cancel; fi
+    case "$edition" in
+      [Pp]*) FOUND=("${PREVIEW[@]}"); echo 'Preview を選びました。' ;;
+      [Ss]*) FOUND=("${STABLE[@]}"); echo 'Stable を選びました。' ;;
+      *)
+        fail "無効な選択: ${edition}. p か s を入力してください。何も変更していません。"
+        ;;
+    esac
+  fi
 
   case ${#FOUND[@]} in
     0)

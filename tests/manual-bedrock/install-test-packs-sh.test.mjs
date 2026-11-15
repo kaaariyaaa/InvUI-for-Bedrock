@@ -218,6 +218,26 @@ test('引数と MC_COMOJANG は既知候補より優先される', () => {
   assertPackAbsent(envCom, PACKS[1]);
 });
 
+test('Preview と Stable の両方があるときは先に p/s を選ぶ', () => {
+  const home = makeHome();
+  const stable = makeComMojang(
+    path.join(home, '.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/umi/AppData/Roaming/Minecraft Bedrock/Users/1/games/com.mojang'),
+  );
+  const preview = makeComMojang(
+    path.join(home, '.local/share/bedrock-on-linux/compatdata/pfx/drive_c/users/umi/AppData/Roaming/Minecraft Bedrock Preview/Users/1/games/com.mojang'),
+  );
+
+  const toPreview = runScript({ home, input: 'p\n4\n' });
+  assert.equal(toPreview.status, 0, toPreview.stdout + toPreview.stderr);
+  assert.match(toPreview.stdout, /Preview と Stable の両方/);
+  assertPackCopied(preview, PACKS[3]);
+  assertPackAbsent(stable, PACKS[3]);
+
+  const toStable = runScript({ home, input: 's\n4\n' });
+  assert.equal(toStable.status, 0, toStable.stdout + toStable.stderr);
+  assertPackCopied(stable, PACKS[3]);
+});
+
 test('複数の既知候補は番号で選ぶ', () => {
   const home = makeHome();
   const first = makeComMojang(path.join(home, '.local/share/mcpelauncher/games/com.mojang'));
