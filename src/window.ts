@@ -26,9 +26,15 @@
  * delayed line from an earlier open (or from before a script reload, when
  * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
  * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
- * or slot-element change; a line that names an older generation is rejected,
- * so one sent before a page change cannot click a button on the new page. The
- * old three-field notification form has no generation and is not accepted.
+ * or slot-element change; a state change advances it as soon as `setState()`
+ * accepts it, so a line minted for the page still on screen fails even before
+ * the render catches up. The new generation names a layout that has no button
+ * on screen yet, so chat input and `handleClick()` fail closed until the render
+ * applies and writes it (`#layoutPresented`), and across a container
+ * regeneration until the replacement is shown: the player can only click what
+ * is displayed, never a button of the pending page or of a screen that is
+ * still being built. The old three-field notification form has no generation
+ * and is not accepted.
  * Nothing is installed when the game API (or a test double) omits
  * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
  * input fails closed.
@@ -810,11 +816,18 @@ function isProvablyStateIndependent(element: SlotElement): boolean {
   // Window calls resolve on it), so an element can look like an Item
   // without being one. Only an Item that proves state independence is skipped;
   // anything else stays opaque and is re-evaluated, as before design 11.4.
-  return (
-    isItemElement(element) &&
-    typeof element.isStateIndependent === "function" &&
-    element.isStateIndependent()
-  );
+  if (!isItemElement(element) || typeof element.isStateIndependent !== "function") {
+    return false;
+  }
+  try {
+    return element.isStateIndependent();
+  } catch {
+    // A proof that throws proves nothing: re-evaluate the slot instead of
+    // aborting the pass before its remaining slots render (which would leave
+    // the applied layout unpresented and input closed until something else
+    // happens to refresh the Window).
+    return false;
+  }
 }
 
 /**
@@ -955,6 +968,23 @@ function sameSlotElements(
     }
   }
   return true;
+}
+
+/**
+ * True when two resolved layouts address the same clickable slots. Width and
+ * height are included because a physical slot maps differently when they change
+ * (the container is regenerated for that, but the chat generation must cover it
+ * as well).
+ */
+function sameClickableLayout(left: ResolvedGuiLayout, right: ResolvedGuiLayout): boolean {
+  return (
+    left.page === right.page &&
+    left.line === right.line &&
+    left.tab === right.tab &&
+    left.width === right.width &&
+    left.height === right.height &&
+    sameSlotElements(left.slots, right.slots)
+  );
 }
 
 function containerSizeOf(layout: ResolvedGuiLayout): number {
@@ -1171,6 +1201,54 @@ export class Window {
    */
   #inputLayoutGeneration = 0;
   /**
+   * Layout the current state resolves to while `#layout` still shows an earlier
+   * one (a `setState()` page/line/tab change whose refresh microtask has not run
+   * yet). It exists so the generation advances once per logical layout (and an
+   * A -> B -> A round trip in one timing still invalidates B's line), but it is
+   * not a click target: while it is set, `#inputLayout()` returns undefined and
+   * chat input and `handleClick()` fail closed until the render applies it.
+   * Otherwise a line minted right after `setState()` could run a new page's
+   * button while the old page is still on screen.
+   */
+  #inputPendingLayout: ResolvedGuiLayout | undefined;
+  /**
+   * Logical slots of `#layout` whose last render attempt failed or whose write
+   * threw. They still show whatever the container had before (the previous
+   * layout's item after a mapping change), so chat input and `handleClick()`
+   * treat them as non-buttons until a later write succeeds. Without this the
+   * gate would open for a layout where a failed slot was never drawn, and a
+   * click could run the new page's handler while the player sees the old item.
+   */
+  #unrenderedSlots = new Set<number>();
+  /**
+   * Full-layout render passes still running per applied layout. A layout does
+   * not settle while any pass for it is in flight, so a notification flush that
+   * wrote a single slot cannot present a layout whose remaining slots are still
+   * being rendered.
+   */
+  #layoutRenders = new Map<ResolvedGuiLayout, number>();
+  /**
+   * True once the pass(es) that applied `#layout` settled. `#applyLayout`
+   * clears it; only `#settleLayout` sets it, and only when no in-flight pass for
+   * that layout is left. A newer state change keeps it clear until that state's
+   * own layout settled.
+   */
+  #layoutSettled = false;
+  /**
+   * True once the layout in `#layout` has been written to the container that is
+   * on screen and every in-flight pass for it settled (`#layoutSettled`). A
+   * container regeneration keeps it clear from the swap until the replacement is
+   * opened. Input fails closed in between: a slot of the applied layout (or of
+   * the layout the screen still shows) is not on screen yet.
+   */
+  #layoutPresented = false;
+  /**
+   * True while `#regenerateContainer` has replaced `#container` but has not
+   * shown the replacement yet. The old screen is still visible, so a render
+   * into the replacement must not mark its layout as presented.
+   */
+  #containerSwapPending = false;
+  /**
    * Viewer id captured at registration: playerLeave and entityDie are matched
    * against it rather than against a possibly invalid player object.
    */
@@ -1346,16 +1424,38 @@ export class Window {
   }
 
   /**
-   * Internal: mode of every logical slot of the current layout, used by the
-   * automatic chat input bridge. Returns null when there is no layout, which
-   * the bridge treats as "no slot is a button" (fail closed).
+   * The layout input may target: the one the render applied *and* wrote to the
+   * screen. While `#inputPendingLayout` is set the state names a different
+   * layout whose render has not caught up; while `#layoutPresented` is false
+   * the applied layout (or the regeneration's replacement) is not on screen
+   * yet. In both cases there is no clickable layout to target and both
+   * `_inputSlotModes()` and `_inputClick()` fail closed. Running a button
+   * before it is displayed would invoke a handler the player never saw, which
+   * is not the same operation as clicking the button on screen.
+   */
+  #inputLayout(): ResolvedGuiLayout | undefined {
+    return this.#inputPendingLayout === undefined && this.#layoutPresented
+      ? this.#layout
+      : undefined;
+  }
+
+  /**
+   * Internal: mode of every logical slot of the layout on screen, used by the
+   * automatic chat input bridge. Returns null when there is no presented layout
+   * (the state's layout is still pending, its render has not completed, or a
+   * regeneration has not shown the replacement yet), which the bridge treats as
+   * "no slot is a button" (fail closed).
    */
   _inputSlotModes(): readonly InputSlotMode[] | null {
-    const layout = this.#layout;
+    const layout = this.#inputLayout();
     if (!layout) {
       return null;
     }
-    return layout.slots.map((element) => {
+    return layout.slots.map((element, slot) => {
+      if (this.#unrenderedSlots.has(slot)) {
+        // The slot shows an earlier render (or nothing); do not offer it.
+        return "display";
+      }
       if (isButtonElement(element)) {
         return "button";
       }
@@ -1381,9 +1481,15 @@ export class Window {
    * Internal: generation of the current clickable layout for the chat input
    * bridge. It changes when the page/line/tab or the slot-element mapping
    * changes, and starts again at 0 for each open (the session id already
-   * distinguishes opens). A notification that names an older generation is
-   * rejected even if the same slot is a button again, so a line minted before a
-   * page change cannot be applied after it. Not part of the exported API.
+   * distinguishes opens). A state change advances it as soon as `setState()`
+   * accepts the change, not when the render catches up, so a line minted for
+   * the page still on screen is already stale. The new generation names a
+   * layout that is not displayed yet, so input is rejected until the render
+   * applies and writes it (`#inputPendingLayout` and `#layoutPresented` keep the
+   * gap fail closed). A notification
+   * that names an older generation is rejected even if the same slot is a
+   * button again, so a line minted before a page change cannot be applied after
+   * it. Not part of the exported API.
    */
   get _inputLayoutGeneration(): number | undefined {
     return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
@@ -1533,6 +1639,13 @@ export class Window {
     this.#renderingHalted = false;
     this.#screenRequested = false;
     this.#schemaFault = false;
+    // Presentation state belongs to the generation that is gone.
+    this.#layoutPresented = false;
+    this.#layoutSettled = false;
+    this.#layoutRenders.clear();
+    this.#unrenderedSlots.clear();
+    this.#containerSwapPending = false;
+    this.#inputPendingLayout = undefined;
     const generation = ++this.#generation;
 
     try {
@@ -1663,6 +1776,9 @@ export class Window {
       // change altered its size; it retries PreviousScreenClosing itself.
       if (this.#refreshPending) {
         this.#refreshPending = false;
+        // The screen shows the layout from before that change until the
+        // scheduled refresh applies and renders the new one.
+        this.#layoutPresented = false;
         this.#scheduleRefresh();
       }
       // A new open cycle is a new input session: a notification naming the
@@ -1671,6 +1787,7 @@ export class Window {
       // handlers can change the page.
       this.#inputSessionId = createInputSessionId();
       this.#inputLayoutGeneration = 0;
+      this.#inputPendingLayout = undefined;
       // Register before open handlers run: a handler may immediately render a
       // button the player can click. Registration also installs the single
       // chatSend subscription on the first successful open.
@@ -1849,6 +1966,11 @@ export class Window {
     this.#writeCache = new SlotWriteCache();
     this.#renderedWidth = undefined;
     this.#title = title;
+    // The old screen is still the one the player sees until the replacement
+    // renders and is opened. Input fails closed in between, and a render into
+    // the replacement must not present it (see #presentLayout).
+    this.#containerSwapPending = true;
+    this.#layoutPresented = false;
 
     try {
       // The replacement is not shown yet, but its close/item events must be
@@ -1873,6 +1995,9 @@ export class Window {
         this.#writeCache = previousCache;
         this.#renderedWidth = previousLayout.width;
         this.#title = previousTitle;
+        // The old screen is current again; the scheduled refresh presents it
+        // once the restored layout has been rendered.
+        this.#containerSwapPending = false;
         this.#applyLayout(previousLayout);
         // The replacement was never shown and the old container is current
         // again: its subscription must not outlive the failed swap.
@@ -1946,6 +2071,13 @@ export class Window {
       }
       throw error;
     }
+
+    // The replacement is on screen now, so input may target its layout again.
+    // A refresh that ran during the open may already have applied a newer one;
+    // present whatever settled. If that layout's pass is still rendering, its
+    // own settlement opens the gate later instead.
+    this.#containerSwapPending = false;
+    this.#presentLayout();
 
     // The regeneration completed: the old screen was closed and its
     // `#retiringContainer` ownership cleared before it was replaced, so its
@@ -2076,7 +2208,11 @@ export class Window {
       this.#scheduleRefresh();
       return;
     }
-    this.#queueChangedSlots(previousLayout, layout);
+    const queued = this.#queueChangedSlots(previousLayout, layout);
+    if (queued === 0) {
+      // Every slot is already on screen: the applied layout settled.
+      this.#settleLayout(generation, layout, this.#container);
+    }
   }
 
   /**
@@ -2411,7 +2547,8 @@ export class Window {
    * in-flight provider result stays valid; #queueSlotRender bumps the per-slot
    * token for changed slots so an older result cannot overwrite them. The
    * slots join the normal refresh flush, so a notification or state change in
-   * the same timing still renders each slot once.
+   * the same timing still renders each slot once. Returns how many slots were
+   * queued, so the caller can present immediately when none were.
    *
    * Skipping an unchanged slot is only safe because the caller accepts the
    * same state schema: the schema contains the Structure rows, so both layouts
@@ -2419,12 +2556,14 @@ export class Window {
    * slot in both. The Window's state is also unchanged on this path; a clamped
    * page/line/tab forces a full refresh instead (see setUpperGui).
    */
-  #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): void {
+  #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): number {
     const cache = this.#writeCache;
+    let queued = 0;
     for (let slot = 0; slot < next.slots.length; slot += 1) {
       const physicalSlot = physicalSlotOf(next, slot);
       if (previous.slots[slot] !== next.slots[slot]) {
         this.#queueSlotRender(slot);
+        queued += 1;
         continue;
       }
       // An unchanged slot that is not known to be clear may still need one
@@ -2433,11 +2572,14 @@ export class Window {
       if (next.slots[slot] === null) {
         if (cache === undefined || cache.shouldWrite(physicalSlot, undefined)) {
           this.#queueSlotRender(slot);
+          queued += 1;
         }
       } else if (cache !== undefined && cache.needsRetry(physicalSlot)) {
         this.#queueSlotRender(slot);
+        queued += 1;
       }
     }
+    return queued;
   }
 
   /**
@@ -2606,6 +2748,9 @@ export class Window {
     notified: ReadonlySet<number>,
   ): Promise<void> {
     const cache = this.#writeCache;
+    const container = this.#container;
+    const generation = this.#generation;
+    this.#beginLayoutRender(next);
     const renders: Array<Promise<void>> = [];
     for (let slot = 0; slot < next.slots.length; slot += 1) {
       const element = next.slots[slot];
@@ -2629,7 +2774,14 @@ export class Window {
       }
       renders.push(this.#renderSlot(slot));
     }
-    await Promise.all(renders);
+    try {
+      await Promise.all(renders);
+    } finally {
+      // A rejected pass still settles the update: keep the window usable
+      // instead of leaving input closed until some later pass happens.
+      this.#endLayoutRender(next);
+      this.#settleLayout(generation, next, container);
+    }
   }
 
   /**
@@ -2730,6 +2882,9 @@ export class Window {
 
   /**
    * Routes a click to the button Item currently rendered at the logical `slot`.
+   * While a state change names a layout the render has not applied yet, no
+   * button is on screen for that layout, so the click is discarded (fail
+   * closed) instead of invoking a handler the player cannot see.
    *
    * Only `button`-mode Items accept input (design 10.5); a display Item, even
    * one that carries handlers, returns false without enqueueing anything.
@@ -2754,14 +2909,18 @@ export class Window {
    * a handler that ran and threw (replaying it would repeat its side effects).
    */
   async _inputClick(slot: number): Promise<ChatInputClickOutcome> {
-    if (this.#status !== "open" || !this.#layout || !this.#stateHandle) {
+    const layout = this.#status === "open" ? this.#inputLayout() : undefined;
+    if (!layout || !this.#stateHandle) {
       return "discarded";
     }
-    if (!Number.isInteger(slot) || slot < 0 || slot >= this.#layout.slots.length) {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= layout.slots.length) {
       return "discarded";
     }
-    const layout = this.#layout;
     const element = layout.slots[slot];
+    if (this.#unrenderedSlots.has(slot)) {
+      // The slot never showed this layout's item: its button is not clickable.
+      return "discarded";
+    }
     if (!isButtonElement(element)) {
       return "discarded";
     }
@@ -3285,6 +3444,12 @@ export class Window {
     this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
+    this.#inputPendingLayout = undefined;
+    this.#layoutPresented = false;
+    this.#layoutSettled = false;
+    this.#layoutRenders.clear();
+    this.#unrenderedSlots.clear();
+    this.#containerSwapPending = false;
   }
 
   #acquireState(
@@ -3340,7 +3505,53 @@ export class Window {
     ) {
       this.#revalidateStateRanges = true;
     }
+    if (this.#status === "open") {
+      this.#noteInputLayoutChange();
+    }
     this.#scheduleSlotRefresh();
+  }
+
+  /**
+   * Advance the clickable-layout generation as soon as the state change resolves
+   * to a different layout, instead of waiting for the refresh microtask.
+   *
+   * The state is accepted synchronously by `setState()` but the rendered layout
+   * is only replaced asynchronously. In between, the old generation still names
+   * the old layout, so a notification minted from the just-read generation would
+   * pass validation and could invoke the button the *previous* page had in that
+   * slot. Advancing here makes that line fail as stale; remembering the layout
+   * also keeps input fail closed (`#inputPendingLayout`) until the render
+   * displays it, so the new generation cannot run an unseen button either.
+   *
+   * The layout is compared against the last one the generation was advanced for
+   * (`#inputPendingLayout`) so an A -> B -> A state round trip in one timing
+   * advances twice: the B layout was the logical clickable layout in between,
+   * and a line minted for it must not become valid again when the state returns
+   * to A. This mirrors the render-side counter in `#applyLayout`.
+   */
+  #noteInputLayoutChange(): void {
+    const handle = this.#stateHandle;
+    if (!handle || this.#renderingHalted) {
+      return;
+    }
+    let layout: ResolvedGuiLayout;
+    try {
+      layout = this.upperGui.resolve(this.viewer, handle.get());
+    } catch {
+      // The scheduled refresh reports a resolve failure through the normal
+      // error channel; a state notification must not throw from here.
+      return;
+    }
+    const baseline = this.#inputPendingLayout ?? this.#layout;
+    if (baseline === undefined || sameClickableLayout(baseline, layout)) {
+      return;
+    }
+    this.#inputLayoutGeneration += 1;
+    invalidateChatInputWindow(this);
+    this.#inputPendingLayout =
+      this.#layout !== undefined && sameClickableLayout(this.#layout, layout)
+        ? undefined
+        : layout;
   }
 
   /**
@@ -3524,26 +3735,51 @@ export class Window {
     if (!layout) {
       return;
     }
+    const container = this.#container;
+    const generation = this.#generation;
+    const renders: Array<Promise<void>> = [];
     for (const slot of slots) {
       if (slot < layout.slots.length) {
-        void this.#renderSlot(slot);
+        renders.push(this.#renderSlot(slot));
       }
+    }
+    if (renders.length > 0) {
+      // A GUI swap can apply a layout and queue only its changed slots; the
+      // applied layout settles when those writes finish, unless a full pass for
+      // it is still rendering and settles it later.
+      const settle = (): void => this.#settleLayout(generation, layout, container);
+      void Promise.all(renders).then(settle, settle);
     }
   }
 
   #applyLayout(layout: ResolvedGuiLayout): void {
     const previous = this.#layout;
+    const pending = this.#inputPendingLayout;
+    this.#inputPendingLayout = undefined;
     this.#layout = layout;
+    this.#layoutSettled = false;
+    // Keep #unrenderedSlots: applying a layout does not re-write a slot the diff
+    // may skip (an unchanged state-independent element), so clearing its marker
+    // here would offer the stale display as this layout's button. A successful
+    // write clears the slot in #applySlotStack.
+    // The applied layout is not on screen until the pass that follows writes
+    // it; see #settleLayout. Input fails closed in the gap.
+    this.#layoutPresented = false;
     // A page/line/tab change or a different slot element mapping is a new
     // clickable layout: notifications accepted against the previous one must
     // not run against this one. Content-only re-renders that keep every slot
     // element stay valid.
+    //
+    // A synchronous state-change listener may already have advanced the
+    // generation for exactly this layout (`pending`); advancing again would
+    // make a notification minted after this render stale for no layout change.
+    // A pending layout that is *not* the one being applied is superseded, so it
+    // must still invalidate its generation. Clearing `pending` here is what
+    // makes the new layout clickable (see `#inputLayout`).
     if (
-      previous &&
-      (previous.page !== layout.page ||
-        previous.line !== layout.line ||
-        previous.tab !== layout.tab ||
-        !sameSlotElements(previous.slots, layout.slots))
+      pending !== undefined
+        ? !sameClickableLayout(pending, layout)
+        : previous !== undefined && !sameClickableLayout(previous, layout)
     ) {
       // Advance the wire generation before invalidating the queue: a line
       // minted for the previous layout must fail even if it is delivered only
@@ -3557,9 +3793,82 @@ export class Window {
     this.#subscribeToUpdates();
   }
 
+  /** Record one running full-layout pass for `layout` (see `#layoutRenders`). */
+  #beginLayoutRender(layout: ResolvedGuiLayout): void {
+    this.#layoutRenders.set(layout, (this.#layoutRenders.get(layout) ?? 0) + 1);
+  }
+
+  #endLayoutRender(layout: ResolvedGuiLayout): void {
+    const remaining = (this.#layoutRenders.get(layout) ?? 0) - 1;
+    if (remaining > 0) {
+      this.#layoutRenders.set(layout, remaining);
+    } else {
+      this.#layoutRenders.delete(layout);
+    }
+  }
+
+  /**
+   * The applied layout is fully on screen: every pass that renders it settled
+   * (or the changed-slot batch that applied it finished), it is still the
+   * applied layout on the current container and generation, and no newer state
+   * change is waiting for its own render.
+   *
+   * A pass that lost its generation, container, or layout to a newer one, or
+   * that rendered while a regeneration still swaps the screen, must not open
+   * the input gate for a screen that is not shown. A notification flush that
+   * wrote one slot cannot settle the layout while a full pass is still
+   * rendering the rest; that pass settles it. `#presentLayout` then opens the
+   * gate once the screen is the shown one.
+   *
+   * A slot whose provider fails keeps its previous display (design 14.2) but
+   * still settles: a provider that never settles keeps the gate closed until it
+   * does, which is the fail-closed side of design 11.4 rather than a timeout.
+   */
+  #settleLayout(
+    generation: number,
+    layout: ResolvedGuiLayout | undefined,
+    container: VirtualContainer | undefined,
+  ): void {
+    if (
+      layout === undefined ||
+      container === undefined ||
+      generation !== this.#generation ||
+      this.#renderingHalted ||
+      (this.#status !== "opening" && this.#status !== "open") ||
+      this.#container !== container ||
+      this.#layout !== layout ||
+      this.#inputPendingLayout !== undefined ||
+      this.#layoutRenders.has(layout)
+    ) {
+      return;
+    }
+    this.#layoutSettled = true;
+    this.#presentLayout();
+  }
+
+  /**
+   * Open the input gate when the settled layout is on screen. A container
+   * regeneration keeps it closed from the swap until the replacement is opened,
+   * so the old screen fails closed even after its render settled.
+   */
+  #presentLayout(): void {
+    if (
+      !this.#layoutSettled ||
+      this.#layoutPresented ||
+      this.#containerSwapPending ||
+      this.#renderingHalted ||
+      (this.#status !== "opening" && this.#status !== "open") ||
+      this.#inputPendingLayout !== undefined
+    ) {
+      return;
+    }
+    this.#layoutPresented = true;
+  }
+
   async #renderAll(generation: number): Promise<void> {
     const layout = this.#layout;
-    if (!layout || this.#renderingHalted) {
+    const container = this.#container;
+    if (!layout || !container || this.#renderingHalted) {
       return;
     }
     // A narrower Structure reuses the same container: the columns beyond its
@@ -3571,6 +3880,7 @@ export class Window {
     this.#renderedWidth = layout.width;
     // A new batch invalidates every result started before it.
     const epoch = ++this.#renderEpoch;
+    this.#beginLayoutRender(layout);
     const renders: Array<Promise<void>> = [];
     // #renderSlot starts its provider synchronously, so every provider is
     // invoked before the first await: one slow slot must not delay the others.
@@ -3580,7 +3890,14 @@ export class Window {
       }
       renders.push(this.#renderSlot(slot, epoch));
     }
-    await Promise.all(renders);
+    try {
+      await Promise.all(renders);
+    } finally {
+      // A rejected pass still settles the update: keep the window usable
+      // instead of leaving input closed until some later pass happens.
+      this.#endLayoutRender(layout);
+      this.#settleLayout(generation, layout, container);
+    }
   }
 
   /**
@@ -3676,6 +3993,14 @@ export class Window {
         (isInventoryLinkElement(element) &&
           this.#isCurrentSlotIgnoringEpoch(generation, slot, element, token));
       if (!canBeStale || isCurrent) {
+        // The slot keeps its previous display instead of this layout's item, so
+        // input must not target it until a later write succeeds. Only a failure
+        // that still owns the slot leaves that stale display: one that lost it
+        // to a newer pass is superseded by that pass, and marking it here would
+        // disable the slot the newer render already wrote.
+        if (isCurrent) {
+          this.#unrenderedSlots.add(slot);
+        }
         this.#report(error, "itemProvider", slot);
       }
       return;
@@ -3767,20 +4092,26 @@ export class Window {
     // stack, so display content is never withheld. Skipping anything else
     // would require an ItemStack equality that Bedrock does not provide.
     if (!cache.shouldWrite(physicalSlot, stack)) {
+      // The container is already proven empty here, which is what the layout
+      // asks for: the slot is displayed.
+      this.#unrenderedSlots.delete(slot);
       return;
     }
     try {
       container.setItem(physicalSlot, stack);
     } catch (error) {
       // Remember the failure so a slot-skipping diff still re-renders this
-      // slot; otherwise the failed write's stale display would persist.
+      // slot; otherwise the failed write's stale display would persist. The
+      // slot still shows the previous item, so input must not target it.
       cache.markFailed(physicalSlot);
+      this.#unrenderedSlots.add(slot);
       this.#report(error, "setItem", slot);
       return;
     }
     // Record only after the write returned: a throwing setItem stays
     // unrecorded, so the next pass retries it instead of skipping it.
     cache.markWritten(physicalSlot, stack);
+    this.#unrenderedSlots.delete(slot);
   }
 
   /**
