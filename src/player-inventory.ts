@@ -28,6 +28,7 @@ import type {
   PlayerInventoryType,
 } from "@minecraft/server";
 
+import { cloneItem } from "./inventory.js";
 import type {
   Inventory,
   InventoryChange,
@@ -109,10 +110,6 @@ export class PlayerInventoryReadOnlyError extends Error {
   }
 }
 
-function cloneItem(item: ItemStack | undefined): ItemStack | undefined {
-  return item === undefined ? undefined : item.clone();
-}
-
 function assertSlot(size: number, slot: number): void {
   if (!Number.isInteger(slot) || slot < 0 || slot >= size) {
     throw new RangeError(`InvUI: slot ${slot} is outside inventory size ${size}.`);
@@ -172,8 +169,10 @@ function readEventPlayerId(player: Player | undefined): string | undefined {
  * read-only.
  *
  * Events are dropped when the player id is unreadable (for example after
- * leaving), when `mapSlot` throws or returns a non-integer/negative slot, and
- * when the signal's unsubscribe is not a function. The mapper error is logged.
+ * leaving), when `mapSlot` throws or returns a non-integer/negative slot, when
+ * the signal's unsubscribe is not a function, and when an event stack cannot be
+ * cloned safely (so a live stack never reaches a listener). The mapper error is
+ * logged.
  *
  * The beta signal's `subscribe()` returns the callback, not an unsubscribe
  * function, so the returned value is never called. Teardown goes through
@@ -258,6 +257,11 @@ export function createPlayerInventoryChangeSource(
  * Read-only `Inventory` over a player's container. `getItem()` returns a clone,
  * like `VirtualInventory`, so callers cannot mutate the live container through
  * the returned stack.
+ *
+ * The clone goes through the same validated boundary as `VirtualInventory`: if
+ * the container's stack cannot produce an independent, valid copy (for example
+ * `clone()` returns `undefined` or the live stack itself), `getItem()` throws
+ * instead of reporting an occupied slot as empty or aliasing the container.
  */
 export class PlayerInventory implements Inventory {
   /** False until the Bedrock item-move safety tests in design 7.3 pass. */
@@ -382,11 +386,26 @@ export class PlayerInventory implements Inventory {
     ) {
       return;
     }
+    let previous: ItemStack | undefined;
+    let current: ItemStack | undefined;
+    try {
+      // Same boundary as VirtualInventory: a source that hands back a stack
+      // whose clone() is missing, empty, or aliased must not reach a listener
+      // as a live stack (and must not abort the source's dispatch loop).
+      previous = cloneItem(change.previous);
+      current = cloneItem(change.current);
+    } catch (error) {
+      console.error(
+        "InvUI: player inventory change carried an invalid ItemStack.",
+        error,
+      );
+      return;
+    }
     const event: InventoryChange = {
       inventory: this,
       slot: change.slot,
-      previous: cloneItem(change.previous),
-      current: cloneItem(change.current),
+      previous,
+      current,
     };
     for (const listener of [...this.#listeners]) {
       try {

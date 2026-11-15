@@ -58,16 +58,20 @@ function isCloneableItemStack(value: unknown): value is ItemStack {
   );
 }
 
-function cloneItem(item: ItemStack): ItemStack;
-function cloneItem(item: undefined): undefined;
-function cloneItem(item: ItemStack | undefined): ItemStack | undefined;
 /**
  * The single `ItemStack.clone()` boundary. A clone must be an independent,
  * usable stack: `clone()` returning `undefined`, a non-stack, or the original
  * object would silently empty a slot, make reads throw later, or alias the
  * caller's stack into the inventory. Reject it before the caller can write.
+ *
+ * Every inventory that hands stacks across its boundary (including
+ * `PlayerInventory`, which reads a live container) must clone through here, so
+ * a broken container stack can never look like an empty slot.
  */
-function cloneItem(item: ItemStack | undefined): ItemStack | undefined {
+export function cloneItem(item: ItemStack): ItemStack;
+export function cloneItem(item: undefined): undefined;
+export function cloneItem(item: ItemStack | undefined): ItemStack | undefined;
+export function cloneItem(item: ItemStack | undefined): ItemStack | undefined {
   if (item === undefined) {
     return undefined;
   }

@@ -138,6 +138,27 @@ test("PlayerInventory reads cloned slots and reports the player container size",
   assert.equal(inventory.getItem(1), undefined);
 });
 
+test("PlayerInventory.getItem rejects a container stack whose clone is empty or aliased", () => {
+  const aliased = {
+    typeId: "minecraft:apple",
+    clone() {
+      return this;
+    },
+  };
+  const emptied = {
+    typeId: "minecraft:stone",
+    clone() {
+      return undefined;
+    },
+  };
+  const inventory = new PlayerInventory(fakePlayer("p1", [aliased, emptied]));
+
+  // A slot that is occupied must never read as empty, and the live container
+  // stack must never escape to the caller.
+  assert.throws(() => inventory.getItem(0), /independent copy, not the original stack/);
+  assert.throws(() => inventory.getItem(1), /did not return a valid ItemStack/);
+});
+
 test("PlayerInventory rejects out-of-range slots", () => {
   const inventory = new PlayerInventory(fakePlayer("p1", [undefined]));
   assert.throws(() => inventory.getItem(-1), RangeError);
@@ -311,6 +332,33 @@ test("PlayerInventory isolates listener exceptions like VirtualInventory", () =>
   assert.equal(logs.length, 1);
 });
 
+test("PlayerInventory drops an unsafe raw stack instead of handing it to listeners", () => {
+  const source = new FakeChangeSource();
+  const inventory = new PlayerInventory(fakePlayer("p1", [undefined]), {
+    changes: source,
+  });
+  const received = [];
+  inventory.subscribe((change) => received.push(change));
+
+  const aliased = {
+    typeId: "minecraft:apple",
+    clone() {
+      return this;
+    },
+  };
+  const logs = withSilencedConsoleError(() => {
+    source.emit({ playerId: "p1", slot: 0, previous: undefined, current: aliased });
+  });
+  assert.equal(received.length, 0, "a live container stack must not reach a listener");
+  assert.equal(logs.length, 1);
+
+  // One unsafe change must not break the source subscription for later changes.
+  const valid = stack("minecraft:bread");
+  source.emit({ playerId: "p1", slot: 0, previous: undefined, current: valid });
+  assert.equal(received.length, 1);
+  assert.notEqual(received[0].current, valid);
+});
+
 test("PlayerInventory unsubscribe does not throw when the source teardown throws", () => {
   let subscribes = 0;
   const source = {
@@ -461,6 +509,32 @@ test("createPlayerInventoryChangeSource maps slots and clones event stacks", () 
 
   unsubscribe();
   assert.equal(signal.size, 0);
+});
+
+test("createPlayerInventoryChangeSource drops event stacks that cannot be cloned safely", () => {
+  const signal = new FakeItemChangeSignal();
+  const source = createPlayerInventoryChangeSource(signal, (_type, slot) => slot);
+  const received = [];
+  source.subscribe((change) => received.push(change));
+
+  const aliased = {
+    typeId: "minecraft:apple",
+    clone() {
+      return this;
+    },
+  };
+  const emptied = {
+    typeId: "minecraft:stone",
+    clone() {
+      return undefined;
+    },
+  };
+  assert.doesNotThrow(() => {
+    signal.emit(changeEvent("p1", "Hotbar", 0, undefined, aliased));
+    signal.emit(changeEvent("p1", "Hotbar", 0, emptied, undefined));
+    signal.emit(changeEvent("p1", "Hotbar", 0, aliased, stack("minecraft:bread")));
+  });
+  assert.equal(received.length, 0, "an unsafe event stack must not reach a listener");
 });
 
 test("createPlayerInventoryChangeSource unsubscribes via the signal, not its return value", () => {
