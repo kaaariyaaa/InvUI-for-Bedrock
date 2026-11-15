@@ -1598,7 +1598,7 @@ function finalizeReport(report, installResult) {
             ? 'ui/_ui_defs.json がありません。接続ファイルを使う場合は登録が別途必要で、この CLI は新規作成せず既存ファイルへの追記だけを行うため、ui_defs 配列を持つファイルを用意するか generate-resource-pack の生成物を使ってください。'
             : 'ui/invui.json と試験的接続 2 ファイルを置いただけでは有効にならない。既存 Resource Pack では ui/_ui_defs.json への登録が別途必要で、この CLI は既定では自動変更しない。対象ゲーム版の JSON UI 仕様を確認して手動で追記する（生成物は登録済み）。',
     '試験的接続は VirtualContainer を特定できず、data_driven_container の desktop/pocket パネルを使う全画面に作用し得る。有効化は使い捨てワールドだけで行い、通常画面への影響を確認する。',
-    'tests/manual-bedrock/CHECKLIST.md の検証が終わるまで、クリック・アイテム保護・JSON UI 連携を有効な機能として扱わない。',
+    'クリック・アイテム保護・JSON UI 連携は実機未検証。合格を記録するまで有効な機能として扱わない（同梱 README.md の「実機テスト」を参照）。',
     'Resource Pack の既存 UI を手動でマージする場合は、バックアップを取り、差分を確認する。',
     'InventoryLink を実機の安全試験に合格するまで有効化しない。',
   ];
@@ -1752,7 +1752,7 @@ function printGenerateHuman(result, version) {
     out('  1. 使い捨てワールドの resource_packs へ配置し、パックを有効化する（適用方法は実機で確認する）。');
     out('  2. ui/_ui_defs.json は接続 2 ファイルを登録済み。接続は data_driven_container の desktop/pocket パネルを');
     out('     使う全画面（VirtualContainer 限定ではない）に作用し得る。通常画面への影響を確認する。');
-    out('  3. tests/manual-bedrock/CHECKLIST.md で記録するまで、クリック・アイテム保護・InventoryLink を有効な機能として扱わない。');
+    out('  3. クリック・アイテム保護・InventoryLink は実機未検証。合格を記録するまで有効な機能として扱わない（同梱 README.md の「実機テスト」を参照）。');
     out('');
     out('既存ファイルは変更していません。作成したのは上記のファイルだけです。');
     return;

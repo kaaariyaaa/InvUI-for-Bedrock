@@ -1132,6 +1132,32 @@ test('generate-resource-pack は新しい出力先へ同梱5ファイルだけ�
   });
 });
 
+test('実機テストの案内はリポジトリ専用の CHECKLIST ではなく同梱 README を指す', () => {
+  withFixture(({ root, behaviorPack, resourcePack }) => {
+    const json = runCli(['init', '--behavior-pack', behaviorPack, '--resource-pack', resourcePack, '--json']);
+    assert.equal(json.status, 0, json.both);
+    const report = JSON.parse(json.stdout);
+    const step = report.manualSteps.find((text) => text.includes('クリック'));
+    assert.ok(step, 'init report must keep the click guidance step');
+    assert.match(step, /README\.md/);
+    assert.match(step, /実機テスト/);
+    // tests/ は npm tarball に含まれないため、導入先から読める案内にしない。
+    assert.doesNotMatch(step, /tests\/manual-bedrock/);
+    // 非公開リポジトリなので、公開 URL を捏造しない。
+    assert.doesNotMatch(step, /https?:\/\//);
+
+    const human = runCli(['init', '--behavior-pack', behaviorPack, '--resource-pack', resourcePack]);
+    assert.equal(human.status, 0, human.both);
+    assert.doesNotMatch(human.stdout, /tests\/manual-bedrock/);
+    assert.match(human.stdout, /同梱 README\.md/);
+
+    const generated = runCli(['generate-resource-pack', '--output', path.join(root, 'generated_pack')]);
+    assert.equal(generated.status, 0, generated.both);
+    assert.doesNotMatch(generated.stdout, /tests\/manual-bedrock/);
+    assert.match(generated.stdout, /同梱 README\.md/);
+  });
+});
+
 test('generate-resource-pack は実行ごとに manifest の UUID を作り直す', () => {
   withFixture(({ root }) => {
     const first = runCli(['generate-resource-pack', '--output', path.join(root, 'pack_a'), '--json']);
