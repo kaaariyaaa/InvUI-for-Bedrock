@@ -22,7 +22,9 @@ class PackTests(unittest.TestCase):
  def test_chat_not_drop(self):
   src='\n'.join(p.read_text() for p in (BASE/'resource_pack/ui').glob('*.json'))
   self.assertIn('button.send',src)
-  self.assertNotIn('button.drop_one',src)
+  self.assertIn('button.drop_one',src)
+  self.assertIn('invui_chat_press.slot_grid',src)
+  # drop_one is the one-click alternative to the manually entered chat notification.
   self.assertNotIn('button.container_take_all_place_all',src)
   self.assertIn('InvUI Chat Probe',src)
   self.assertIn('"namespace": "data_driven_container"',src)
