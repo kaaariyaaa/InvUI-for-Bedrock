@@ -6,9 +6,9 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 > **ベータ / 実機未検証**
 >
 > - バージョンは `0.1.0-beta.1`。**npm には未公開**です。`npm install invui-bedrock` はまだ使えません。
-> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は**既定で有効**です。`minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` から `VirtualContainer` の作成・`VirtualContainer.open()`、`Window.close()` から `VirtualContainer.close()` を呼びます（すべて実機未検証）。実機ライフサイクルの後始末は、退出（`world.afterEvents.playerLeave`）と死亡（`world.afterEvents.entityDie`）が実装済みです（Node.js 上で確認済み、実機未検証。退出したプレイヤーの `opening` / `open` の Window を `PlayerLeft`、死亡したプレイヤーの Window も `PlayerDied` で close し、どちらも自動再オープンはしません。死亡は死亡した entity の id だけを照合するため、プレイヤー以外や他プレイヤーの死亡では close しません）。次元変更（`world.afterEvents.playerDimensionChange`）は `ServerClosed`、スペクテイターへの変更（`world.afterEvents.playerGameModeChange` の `toGameMode` が `Spectator`）は `PlayerSpectating` で close し、どちらもプレイヤーがまだ有効なのでアダプタにも close を要求します（Node.js 上で確認済み、実機未検証。他プレイヤーと Spectator 以外のゲームモード変更は無視）。shutdown は `system.beforeEvents.shutdown` で `opening` / `open` の全 Window を `ServerClosed` で close します（Node.js 上で確認済み、実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面とアダプタ購読の破棄はエンジンに任せ、チャット登録・state ハンドル・GUI/要素の購読などのローカル資源だけを解放します。close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）も同じ restricted なコールバック内で実行され、close ハンドラーは 1 回だけ呼ばれます。そこから `open()` しても画面は開かず `closed` のままです。shutdown 後の `open()` はモジュールの生存期間中ずっと抑止され、2 回目の shutdown は何もしません。スクリプト再読み込み時の後始末は未対応です。クリック入力はチャット通知の受信経路だけが既定で接続され、UI 側が通知を**自動生成**する処理はなく、通知は手入力で偽装でき、実機未検証です。JSON UI から押下 slot / session / layout-generation / sequence を自動生成して送る方式は、公式 `bedrock-samples` と Bedrock Wiki の範囲では根拠がなく実装していません（詳細は [resource_pack/README.md](resource_pack/README.md)）。`resource_pack/` には手入力の**静的ペイロード送信プローブ**（`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を手で入力するオプトイン部品、既定未登録。session-id は開いた `Window` の公開 getter `_inputSessionId`、layout-generation は `_inputLayoutGeneration` から取得し、ページ変更のたびに読み直す）だけを置いています。アイテム保護、`InventoryLink` のアイテム移動は未実装です。JSON UI 連携は `resource_pack/` が既定で `data_driven_container` のパネルへ差し込む未検証のものだけで、VirtualContainer の識別はありません。既定の接続はグリッドへ透明ブロッカーも差し込みますが、実機未検証であり、ボタンや inventory slot への影響、プレイヤー側や controller 入力の遮断を保証しません（アイテム保護ではありません）。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`Window` は最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を解釈して `handleClick()` へ流しますが、これは Node.js 上で確認しただけで実機未検証です。`src/input.ts` と `src/chat-input-bridge.ts` は公開エントリから export していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js 上で経路を確認しただけで実機未検証です。既定のアダプタは公式 beta の購読オプション `{ containers: [container] }` で container ごとに購読を絞り、Window は届いた購読の container を対象として扱います。そのため `event.container` が `create()` の戻り値と同一参照でなくても close / itemChange を取りこぼしません（実機の同一参照は引き続き未検証）。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` 経路でも購読は張られますが、保護にはなりません。
+> - **実機では一切検証していません。** ライブラリ経由の実機画面表示は**既定で有効**です。`minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` から `VirtualContainer` の作成・`VirtualContainer.open()`、`Window.close()` から `VirtualContainer.close()` を呼びます（すべて実機未検証）。実機ライフサイクルの後始末は、退出（`world.afterEvents.playerLeave`）と死亡（`world.afterEvents.entityDie`）が実装済みです（Node.js 上で確認済み、実機未検証。退出したプレイヤーの `opening` / `open` の Window を `PlayerLeft`、死亡したプレイヤーの Window も `PlayerDied` で close し、どちらも自動再オープンはしません。死亡は死亡した entity の id だけを照合するため、プレイヤー以外や他プレイヤーの死亡では close しません）。次元変更（`world.afterEvents.playerDimensionChange`）は `ServerClosed`、スペクテイターへの変更（`world.afterEvents.playerGameModeChange` の `toGameMode` が `Spectator`）は `PlayerSpectating` で close し、どちらもプレイヤーがまだ有効なのでアダプタにも close を要求します（Node.js 上で確認済み、実機未検証。他プレイヤーと Spectator 以外のゲームモード変更は無視）。shutdown は `system.beforeEvents.shutdown` で `opening` / `open` の全 Window を `ServerClosed` で close します（Node.js 上で確認済み、実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面とアダプタ購読の破棄はエンジンに任せ、チャット登録・state ハンドル・GUI/要素の購読などのローカル資源だけを解放します。close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）も同じ restricted なコールバック内で実行され、close ハンドラーは 1 回だけ呼ばれます。そこから `open()` しても画面は開かず `closed` のままです。shutdown 後の `open()` はモジュールの生存期間中ずっと抑止され、2 回目の shutdown は何もしません。スクリプト再読み込み時の後始末は未対応です。クリック入力はチャット通知の受信経路だけが既定で接続され、UI 側が通知を**自動生成**する処理はなく、通知は手入力で偽装でき、実機未検証です。JSON UI から押下 slot / session / layout-generation / sequence を自動生成して送る方式は、公式 `bedrock-samples` と Bedrock Wiki の範囲では根拠がなく実装していません。アイテム保護、`InventoryLink` のアイテム移動は未実装です。JSON UI 連携は提供していません。`Item` の `display` / `button` 分類はメタデータとハンドラー実行のガードに留まり、実機のアイテム保護ではありません。`Window` は最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を解釈して `handleClick()` へ流しますが、これは Node.js 上で確認しただけで実機未検証です。`src/input.ts` と `src/chat-input-bridge.ts` は公開エントリから export していません。`WindowContainerAdapter` の任意購読フック（`subscribeClose` / `subscribeItemChange`）は既定の `minecraftVirtualContainerAdapter` も実装し、`world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読しますが、Node.js 上で経路を確認しただけで実機未検証です。既定のアダプタは公式 beta の購読オプション `{ containers: [container] }` で container ごとに購読を絞り、Window は届いた購読の container を対象として扱います。そのため `event.container` が `create()` の戻り値と同一参照でなくても close / itemChange を取りこぼしません（実機の同一参照は引き続き未検証）。どちらも `after` イベントなので、購読しても close・アイテム変更はすでに起きており、防ぐことも変更前のアイテムへ戻すこともできません。既定の `open()` 経路でも購読は張られますが、保護にはなりません。
 > - **既定で実画面を開くため、アイテムの複製・消失リスクが既定で有効です。** 画面にはクリック通知を生成する UI もアイテム保護もなく、実機未検証です。表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれ、プレイヤーが取り出せます。取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます。試す場合は「[実機画面は既定で開く（使い捨てワールドで）](#実機画面は既定で開く使い捨てワールドで)」の条件だけに従ってください。
-> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js 上で確認済みです。**状態更新は解決後のレイアウトを比較し、要素が変わったスロットと状態に依存し得る Item だけを再評価（固定 `ItemStack` / `ItemBuilder` と `InventoryLink` はスキップ）、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API に加え、オプトインの `quarantineCorrupt` による破損レコードの自動退避・初期状態からの再開まで実装済みで、`migrations` に宣言した自動移行も `acquire()` が適用できます（未宣言の不一致は引き続き fail closed）**。クリック入力は、`window.ts` が最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:` 形式のチャット行を `system.run()` 経由で `handleClick()` に渡す経路だけが自動で接続されます（Node.js 上での確認のみ、実機未検証）。ただし UI 側がその通知を自動生成する実装はなく、同じ行はプレイヤーが手入力できるため、クリックの証明にはなりません。JSON UI から slot / session / layout-generation / sequence を自動生成する書式は公式構造から確認できていないため、`resource_pack/` には手入力の静的ペイロードプローブ（`!invui:<session-id>:<layout-generation>:<slot>:<sequence>`、オプトイン・既定未登録。session-id は開いた `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration`）だけを置いています。`resource_pack/` は既定で `data_driven_container` の `desktop_panel` / `panel_top_half` / `pocket_panel` へ接続する未検証テンプレートで、`chest_screen` は編集していません。既定の接続はグリッドへ透明ブロッカーも挿入しますが、遮断の成否は実機未検証で、VirtualContainer 画面を使っているかは未確定です。VirtualContainer を識別する仕組みがなく、同パネルを使う他の画面にも影響し得ます。
+> - コア（レイアウト計算、アイテム表現、状態管理、Window の状態遷移）は実装・Node.js 上で確認済みです。**状態更新は解決後のレイアウトを比較し、要素が変わったスロットと状態に依存し得る Item だけを再評価（固定 `ItemStack` / `ItemBuilder` と `InventoryLink` はスキップ）、周期更新は Item を表示中の Window がある間のみ、永続ストアは手動の migration / レコード削除 API に加え、オプトインの `quarantineCorrupt` による破損レコードの自動退避・初期状態からの再開まで実装済みで、`migrations` に宣言した自動移行も `acquire()` が適用できます（未宣言の不一致は引き続き fail closed）**。クリック入力は、`window.ts` が最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:` 形式のチャット行を `system.run()` 経由で `handleClick()` に渡す経路だけが自動で接続されます（Node.js 上での確認のみ、実機未検証）。ただし UI 側がその通知を自動生成する実装はなく、同じ行はプレイヤーが手入力できるため、クリックの証明にはなりません。JSON UI から slot / session / layout-generation / sequence を自動生成する書式は公式構造から確認できていないため、JSON UI 連携は提供していません。
 > - この README は、実装済みの範囲と未完成・未検証の機能を区別して記載します。未検証の機能を「完成・動作確認済み」として扱わないでください。
 
 ## 現在の状態
@@ -22,7 +22,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | 実機検証 | **未実施** |
 | 実機画面の表示 | **既定で有効（実機未検証）**。実アダプタは `canOpenScreens = true` を返し、`Window.open()` が `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` が `VirtualContainer.close()` を呼ぶ。画面の表示可否・close 完了は実機未確認 |
 | 実機ライフサイクル（close・死亡・退出・次元変更・スペクテイター・shutdown・再読み込み） | **イベント購読と退出・死亡・次元変更・スペクテイター・shutdown時の自動 close（Node.js 上で確認済み、実機未検証）**。既定の `minecraftVirtualContainerAdapter` が `world.afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読し、`Window` が open 前に接続して close ハンドラーと itemChange の危険通知に流す（`after` イベントなので close・アイテム変更を防ぐ保護ではない）。`Window` は最初の `open()` で `world.afterEvents.playerLeave` を 1 本購読し、退出したプレイヤーの Window（`opening` / `open`）を `PlayerLeft` で close する。同じく最初の `open()` で `world.afterEvents.entityDie` を 1 本購読し、死亡した entity の id が Window の viewer id と一致する場合だけ `PlayerDied` で close する（プレイヤー以外・他プレイヤーの死亡は無視）。どちらも自動再オープンはしない。同じ `open()` で `world.afterEvents.playerDimensionChange` と `world.afterEvents.playerGameModeChange` も 1 本ずつ購読し、次元変更は `ServerClosed`、`toGameMode` が `Spectator` のときだけ `PlayerSpectating` で close する（プレイヤーが有効なのでアダプタにも close を要求する。他プレイヤーと Spectator 以外のモード変更は無視、自動再オープンはしない）。同じ `open()` で `system.beforeEvents.shutdown` も 1 本購読し、shutdown 時は `opening` / `open` の全 Window を `ServerClosed` で close する。shutdown のコールバックは restricted execution なので `VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面・アダプタ購読の破棄はエンジンに任せてローカル資源だけを解放する。close ハンドラーは同じコールバック内で 1 回走り、再 `open()` は抑止される（`closed` のまま）。2 回目の shutdown は何もしない。スクリプト再読み込み時の後始末は未実装 |
-| 入力ブリッジ | **受信経路のみ自動接続（Node.js 上で確認済み、実機未検証）**。最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を解析して `system.run()` から `handleClick()` に流す。session-id は open ごとに作り直す `Window._inputSessionId`（`Window.id` の `window-N` ではない）。layout-generation は open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進む `Window._inputLayoutGeneration` で、ページ変更前に生成された通知は変更後に届いても `stale-layout-generation` として拒否される。世代を持たない旧3フィールド形式は受理しない。UI 側の payload の自動生成は未実装（JSON UI から slot/session/layout-generation/sequence を渡す書式は根拠なし）。手入力の静的ペイロードプローブは `resource_pack/ui/invui_controls.json` にオプトインで同梱（既定未登録）。通知は手入力で偽装可能、実機の `button.send` 挙動は未検証。rate limit は既定 100 ms（`minIntervalMs: 100`、10 回/秒）で、直前の受理から 100 ms 以内の連投は `rate-limited` として拒否する（`open()` をまたいでも直前の受理時刻を引き継ぐ）。パック側から変更する API はない。**入力ゲート**: `layout-generation` が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは入力を受け付けない（チャット経路は button が無いものとして拒否し、`handleClick()` は `false` を返す）。`placeholder` を指定しない非同期 provider が未解決の間は closed のまま、provider または `setItem()` が失敗したスロットは後で書き込みが成功するまで button にならず、Container 再生成中（`setTitle()` / サイズ変更 / `setUpperGui()`）も swap から新画面が開くまで closed になる。close・再オープンはゲートをリセットする（いずれも Node.js 上での確認のみ、実機未検証）。`src/input.ts` / `src/chat-input-bridge.ts` は公開エントリから export しない |
+| 入力ブリッジ | **受信経路のみ自動接続（Node.js 上で確認済み、実機未検証）**。最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を解析して `system.run()` から `handleClick()` に流す。session-id は open ごとに作り直す `Window._inputSessionId`（`Window.id` の `window-N` ではない）。layout-generation は open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進む `Window._inputLayoutGeneration` で、ページ変更前に生成された通知は変更後に届いても `stale-layout-generation` として拒否される。世代を持たない旧3フィールド形式は受理しない。UI 側の payload の自動生成は未実装（JSON UI から slot/session/layout-generation/sequence を渡す書式は根拠なし）。通知は手入力で偽装可能、実機の `button.send` 挙動は未検証。rate limit は既定 100 ms（`minIntervalMs: 100`、10 回/秒）で、直前の受理から 100 ms 以内の連投は `rate-limited` として拒否する（`open()` をまたいでも直前の受理時刻を引き継ぐ）。パック側から変更する API はない。**入力ゲート**: `layout-generation` が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは入力を受け付けない（チャット経路は button が無いものとして拒否し、`handleClick()` は `false` を返す）。`placeholder` を指定しない非同期 provider が未解決の間は closed のまま、provider または `setItem()` が失敗したスロットは後で書き込みが成功するまで button にならず、Container 再生成中（`setTitle()` / サイズ変更 / `setUpperGui()`）も swap から新画面が開くまで closed になる。close・再オープンはゲートをリセットする（いずれも Node.js 上での確認のみ、実機未検証）。`src/input.ts` / `src/chat-input-bridge.ts` は公開エントリから export しない |
 | クリック通知・アイテム保護・JSON UI 連携 | **ライブラリ側の受け口のみ**。自動接続のチャット通知は `handleClick()` まで届くが、通知を送る UI 側は未実装で、手入力偽装と実機未検証が残る。itemChange 検出時の危険通知・再描画停止・close 要求は `Window` にあるが、保護でもクリック処理でもない。`Window.handleClick()` は button mode の Item のみを実行する |
 | アイテムの用途分類（`Item.getMode()` / `setMode()`） | **実装済み（Node.js 上で確認済み）**。`display` / `button` を分類し、未指定はハンドラーの有無から推測する。分類とハンドラー実行ガードのみで、実機のアイテム保護ではない |
 | 差分描画 | **状態更新は解決後レイアウトを比較し、要素が変わったスロット、状態に依存し得る Item、通知されたスロット、直前の書き込みに失敗したスロットだけを再評価。固定 `ItemStack` / `ItemBuilder` の Item と `InventoryLink` は状態更新ではスキップ**。明示 `refresh()` と GUI の内容変更は全スロットを再評価する。同じサイズの `setUpperGui()` も要素が変わった（または書き込みに失敗した）スロットだけを再評価する。どの経路でも Container がすでに空のスロットを空で上書きする書き込みだけをスキップする（Window・Container ごとの `SlotWriteCache`）。要素の更新通知は該当スロットを再描画する。状態更新・GUI 変更・要素の更新通知は 1 つの microtask（`Promise.then`）にまとめて 1 回だけ描画する。前提と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照 |
@@ -40,10 +40,9 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 | `Window.mergedBuilder()` | **実装済み（Node.js 上で確認済み、実機未検証）**。Java 版と同名の merged ビルダー。Bedrock ではプレイヤーインベントリが描き換え可能な `VirtualContainer` ではないため、`setGui(gui)` は単一 GUI を Container に表示する（`setUpperGui()` の別名）だけで、下側領域は標準 UI のまま。merged 固有の描画は行わない |
 | 下側 GUI の論理設定（`WindowBuilder.setLowerGui()` / `Window.setLowerGui()`） | **実装済み（Node.js 上で確認済み、実機未検証）**。指定した `Gui` を `Window.lowerGui` に保持するだけで、標準画面のプレイヤーインベントリ領域は描き換えない（設計 7.4）。表示中の `Window.setLowerGui()` も参照を差し替えるだけで、GUI の解決・描画・購読、スロット書き込み、Container の再生成、state schema の再登録を行わない。標準 Player UI を置換したとは扱わない |
 | `Window.open()` | **既定で実画面を開く（実機未検証）**。Container を作成し `VirtualContainer.open()` を呼ぶ。失敗は例外・エラーハンドラーで報告するが、実機での表示は未確認 |
-| 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。既定は読み取り専用の静的検査。`--install-resource-pack` を明示した場合だけ `ui/invui.json` と接続用 `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の3ファイルを追加する。既存の `ui/_ui_defs.json` は既定で変更しない。`--install-resource-pack` と併用して `--register-ui-defs` を明示した場合だけ、事前検査を通ったときに既存 `_ui_defs.json` へ不足エントリをバックアップ付きで追記する（JSON は再整形されるため、元の書式へ戻すならバックアップから復元する） |
+| 配布補助 CLI（[bin/cli.js](bin/cli.js)） | 実装済み。Behavior Pack を読み取り専用で静的に検査し、手動で必要な確認を表示する。パック内のファイルは変更しない |
 | 利用イメージ（[examples/README.md](examples/README.md)） | 設計スケッチのみ。型検査は可能、実行は対象外 |
 | 全体設計（[設計書](InvUI_for_Bedrock_Design.md)） | あり（バージョン 1.2） |
-| JSON UI テンプレート（`resource_pack/`） | **既定で data_driven 接続・実機未検証**。単体 Resource Pack として `manifest.json` と `ui/_ui_defs.json`（`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイル登録済み）を同梱する。`ui/invui_connect_data_driven.json` が `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ警告ラベルと `invui_probe_root` を `insert_front` で差し込み、透明ブロッカー（`invui_connect_probe.grid_blocker`）はデスクトップでは `panel_top_half`（`item_grid` と同じ基準）、pocket では `pocket_panel` の `controls` 末尾へ `insert_back` で差し込む。**VirtualContainer を識別する仕組みがないため、同パネルを使う全画面に影響し得る**。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。`chest_screen` は編集していない。CLI の導入対象は上記3ファイル、`generate-resource-pack` の生成物は5ファイル |
 | npm 公開 | 未実施 |
 | ライセンス | MIT（[LICENSE](LICENSE)、npm tarball にも同梱） |
 
@@ -66,7 +65,7 @@ Java版 [InvUI](https://github.com/NichtStudioCode/InvUI) の設計と公開 API
 - **入力**: `Window.handleClick(slot)` は呼び出し側が論理スロットを直接渡す API です。button mode の Item だけを実行し、キュー投入時と実行時の両方で slot・layout/generation・mode を再検証するため、待機中に close・再オープン・ページ変更があったクリックや、display に変わったスロットのクリックはハンドラーを呼ばずに破棄されます。左右・Shift・ダブルクリックの区別はありません。
 
   **入力は、描画が完了して画面に書かれたレイアウトにだけ向きます。** 状態変更で `_inputLayoutGeneration` が進んでも、その世代のレイアウトを render が適用して全スロットを描き終えるまでは入力ゲートが closed で、チャット通知は button が無いものとして拒否され、`handleClick()` も `false` を返します（ハンドラーは実行しません）。同じゲートは、Container 再生成（`setTitle()` / サイズ変更 / サイズ違いの `setUpperGui()`）が swap してから新しい画面を開くまでの間も closed です。`placeholder` を指定しない非同期 provider が未解決の間は closed が続き（解決しない限り開かない。タイムアウトはない）、provider または `setItem()` が失敗したスロットは、後でそのスロットへの書き込みが成功するまで `display` 扱いで button になりません。close・再オープンはゲートをリセットし、新しい open の描画完了後に開きます。これらはいずれも Node.js 上での確認のみで実機未検証です。
-  既定では、`Window` が最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>` 形式の行を `system.run()` 経由で `handleClick()` へ流します（[src/chat-input-bridge.ts](src/chat-input-bridge.ts)、Node.js 上で確認済み）。session-id は open ごとに作り直される `Window._inputSessionId`（`Window.id` の `window-N` ではありません。`window-N` は再読み込みで再利用されるため、遅延した通知が新しい画面に一致し得ます）で、送信者 id と一致する開いている Window だけが対象です。`_inputSessionId` は公開クラス `Window` の公開 getter（`dist/window.d.ts`）で、値は `session-<36進の時刻>-<36進の連番>-<36進6文字>` 形式の不透明なトークンです。`_inputLayoutGeneration` も公開 getter で、open ごとに `0` から始まり、ページ/行/タブまたはスロット要素の変更で進みます。通知の `layout-generation` はこの値と照合されるため、ページ変更前に生成され変更後に届いた行は、新しいページの同じスロットが button でも `stale-layout-generation` として拒否されます。世代を持たない旧3フィールド形式 `!invui:<session>:<slot>:<sequence>` は受理しません。どちらもアンダースコア付きで内部扱い・互換保証なしですが、開発者が現在値を読むことはできます（[resource_pack/README.md](resource_pack/README.md) の「session-id と layout-generation の取得手順」）。解析・重複排除・直列 queue は [src/input.ts](src/input.ts) の `createInputAcceptor()` が担い、close とページ/行/タブ変更でキュー世代を進めて待機中の通知を捨て、実行時に通知の `layout-generation` も再照合します。スロットは現在のレイアウトの mode で再評価され、button 以外（display・inventory）は拒否されます。解析に成功した行は `cancel` で通常チャットから隠します（偽装行も隠れます）。
+  既定では、`Window` が最初の `open()` で `world.beforeEvents.chatSend` を 1 本購読し、`!invui:<session-id>:<layout-generation>:<slot-index>:<sequence>` 形式の行を `system.run()` 経由で `handleClick()` へ流します（[src/chat-input-bridge.ts](src/chat-input-bridge.ts)、Node.js 上で確認済み）。session-id は open ごとに作り直される `Window._inputSessionId`（`Window.id` の `window-N` ではありません。`window-N` は再読み込みで再利用されるため、遅延した通知が新しい画面に一致し得ます）で、送信者 id と一致する開いている Window だけが対象です。`_inputSessionId` は公開クラス `Window` の公開 getter（`dist/window.d.ts`）で、値は `session-<36進の時刻>-<36進の連番>-<36進6文字>` 形式の不透明なトークンです。`_inputLayoutGeneration` も公開 getter で、open ごとに `0` から始まり、ページ/行/タブまたはスロット要素の変更で進みます。通知の `layout-generation` はこの値と照合されるため、ページ変更前に生成され変更後に届いた行は、新しいページの同じスロットが button でも `stale-layout-generation` として拒否されます。世代を持たない旧3フィールド形式 `!invui:<session>:<slot>:<sequence>` は受理しません。どちらもアンダースコア付きで内部扱い・互換保証なしですが、開発者が現在値を読むことはできます。解析・重複排除・直列 queue は [src/input.ts](src/input.ts) の `createInputAcceptor()` が担い、close とページ/行/タブ変更でキュー世代を進めて待機中の通知を捨て、実行時に通知の `layout-generation` も再照合します。スロットは現在のレイアウトの mode で再評価され、button 以外（display・inventory）は拒否されます。解析に成功した行は `cancel` で通常チャットから隠します（偽装行も隠れます）。
   ただし、**この経路はクリックの証明でも認証でもありません。** 行はプレイヤーが手入力でき、sender id 以外の全フィールドが攻撃者制御です。rate limit は既定で 100 ms（`minIntervalMs: 100`、10 回/秒）有効で、直前の受理から 100 ms 以内に送った通知は `rate-limited` として拒否します（`open()` をまたいでも直前の受理時刻を引き継ぎます）。時刻ベースの有効期限は別途ありません。この間隔は `Window` の自動接続では内部既定値で、パック側から変更する API はありません。UI 側が通知を生成する実装（`button.send` ペイロード）はリポジトリにありません。実機での `button.send` と表示アイテムの扱いは未検証で、アイテム保護・入力抑制はこの経路に含まれません。`src/input.ts` と `src/chat-input-bridge.ts` は `src/index.ts` から export していません。`world.beforeEvents.chatSend` か `system.run` がない環境では接続せず、chat 入力は fail closed になります。チャット送信からの入力経路は、実機で `button.send` の挙動を確認するまで正式機能にしません。
 - **差分描画**: 状態更新では、前回描画したレイアウトと解決後のレイアウトを比較し、要素が変わったスロットと直前の書き込みに失敗したスロットだけを再評価します。要素が同じスロットも、provider が Window の state を読めるか証明できない限り再評価します。固定 `ItemStack` / `ItemBuilder` の Item は Window も state も受け取らず、`InventoryLink` はインベントリ側の通知で更新されるため、状態更新ではスキップできます。Bedrock の `ItemStack` を全 component まで比較して同値判定はしません。GUI の内容変更と明示 `refresh()` は、要素参照が変わっていなくても全スロットの provider を再評価します（明示 `refresh()` は外部の可変データも読み直す経路のため）。同じサイズ・同じ state schema の `setUpperGui()` は、Window の状態が変わらないので要素が変わったスロットと直前の書き込みに失敗したスロットだけを再評価して描画します（クランプが必要なら全スロット描画に回ります）。どの描画でも **`setItem()` を省略するのは、その Container に対して直前に自分で空を書いたスロットを空で上書きする場合だけ**です（空→空のみ、表示アイテムの書き込みはスキップしません）。要素の更新通知だけが該当スロットを再描画しますが、状態更新・GUI 変更・同じタイミングの複数の要素の更新通知は 1 つの microtask に合流して 1 回だけ描画します。詳細と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照してください。レイアウトサイズが変わった場合、表示中の Window は再オープンが必要で、`refresh()` はエラーを報告するだけです。
 - **周期更新**: `Item.updatePeriodically()` は実装済みですが、実機未検証です。Bedrock の `system.runInterval()` に接続するのは、その Item を表示している開いた Window がある間だけで、Window を開く前や最後の Window を閉じた後は実行されません。1 Item につき 1 インターバルで、購読の張り替えで周期の位相がリセットされます。スケジューラの登録に失敗した場合は `console.error` に記録され、自動の再試行はありません。
@@ -320,115 +319,39 @@ npx esbuild src/main.ts \
 - `manifest.json` の依存バージョンは、実際に確認したゲーム版・`@minecraft/server` 版に合わせてください。
 - Node.js 上でコアを直接読み込むには、`@minecraft/server` のモック（`ItemStack`、`world.virtualContainerManager.create` など）が必要です。モックは実機の挙動を再現しないため、実機の画面表示・入力・アイテム保護の検証にはなりません。
 
-## CLI（配布補助・静的検査＋任意のプローブ導入）
+## CLI（Behavior Pack の静的検査）
 
-`init` は**既存パックを対象にした検査コマンド**で、既定では Behavior Pack / Resource Pack を変更しません。`--install-resource-pack` を明示した場合だけ、未検証のプローブ `ui/invui.json` と接続用 `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の3ファイルを既存 Resource Pack に追加します。既存の `ui/_ui_defs.json` は既定で変更しないため、登録するまで接続は有効になりません。`--install-resource-pack` と `--register-ui-defs` を**両方**明示した場合だけ、事前検査を通ったときに `_ui_defs.json` へ不足エントリを追記します（詳細は「[`--register-ui-defs` による追記](#--register-ui-defs-による-_ui_defsjson-追記オプトイン)」）。`generate-resource-pack` は既存パックを対象にせず、`--output` で指定した**まだ存在しないディレクトリ**へ、同梱テンプレートから独立した実験用 Resource Pack を新規生成します（`init` とは別コマンドで、`init` 用オプションは受け付けません）。生成物の `ui/_ui_defs.json` は3ファイル登録済みで、接続が既定で有効です。いずれも `chest_screen` は編集しませんが、生成物・登録後のパックは `data_driven_container` のパネルを使う全画面に影響し得ます。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
+`init` は既存の Behavior Pack を静的に検査し、手動で必要な確認を表示する読み取り専用のコマンドです。パック内のファイルは変更しません。`package.json` の `bin` には登録されていますが、npm 未公開のため現時点ではリポジトリ内で直接実行します。
 
 ```bash
-# 既定: 読み取り専用の静的検査
-node bin/cli.js init \
-  --behavior-pack ./behavior_pack \
-  --resource-pack ./resource_pack
-
-# 明示した場合だけ ui/invui.json を追加（既存ファイルは上書きしない）
-node bin/cli.js init \
-  --resource-pack ./resource_pack \
-  --install-resource-pack
-
-# さらに明示した場合だけ _ui_defs.json へ不足分を追記（バックアップ付き）
-node bin/cli.js init \
-  --resource-pack ./resource_pack \
-  --install-resource-pack \
-  --register-ui-defs
-
-# 存在しない出力先に実験用 Resource Pack を新規生成
-node bin/cli.js generate-resource-pack --output ./invui-probe-pack
+node bin/cli.js init --behavior-pack ./behavior_pack
 ```
-
-### コマンドとオプション
 
 | 指定 | 内容 |
 |---|---|
-| `init` | 既存の Behavior Pack / Resource Pack を静的に検査し、手動で必要な作業を表示する。既定では書き込まない |
-| `generate-resource-pack --output <dir>` | 既存パックを変更せず、新しい出力先へ `manifest.json`・`ui/_ui_defs.json`・`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の5ファイルを生成する。生成物の `_ui_defs.json` は3ファイル登録済みで接続が既定で有効。UUID（`header` と各 module）は生成のたびに作り直す |
-| `--behavior-pack <dir>` | `init` 用。Behavior Pack のルート。`--install-resource-pack` 指定時は省略可 |
-| `--resource-pack <dir>` | `init` 用。Resource Pack のルート。必須 |
-| `--install-resource-pack` | `init` 用。プローブ `ui/invui.json` と接続用 2 ファイルの計3ファイルを追加する（明示時のみ）。既存ファイルは上書きせず、内容が異なる場合は競合として中断する。既存の `ui/_ui_defs.json` は変更せず、登録するまで接続は有効にならない |
-| `--register-ui-defs` | `init` 用。`--install-resource-pack` との併用が必須（単独指定は引数エラー）。既存 `ui/_ui_defs.json` の `ui_defs` 配列へ、未登録の3エントリだけを追記する。追記前に同一ディレクトリへバックアップを作り、JSON として読めない・`ui_defs` が配列でない・競合時は書き込まず中断する。既に全部登録済みなら何も書かない。追記する場合は `JSON.stringify` で再整形される |
-| `--output <dir>` | `generate-resource-pack` 専用・必須。既存パス、既存パス上のファイル、シンボリックリンク、ファイルシステムのルートは拒否し、上書きしない。`init` に指定すると引数エラー |
-| `--json` | 検査結果と導入結果を JSON として標準出力へ出す |
+| `init` | Behavior Pack を静的に検査し、手動で必要な作業を表示する。書き込まない |
+| `--behavior-pack <dir>` | `init` 用。Behavior Pack のルート。必須 |
+| `--json` | 検査結果を JSON として標準出力へ出す |
 | `-h`, `--help` | 使い方を表示する |
 | `-v`, `--version` | バージョンを表示する |
 
-`generate-resource-pack` は `--behavior-pack` / `--resource-pack` / `--install-resource-pack` / `--register-ui-defs` を受け付けません（指定すると引数エラー）。`--output` 先が既に存在する場合も、既存のファイルとディレクトリは一切変更せず、生成しません。生成中に失敗した場合は、この CLI がその実行で作成したファイルとディレクトリだけを削除し、他プロセスが置いたファイルは消しません。
-
-`check` は設計書にある将来案であり、まだ仕様確定していません。CLI が受け付けるコマンドは `init` と `generate-resource-pack` です。`--install-resource-pack` を指定しない `init` は静的検査だけを行います。`--register-ui-defs` はそれに加えて `--install-resource-pack` の明示が必要で、どちらかを欠くと書き込みません。
-
 ### CLI が行うこと
 
-- `manifest.json` の存在と JSON としての読み込みを検査する。JSON として読めてもルートがオブジェクトでない（`null` や配列など）場合は検査エラーにし、`--install-resource-pack` を指定しても書き込まない。
-- Behavior Pack の script モジュール、`entry` の有無、`@minecraft/server` への dependency を確認する。
-- Resource Pack の `manifest.modules` に `type: "resources"` のモジュールがあるか確認する。ない場合は Minecraft がパックとして読み込めないため検査エラーとし、`--install-resource-pack` を指定しても書き込まない。
-- Resource Pack の `ui/` ディレクトリと、既存の `chest_screen.json` / `invui.json` / `invui_connect*.json` / `_ui_defs.json` の有無を報告する。
+- `manifest.json` の存在と JSON としての読み込みを検査する。JSON として読めてもルートがオブジェクトでない（`null` や配列など）場合は検査エラーにする。
+- script モジュール、`entry` の有無、`@minecraft/server` への dependency を確認する。
 - 未検証機能と、手動で確認すべき手順を表示する。
-- `--json` 指定時は、検査結果と導入結果を JSON として標準出力へ出す。
-- `--install-resource-pack` 指定時だけ、`ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを次の安全側の手順で追加する。既存の `ui/_ui_defs.json` は変更せず、登録状況（登録済み／不足）を報告するだけで、登録するまで接続は有効にならない。
-  - 既存ファイルの内容が同梱テンプレートと同一なら「導入済み」と報告し、書き換えない。
-  - 内容が異なる場合は競合として中断し、差分を表示して終了コード `1` を返す。
-  - 一時ファイルへ書いてから排他的に配置し、失敗時は追加済みファイル・一時ファイル・この CLI が作成した空ディレクトリを削除する**ロールバックを試みる**。
-  - ただしロールバックは失敗しうる。削除権限がない、他プロセスがファイルを置き換えた、などの場合は削除できず、**部分適用が残る可能性がある**。その場合はエラーメッセージに削除できなかった理由が含まれるので、対象の `ui/invui.json` と作成されたディレクトリを手動で確認・削除する。
-  - `ui/` にシンボリックリンクがあるなど、パック外へ書き込むおそれがある経路は拒否する。
-
-### `--register-ui-defs` による `_ui_defs.json` 追記（オプトイン）
-
-`--register-ui-defs` は**既定では何も変えない**オプトインの追記機能です。`init` に指定しなければ `ui/_ui_defs.json` は読み取りだけで、登録状況（登録済み／不足）を報告します。追記が起きるのは `init --install-resource-pack --register-ui-defs` を両方明示した実行だけです。`--register-ui-defs` 単独は引数エラー、`generate-resource-pack` はこのフラグ自体を受け付けません（生成物の `_ui_defs.json` は元から3ファイル登録済み）。
-
-**追記する内容**
-
-- 対象は同梱の3エントリ `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` で、`ui_defs` 配列に**未登録のものだけ**を既存要素の末尾へ追加します。既存エントリは削除・並べ替えしません。
-- 3つとも登録済みなら「登録済み」と報告し、ファイルもバックアップも作りません。
-- 追記はテンプレート3ファイルの配置が終わった後に行い、追記に失敗した場合は追加済みファイル・一時ファイル・作成した空ディレクトリもロールバックします。
-
-**既存 def の安全検査（書き込み前）**
-
-追記の可否は、テンプレートを1ファイルも追加する前に検査します。次のいずれかに当たると「競合」として中断し、終了コード `1` を返して `_ui_defs.json` もテンプレートも変更しません。
-
-- `ui/_ui_defs.json` が存在しない（この機能は既存ファイルへの追記専用。新規作成には `generate-resource-pack` を使う）。
-- 導入先の経路にシンボリックリンクがある、または `_ui_defs.json` が通常ファイルでない（パック外へ書き込まないため）。
-- JSON として読めない、ルートがオブジェクトでない、`ui_defs` が配列でない、`ui_defs` に文字列以外の要素がある。
-
-**バックアップと復元**
-
-- 追記の直前に、`_ui_defs.json` と同じディレクトリへ `<ファイル名>.invui-backup.<pid>.<乱数>.bak` を排他的に作成します。内容は追記前のバイト列そのものです。
-- 一時ファイルへ書いてから rename で置き換えます。バックアップ作成後と rename 直前の2回、別プロセスが `_ui_defs.json` を変更していないかを内容比較で確認し、変わっていれば書き込まずに中断します。
-- 追記に失敗した場合、一時ファイルを削除し、`_ui_defs.json` が元のままならバックアップも削除します。元と異なる場合はバックアップを残し、そのパスをエラーに含めます。追記を元へ戻す直前にも、開いたファイルの内容が追記したままかを fd で再確認し、別プロセスが変更していれば書き戻さずバックアップを残します。
-- 成功時は人間向け出力と `--json` の `resourcePackInstall.restore` に `cp "<バックアップ>" "<_ui_defs.json>"` 形式の復元コマンドを出します。復元すると追記分は消え、**追記後に手で加えた変更も失われます**。
-- `--json` では `resourcePackInstall.status`（`installed` / `already-installed`）、`uiDefs.action`（`registered` / `already-registered` など）、`added`、`missing`、`backup`、`restore` を返します。
-
-**JSON の再整形**
-
-追記時は `JSON.parse` した内容を `JSON.stringify` で作り直します。既存のキー順と `ui_defs` の並びを保ち、インデント・改行コード（LF / CRLF）・末尾改行の有無は可能な範囲で合わせますが、空白やエスケープなどの元の書式は完全には保持されません。正確に戻したい場合はバックアップから復元してください。
-
-### CLI が行わないこと
-
-- **既存 Resource Pack の `ui/_ui_defs.json` を既定では変更せず、接続を自動で有効化しない。** `--install-resource-pack` が追加するのは `ui/invui.json` と接続用 2 ファイルの計3ファイルで、`ui_defs` への登録は既定で手動です（CLI は登録状況を検査して不足を報告します）。`--register-ui-defs` を併用して明示した場合だけ、事前検査を通ったときに不足分をバックアップ付きで追記します。`generate-resource-pack` は同梱の `_ui_defs.json`（3ファイル登録済み）を使って接続済みの独立パックを作りますが、`chest_screen` は編集せず、`data_driven_container` のパネルを使う全画面へ影響し得る未検証の接続です。
-- **`generate-resource-pack` は既存のパックやパスを変更しない。** 出力先が存在する場合は生成自体を行わず、既存のファイル・ディレクトリ・シンボリックリンクに触れません。生成するのは `manifest.json` / `ui/_ui_defs.json` / `ui/invui.json` / `ui/invui_connect.json` / `ui/invui_connect_data_driven.json` の5ファイルだけです。
-- **既存の `chest_screen.json` を上書きしない。** 競合を検出した場合は報告だけ行います。
-- **`_ui_defs.json` を自動で書き換えるのは `--register-ui-defs` の明示時だけ。** その場合も追記のみで、既存エントリの削除・並べ替えは行いません（ファイル全体は JSON として再整形されます）。未指定時の参照追加は手動マージの対象です（`generate-resource-pack` は新しいパック内に自身の `_ui_defs.json` を作ります）。
-- **アイテム保護・入力抑制・画面終了処理を提供しない。** 追加するのは JSON UI の部品だけで、表示アイテムの取り出し、`button.send` の受信、VirtualContainer の識別は実装していません。導入しても安全にはなりません。
-- **既存の `manifest.json` を変更せず、Behavior Pack へも書き込まない。**
-- **`--register-ui-defs` の追記以外でバックアップや復元を自動化しない。** 手動で UI をマージする場合は、利用者がバックアップを取ってください。
+- `--json` 指定時は、検査結果を JSON として標準出力へ出す。
 
 ### 終了コード
 
 | コード | 意味 |
 |---|---|
-| `0` | 検査完了（警告のみを含む）。導入指定時は「導入済み」または新規追加 |
-| `1` | 引数エラー、検査エラー、導入の競合・失敗 |
+| `0` | 検査完了（警告のみを含む） |
+| `1` | 引数エラー、検査エラー |
 
 ## 実機検証
 
-未検証機能を「提供済み」にしないため、合格を記録するまで有効な機能として扱わないでください。同梱の [resource_pack/README.md](resource_pack/README.md) には、接続ファイルと手動プローブを同梱物だけで試す手順があります。
+未検証機能を「提供済み」にしないため、合格を記録するまで有効な機能として扱わないでください。
 
 ### 実機検証が終わるまで正式機能として扱わないもの
 
@@ -437,9 +360,9 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 | `Window.open()` による画面表示 | コード上は既定で有効・実機未検証 | 実アダプタは `canOpenScreens = true` で `VirtualContainer.open()` を呼ぶ。実機での表示・入力・アイテム保護は未確認のため、実在ワールドでの利用は推奨しない |
 | close / itemChange のアダプタ購読 | 既定アダプタが `afterEvents.virtualContainerClose` / `virtualContainerItemChange` を購読。Node.js 上で経路を確認済み・実機未検証 | 実機ライフサイクル・入力・アイテム保護として扱わない。`after` なので close・変更を防げない |
 | 退出・死亡・次元変更・スペクテイター・shutdown時の自動 close（`world.afterEvents.playerLeave` / `world.afterEvents.entityDie` / `world.afterEvents.playerDimensionChange` / `world.afterEvents.playerGameModeChange` / `system.beforeEvents.shutdown`） | `Window` が最初の `open()` でそれぞれ 1 本購読し、退出したプレイヤーの Window（`opening` / `open`）を `PlayerLeft` で、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で close する。次元変更は `ServerClosed`、`toGameMode` が `Spectator` のときだけ `PlayerSpectating` で close する（どちらもプレイヤーが有効なのでアダプタにも close を要求する）。shutdown では `opening` / `open` の全 Window を `ServerClosed` で close する。Node.js 上で確認済み・実機未検証。自動再オープンはしない | 実機でイベントが届くか、close が成功するかは未確認。プレイヤー以外や他プレイヤーの死亡、他プレイヤーの次元変更、Spectator 以外のゲームモード変更は対象外。shutdown のコールバックは restricted execution のため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面・アダプタ購読の破棄はエンジン任せになる。close ハンドラーも同じ制約下で実行される。スクリプト再読み込みの後始末の代替にはしない |
-| クリック通知（`button.send` → チャット候補を含む） | `Window` が最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流す経路のみ自動接続（Node.js 上で確認済み・実機未検証）。UI 側の payload の自動生成は未実装（JSON UI から slot/session/layout-generation/sequence を渡す書式は公式構造から確認できない）。layout-generation はページ変更前の通知を変更後に拒否するが、値は手入力または将来の UI が指定する。手入力の静的ペイロードプローブはオプトインで同梱（既定未登録）、行は手入力で偽装可能、rate limit は既定 100 ms（`minIntervalMs: 100`）、時刻ベースの期限なし | クリックの証明・認証としては使えない。安全に利用不可。有効な機能として案内しない |
+| クリック通知（`button.send` → チャット候補を含む） | `Window` が最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流す経路のみ自動接続（Node.js 上で確認済み・実機未検証）。UI 側の payload の自動生成は未実装（JSON UI から slot/session/layout-generation/sequence を渡す書式は公式構造から確認できない）。layout-generation はページ変更前の通知を変更後に拒否するが、値は手入力または将来の UI が指定する。行は手入力で偽装可能、rate limit は既定 100 ms（`minIntervalMs: 100`）、時刻ベースの期限なし | クリックの証明・認証としては使えない。安全に利用不可。有効な機能として案内しない |
 | 表示専用・ボタン用スロットのアイテム保護 | 実装なし・実機未検証。`Item.getMode()` / `setMode()` は分類とハンドラー実行ガードのみ | 安全に利用不可。アイテム移動を許可しない |
-| JSON UI による入力抑制・画面識別 | `resource_pack/` は既定で `data_driven_container` の desktop/pocket パネルへ接続し、デスクトップでは `panel_top_half` に透明ブロッカーを重ねるが実機未検証。VirtualContainer を識別する仕組みはなく、遮断が成立する保証もない | 同パネルを使う他の画面にも表示・入力が干渉し得る。ボタンや inventory slot も制限し得るが、プレイヤー側や controller 入力の遮断は保証されない。安全に利用不可 |
+| JSON UI による入力抑制・画面識別 | 実装なし | 安全に利用不可 |
 | `InventoryLink` のアイテム移動 | 実装なし。`moveTo()` は常に例外 | 複製・消失の可能性を排除できないため無効 |
 | 左・右・Shift・ダブルクリックの区別 | 初期リリース非目標 | 通常クリックのみを設計対象とする |
 
@@ -448,25 +371,11 @@ node bin/cli.js generate-resource-pack --output ./invui-probe-pack
 ### 実機画面は既定で開く（使い捨てワールドで）
 
 - **既定の実アダプタが実画面を開きます。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`Window.open()` は `world.virtualContainerManager.create()` で `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`Window.close()` は `VirtualContainer.close()` を呼びます。**実機で表示・close が成立するかは未検証**です。`close()` は要求時点で返り、実際の close イベントは別 tick になることがあるため、閉鎖直後の再 `open()` は失敗し得ます。
-- **クリック通知は UI 側が生成しません。** `Window` は `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流す受け口だけを持ちます（Node.js 上で確認済み・実機未検証）。`resource_pack/` の `button.send` は通知を生成せず、購読スクリプトもありません。通知はプレイヤーが手入力でき、送信者 id 以外は偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。クリックの取りこぼし・遅延入力・意図しないスロットへの適用を保証できません。
-- **透明ブロッカーは保護の保証ではありません。** 既定の接続はグリッド上へ透明なボタン（`invui_connect_probe.grid_blocker`）を重ね、スロット系入力を `button.invui_connect_blocked` へ付け替えますが、受け側のスクリプトはありません。実機未検証であり、**ボタンや inventory slot も制限し得る**一方で、**プレイヤー側や controller 入力の遮断は保証しません**。アイテム保護でもありません。
-- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。既定接続の透明ブロッカーは実機未検証の試みで、プレイヤー側や controller 入力の遮断を保証しません。ボタンや inventory slot も制限し得る一方、アイテム保護ではありません。このリスクは既定で有効です。
+- **クリック通知は UI 側が生成しません。** `Window` は `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流す受け口だけを持ちます（Node.js 上で確認済み・実機未検証）。通知はプレイヤーが手入力でき、送信者 id 以外は偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。クリックの取りこぼし・遅延入力・意図しないスロットへの適用を保証できません。
+- **アイテム保護はありません。消失・複製事故の恐れがあります。** 表示専用・ボタン用スロットのアイテムは保護されておらず、プレイヤーが保護未検証の表示アイテムを取り出せます。取り出したあと、`refresh()`・状態更新・要素の更新通知による再描画が走ると、`container.setItem()` が同じアイテムを書き戻し、アイテムが複製される可能性があります。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失します。このリスクは既定で有効です。
 - **itemChange を検出しても保護はされません。** 既定の `minecraftVirtualContainerAdapter` は `subscribeItemChange` を実装して `world.afterEvents.virtualContainerItemChange` を購読しますが、これは Node.js 上で経路を確認しただけで実機未検証です。`after` イベントなので変更後の通知にすぎず、変更を取り消したり変更前のアイテムへ戻したりはできません。アダプタがイベントを渡した場合、`Window` は `WindowItemChangeDangerError` をエラーハンドラーへ通知し、再描画を停止して `close()` を要求します。ただし close 要求が実機で成功するか、画面が実際に閉じるかは未検証です。
-- **実験は使い捨てのワールドだけで行ってください。** `resource_pack/` を入れると、`data_driven_container` のパネルを使う全画面に警告ラベル・ボタン・透明ブロッカーが重なり得ます（VirtualContainer 限定ではない）。ブロッカーは実機未検証で、ボタンや inventory slot も制限し得ます。進行データのあるワールド、失いたくないアイテムを持つ環境、他のプレイヤーが参加するワールドでは実行しないでください。どうしても試す場合は、事前にワールド全体をバックアップし、終了後にインベントリとチェストのアイテム増減を確認してください。
 
-## Resource Pack テンプレート（実験用・未検証）
-
-`resource_pack/` には、単体の Resource Pack として構成した未検証のテンプレートを同梱しています。`ui/_ui_defs.json` は `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルを登録済みで、**既定で接続が有効**です。`ui/invui_connect_data_driven.json` は `data_driven_container` の `desktop_panel` / `pocket_panel` の `controls` 先頭へ、警告ラベルと `invui_probe_root`（`invui_probe` 名前空間の可視ラベルと実験的な `button.send` 部品）を `insert_front` で差し込みます。透明ブロッカー（`invui_connect_probe.grid_blocker`）は、デスクトップではスロット領域の `panel_top_half`（`item_grid` と同じ基準）、pocket では `pocket_panel` の `controls` 末尾へ `insert_back` で差し込みます。`chest_screen` は編集していません。`button.send` を購読するスクリプトは同梱しておらず、チャット送信やアイテム保護を提供するものでもありません。
-
-ただし **`VirtualContainer` を識別する仕組みはなく**、接続先のパネルを使う全画面（通常のコンテナや data-driven ブロックの画面を含み得る）に表示され得ます。そのため、他の画面での入力干渉・表示の重なり・アイテム保護の欠如というリスクが残ります。透明ブロッカーは実機未検証で、ボタンや inventory slot も制限し得る一方、プレイヤー側や controller 入力の遮断を保証しません。VirtualContainer 画面を使っているかは未確定です。**実機未検証であり、接続・表示・入力の遮断・アイテム保護のいずれも保証しません。** 他 Resource Pack との名前空間・UUID の衝突や、ゲーム側の JSON UI の解釈次第で挙動が変わる可能性があります。
-
-- CLI の `--install-resource-pack` が追加するのは `ui/invui.json`・`ui/invui_connect.json`・`ui/invui_connect_data_driven.json` の3ファイルです。既存の Resource Pack へ追加した場合、`ui/_ui_defs.json` への登録は既定では行われず、手動でマージするまで接続は有効になりません（CLI は登録状況を検査して不足を報告します）。`--install-resource-pack` と併用して `--register-ui-defs` を明示した場合だけ、事前検査を通ったときに不足分をバックアップ付きで追記します。`generate-resource-pack` の生成物は `_ui_defs.json` 込みの5ファイルで、接続が既定で有効です。
-- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**です。chat と同じ `#message_text_box` / `#message_text_box_content` と `button.send` を使い、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` の各値を手で入力して送信経路だけを観察します。session-id は開いた `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration` を開発者側で取得し（[resource_pack/README.md](resource_pack/README.md) の「session-id と layout-generation の取得手順」）、open のたび・ページ変更のたびに変わるため送信前に読み直します。slot / session / layout-generation / sequence の自動生成は行いません。既定の `_ui_defs.json` へは未登録で、キーボード入力を奪い得るため既定接続には含めません。CLI 導入対象外です。有効化手順・根拠・制約は [resource_pack/README.md](resource_pack/README.md) の「手動・静的ペイロード送信プローブ」を参照してください。
-- `manifest.json` の UUID・version・`min_engine_version` はプレースホルダです。対象ゲーム版は未確定です。
-- このテンプレートは `data_driven_container` 名前空間の `desktop_panel` / `panel_top_half` / `pocket_panel` を変更します（`data_driven_container_screen.json` 自体は編集しません）。Mojang は同名前空間を変更しないことを期待し、後方互換性を保証していません。検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。
-- 既存 Resource Pack との競合を検出・解消する機能はありません。**使い捨てワールドで、バックアップを取ってから**検証してください。詳細は [resource_pack/README.md](resource_pack/README.md) を参照してください。
-
-Resource Pack を使わなくても、コアの型・レイアウト計算・状態管理は利用できます（Node.js 上で `@minecraft/server` をモックした状態で確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・アイテム保護は動きません（既定接続の透明ブロッカーも遮断を保証しません）。
+コアの型・レイアウト計算・状態管理は Resource Pack なしで利用できます（Node.js 上で `@minecraft/server` をモックした状態で確認済み）。既定の実アダプタは `Window.open()` で実画面を開こうとしますが、実機未検証であり、クリック入力・アイテム保護は動きません。
 
 ## 設計上の前提（実機未検証）
 
@@ -478,8 +387,8 @@ Resource Pack を使わなくても、コアの型・レイアウト計算・状
 - プレイヤーの次元変更は `ServerClosed`、スペクテイターへの変更は `PlayerSpectating` で Window を close する（設計 13.1）。どちらも viewer id が一致する Window だけが対象で、自動再オープンはしない。
 - 状態の共有範囲は `player` / `shared`、保存期間は `window` / `session` / `persistent`。
 - 設計原則は影響を受けたスロットの差分反映で、**状態更新はレイアウト差分で変更スロットと状態に依存し得る Item だけを再評価する**（要素の更新通知は該当スロット。GUI の内容変更と明示 `refresh()` は全スロット再評価）。状態更新・GUI 変更は 1 つの microtask にまとめて 1 回だけ描画し、同じタイミングの要素の更新通知はスロット単位でその flush に合流させる。理由と限界は「[差分描画の限界](#差分描画の限界状態更新)」を参照。
-- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける（`resource_pack/` の既定接続はこの原則の例外で、`data_driven_container` のパネルを使う他の画面へ影響し得る。透明ブロッカーも同じ範囲に挿入され、検証専用）。
-- **Mojang は `data_driven_container_screen.json` と `data_driven_container` 名前空間を変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このため、この JSON / 名前空間の変更や、それに依存する入力・画面接続を前提にしません。`resource_pack/` の既定接続は同名前空間の 2 パネルへ差し込む検証専用の例外であり、正式機能の土台にはしません。この名前空間の変更を「どの画面が使われるか」の観察だけのために意図的に行う検証専用プローブです。`VirtualContainer` がこの画面を使うか自体も未確認です。
+- JSON UI の変更は必要最低限とし、通常チェストへの影響を避ける。
+- **Mojang は `data_driven_container_screen.json` と `data_driven_container` 名前空間を変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このため、この JSON / 名前空間の変更や、それに依存する入力・画面接続を前提にしません。`VirtualContainer` がこの画面を使うか自体も未確認です。
 - `@bedrock-core/ui` には依存しない。
 
 ## ディレクトリ構成（現時点）
@@ -490,19 +399,7 @@ InvUI-for-Bedrock/
 ├── LICENSE                       # MIT
 ├── tsconfig.json
 ├── bin/
-│   └── cli.js                    # 配布補助 CLI（静的検査・任意でプローブ導入）
-├── resource_pack/                # 既定で data_driven 接続する未検証テンプレート（chest_screen は未編集）
-│   ├── README.md
-│   ├── manifest.json
-│   ├── experimental/
-│   │   └── connect-data-driven/  # 同じ接続の隔離コピー（単体パックではない）
-│   └── ui/
-│       ├── _ui_defs.json         # ui/invui.json と接続 2 ファイルを登録済み
-│       ├── invui.json            # invui_probe 名前空間（ラベル・実験的 button.send 部品）
-│       ├── invui_connect.json    # 警告ラベル + invui_probe_root のラッパー
-│       ├── invui_connect_data_driven.json  # data_driven_container の desktop/pocket への modifications
-│       ├── invui_controls.json   # 手動・静的ペイロード送信プローブ（オプトイン・未登録）
-│       └── invui_controls_data_driven.json  # そのプローブの opt-in modifications
+│   └── cli.js                    # 配布補助 CLI（Behavior Pack の静的検査）
 ├── .github/
 │   └── workflows/ci.yml          # GitHub Actions（build / pack）
 ├── src/
@@ -526,7 +423,7 @@ InvUI-for-Bedrock/
 └── InvUI_for_Bedrock_Design.md   # 全体設計書
 ```
 
-`LICENSE` は MIT です（`package.json` の `license` も `MIT`、`files` に `LICENSE` を含めているため npm tarball にも入ります）。`resource_pack/` は既定で `data_driven_container` のパネルへ接続する未検証テンプレートで、`chest_screen` は編集していません。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
+`LICENSE` は MIT です（`package.json` の `license` も `MIT`、`files` に `LICENSE` を含めているため npm tarball にも入ります）。`examples/usage-sketch.ts` は現行コアの公開型に一致するスケッチですが、実行の対象外で、実アダプタの `Window.open()` は実機未検証の実画面 open 経路に入ります。型検査の手順は [examples/README.md](examples/README.md) を参照してください。
 
 ## 対応バージョン
 

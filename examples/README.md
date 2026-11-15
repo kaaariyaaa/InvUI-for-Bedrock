@@ -6,10 +6,10 @@
 > - このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）に含まれず、`npm run build` もここをコンパイルしません。型検査は自動化されていません。スケッチのコメントや記述内容が実装と一致しているかは、型検査でも判定できません。
 > - コア（レイアウト計算・アイテム・状態管理・Window のライフサイクル）は実装済みで Node.js 上で確認されていますが、**実機では一切検証していません**。
 > - **`Window.open()` は既定の実アダプタで実画面を開きます（実機未検証）。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`open()` は `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`close()` は `VirtualContainer.close()` を呼びます。実際に画面が表示されるか、close がいつ完了するかは未確認です。`close()` は要求時点で返るため、閉鎖直後の再 `open()` は失敗し得ます。`open()` は `async` なので、呼び出し側で catch しないと未処理の Promise rejection になります。
-> - **クリック通知を生成する UI も、アイテム保護もありません。** `Window` は最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` 行を `handleClick()` へ流します（Node.js 上で確認済み・実機未検証）。session-id は open ごとに作り直される `Window._inputSessionId`（公開 getter）で、`Window.id` の `window-N` ではありません。layout-generation は `Window._inputLayoutGeneration`（公開 getter）で、open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進みます。ページ変更前に生成され変更後に届いた行は `stale-layout-generation` として拒否され、世代を持たない旧3フィールド形式は受理されません。ただし `resource_pack/` はこの行を生成せず、行はプレイヤーが手入力できるため偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
+> - **クリック通知を生成する UI も、アイテム保護もありません。** `Window` は最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` 行を `handleClick()` へ流します（Node.js 上で確認済み・実機未検証）。session-id は open ごとに作り直される `Window._inputSessionId`（公開 getter）で、`Window.id` の `window-N` ではありません。layout-generation は `Window._inputLayoutGeneration`（公開 getter）で、open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進みます。ページ変更前に生成され変更後に届いた行は `stale-layout-generation` として拒否され、世代を持たない旧3フィールド形式は受理されません。この行を生成する UI は同梱しておらず、行はプレイヤーが手入力できるため偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
 > - **取り出し後の再描画で複製・消失が起こり得ます。** 表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれます。プレイヤーが取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます（実機未検証）。
 > - **実機で試す場合は、使い捨てワールドだけで行ってください。** 本番ワールドや配布用ワールドでは実行しないでください。アイテムの複製・消失を防ぐ仕組みは現行コアにありません。
-> - チャット通知を受けて `handleClick()` を呼ぶ経路だけは既定で接続されますが、通知を生成する UI 側は未実装で、実機未検証です。アイテム保護、`InventoryLink` のアイテム移動は実装していません。JSON UI は未検証の隔離テンプレート（`resource_pack/`）を同梱するだけで、チェスト画面へは接続していません。スケッチ内のクリック処理を動作する機能として前提にしないでください。
+> - チャット通知を受けて `handleClick()` を呼ぶ経路だけは既定で接続されますが、通知を生成する UI 側は未実装で、実機未検証です。アイテム保護、`InventoryLink` のアイテム移動は実装していません。JSON UI 連携は提供していません。スケッチ内のクリック処理を動作する機能として前提にしないでください。
 > - `VirtualContainer` は Bedrock Preview/Beta の Experimental API を前提とした設計です。
 
 ## 含まれるもの
@@ -41,7 +41,7 @@
 | `WindowBuilder.setLowerGui()` / `Window.setLowerGui()` | API 互換のため受け付けて `Window.lowerGui` に保持するが、下側領域へは描画しない | 下側 GUI を置き換えられる前提で読まない |
 | `InventoryLink` の読み書き・購読 | 実装済み | なし |
 | `InventoryLink.moveTo()` | 常に `InventoryLinkMoveRejectedError` | スケッチには移動処理を置いていない |
-| JSON UI / Resource Pack | パッケージには未検証の隔離テンプレート（`resource_pack/`）を同梱するが、チェスト画面へは未接続。`!invui:` 通知を生成する部品もない | スケッチはこれらを前提にしない。入力抑制・画面識別は動かず、クリック通知も生成されない |
+| JSON UI / Resource Pack | 同梱していない。`!invui:` 通知を生成する部品もない | スケッチはこれらを前提にしない。入力抑制・画面識別は動かず、クリック通知も生成されない |
 
 型レベルでは、パックした `dist` の宣言に対してスケッチを型検査できます。これは API の名前・型が公開面から消えていないことだけを確認するもので、スケッチのコメントや前提が実装と一致していること、ましてや実機で動くことは保証しません。手元で検査する場合は、**先に `npm run build` を実行して `dist`（`dist/index.d.ts` を含む）を作成**し、そのうえでスケッチ専用の一時設定をリポジトリ直下に置いて型検査します。`npm run build` が作るのはパッケージ本体であり、`examples/` をコンパイルするものではありません。
 
@@ -95,7 +95,7 @@ npx tsc -p tsconfig.examples-check.tmp.json
 
 1. ビルド済みの `invui-bedrock`（ES Module と `.d.ts`）。
 2. `@minecraft/server` を外部化したバンドル設定。
-3. 対象ゲーム版に合う `manifest.json` と Resource Pack の扱い。
+3. 対象ゲーム版に合う `manifest.json`。
 4. 実機検証で合格した範囲だけを使うサンプル。
 
 現時点でこのディレクトリのスケッチは実行できません。
