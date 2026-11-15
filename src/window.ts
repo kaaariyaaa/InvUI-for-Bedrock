@@ -3326,10 +3326,17 @@ export class Window {
     // A tab nested in a GuiLink or another tab stores its selection under
     // `children`/`tabs` instead of `tab`, so those fields select a nested tab
     // too and must revalidate the branch they reveal.
+    //
+    // Opening only resolves: a tab change delivered while `open()` is still
+    // running (for example another viewer of the same shared state switching
+    // tabs) must not make this Window write its own smaller range back. That
+    // would rewind the other viewer, exactly what `open()` promises not to do.
+    // The state is revalidated again when a tab is selected while open.
     if (
-      changed.includes("tab") ||
-      changed.includes("tabs") ||
-      changed.includes("children")
+      this.#status !== "opening" &&
+      (changed.includes("tab") ||
+        changed.includes("tabs") ||
+        changed.includes("children"))
     ) {
       this.#revalidateStateRanges = true;
     }

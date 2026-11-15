@@ -4023,6 +4023,82 @@ test("opening a shared window with a smaller content range does not rewind the o
   second.close();
 });
 
+test("a shared tab change while another window opens does not rewind its nested page", async () => {
+  const manager = new StateManager();
+  const adapter = new InMemoryTestAdapter();
+  const normalTab = () =>
+    Gui.normal({
+      structure: ["y"],
+      ingredients: { y: Item.simple(() => stack("minecraft:other")) },
+    });
+  const bigGui = Gui.tab({
+    tabs: [
+      Gui.paged({
+        structure: ["xx"],
+        ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: contentItems("big", 6),
+      }),
+      normalTab(),
+    ],
+  });
+
+  const first = sharedWindow(bigGui, manager, adapter, "open-tab-rewind");
+  await first.open();
+  const firstContainer = adapter.containers[0];
+  first.setState({ tab: 1 });
+  first.setState({ tab: 0, tabs: { 0: { page: 2 } } });
+  await tick();
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+
+  // While the second viewer's shared window is still opening, the first viewer
+  // switches tabs. That state change is not a content change: it must not make
+  // the opening window write its own smaller range back into the shared state.
+  let provoked = false;
+  const smallGui = Gui.tab({
+    tabs: [
+      Gui.paged({
+        structure: ["xx"],
+        ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [
+          Item.simple(() => {
+            if (!provoked) {
+              provoked = true;
+              first.setState({ tab: 1 });
+              first.setState({ tab: 0 });
+            }
+            return stack("minecraft:small_0");
+          }),
+          Item.simple(() => stack("minecraft:small_1")),
+        ],
+      }),
+      normalTab(),
+    ],
+  });
+  const second = Window.builder()
+    .setViewer(otherPlayer)
+    .setUpperGui(smallGui)
+    .setStateScope("shared")
+    .setStateKey("open-tab-rewind")
+    .setStateLifetime("session")
+    .setStateManager(manager)
+    .setContainerAdapter(adapter)
+    .setErrorHandler(() => {})
+    .build();
+
+  await second.open();
+  await tick();
+  assert.equal(adapter.containers[1].items[0].typeId, "minecraft:small_0");
+  assert.equal(
+    second.getState().tabs[0].page,
+    2,
+    "the opening window only renders its clamp, it does not store it",
+  );
+  assert.equal(first.getState().tabs[0].page, 2);
+  assert.equal(firstContainer.items[0].typeId, "minecraft:big_4");
+  first.close();
+  second.close();
+});
+
 test("selecting a tab whose content shrank while hidden revalidates its nested page", async () => {
   const adapter = new InMemoryTestAdapter();
   const child = Gui.paged({
