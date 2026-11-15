@@ -7,7 +7,7 @@ function setup() {
  let now=1700000000000, nextTimerId=1;
  const timers=new Map(),signals={};
  const subscribe=key=>({subscribe(handler){signals[key]=handler;}});
- class ItemStack {constructor(typeId,amount){this.typeId=typeId;this.amount=amount;this.nameTag='';}}
+ class ItemStack {constructor(typeId,amount){this.typeId=typeId;this.amount=amount;this.nameTag='';this.lore=[];}setLore(v){this.lore=v;}getLore(){return this.lore;}}
  const containers=[];
  const world={
    virtualContainerManager:{create({size,title}){
@@ -19,14 +19,17 @@ function setup() {
      containers.push(c);return c;
    }},
    beforeEvents:{chatSend:subscribe('chat')},
-   afterEvents:{virtualContainerClose:subscribe('close'),virtualContainerItemChange:subscribe('change'),playerLeave:subscribe('leave')}
+   afterEvents:{virtualContainerClose:subscribe('close'),virtualContainerItemChange:subscribe('change'),entityItemDrop:subscribe('drop'),playerLeave:subscribe('leave')}
  };
  const system={run(fn){fn();},runInterval(fn,interval){const id=nextTimerId++;timers.set(id,{fn,interval});return id;},clearRun(id){timers.delete(id);}};
  runInNewContext(SOURCE,{world,system,ItemStack,console,Date:{now:()=>now},Map,Number,Array,Set,RegExp,Error,Math,String});
  const player={id:'player-one',messages:[],sendMessage(value){this.messages.push(value);}};
  const chat=message=>{const event={message,sender:player,cancel:false};signals.chat(event);return event;};
  const tick=()=>{for(const [id,value] of [...timers])if(timers.has(id))value.fn();};
- const stack=(slot,amount)=>{const x=new ItemStack(slot%2?'minecraft:paper':'minecraft:stick',amount);x.nameTag='slot '+slot;return x;};
+ const stack=(slot,amount)=>{const x=new ItemStack(slot%2?'minecraft:paper':'minecraft:stick',amount);x.nameTag='slot '+slot;
+   const example=player.messages.find(m=>m.includes('Example full input:'));
+   const session=example?.match(/!invui:([^:\s]+):0:0:0/)?.[1];
+   x.setLore(['§0InvUI:transport:'+session+':'+slot]);return x;};
  const click=(slot,before,after)=>signals.change({player,slot,container:containers.at(-1),beforeItemStack:before,itemStack:after});
  return {player,chat,tick,stack,click,containers,timers,signals,setNow(n){now=n;}};
 }
@@ -54,6 +57,16 @@ test('abnormal item changes close the session without running a click',()=>{
  assert.equal(x.containers[0].viewers.length,0);
  assert.equal(x.chat('!invui info').cancel,true);
  assert.match(x.player.messages.at(-1),/No session/);
+});
+test('dropped transport items are cleaned up but unrelated drops remain',()=>{
+ const x=setup();x.chat('!invui test');x.tick();x.tick();
+ let removed=false, innocentRemoved=false;
+ x.signals.drop({entity:x.player,items:[
+  {getComponent(){return {itemStack:x.stack(2,1)};},remove(){removed=true;}},
+  {getComponent(){return {itemStack:{getLore(){return ['ordinary item'];}}};},remove(){innocentRemoved=true;}}
+ ]});
+ assert.equal(removed,true);
+ assert.equal(innocentRemoved,false);
 });
 test('the original chat route still works',()=>{
  const x=setup();x.chat('!invui test');x.tick();x.tick();

@@ -13,6 +13,8 @@ import { world, system, ItemStack } from '@minecraft/server';
 const PREFIX = '!invui:';
 // One-click transport uses only disposable, server-minted stacks. Never refill them while the UI is open.
 const TRANSPORT_STACK_SIZE = 64;
+const TRANSPORT_MARKER_PREFIX = '§0InvUI:transport:';
+function transportMarker(sessionId, slot) { return TRANSPORT_MARKER_PREFIX + sessionId + ':' + slot; }
 // Chat may still be covering the screen when chatSend runs. Retry for up to
 // ~12 seconds, spaced by 10 ticks (~0.5 seconds at 20 TPS).
 const OPEN_RETRY_INTERVAL_TICKS = 10;
@@ -109,6 +111,7 @@ function createSession(player) {
   for (let i = 0; i < size; i++) {
     const stack = new ItemStack(i % 2 ? 'minecraft:paper' : 'minecraft:stick', TRANSPORT_STACK_SIZE);
     stack.nameTag = `slot ${i}`;
+    stack.setLore([transportMarker(sessionId, i)]);
     container.setItem(i, stack);
   }
   const state = { container, sessionId, generation: 0, hits: 0, attempts: 0, retryRunId: undefined,
@@ -226,6 +229,8 @@ try {
     const isPress = Number.isSafeInteger(slot) && slot >= 0 && slot < st.remaining.length &&
       before?.typeId === expectedKind && after?.typeId === expectedKind &&
       before?.nameTag === expectedTag && after?.nameTag === expectedTag &&
+      before?.getLore?.()[0] === transportMarker(st.sessionId, slot) &&
+      after?.getLore?.()[0] === transportMarker(st.sessionId, slot) &&
       Number.isSafeInteger(before.amount) && Number.isSafeInteger(after.amount) &&
       before.amount === st.remaining[slot] && before.amount > 1 &&
       after.amount === before.amount - 1;
@@ -246,6 +251,26 @@ try {
     }, 'slot');
   });
 } catch (error) { console.warn('No virtualContainerItemChange support:',error); }
+// Clean up only the exact transient button transport items minted for this
+// player's current session. Never remove an unrelated vanilla item drop.
+try {
+  world.afterEvents.entityItemDrop.subscribe(ev => {
+    const st = sessions.get(ev.entity?.id);
+    if (!st) return;
+    for (const dropped of ev.items ?? []) {
+      try {
+        const stack = dropped.getComponent('minecraft:item')?.itemStack;
+        const marker = stack?.getLore?.()[0];
+        if (typeof marker === 'string' &&
+            marker.startsWith(TRANSPORT_MARKER_PREFIX + st.sessionId + ':')) {
+          dropped.remove();
+        }
+      } catch (error) {
+        console.warn('InvUI drop transport cleanup failed:', error);
+      }
+    }
+  });
+} catch (error) { console.warn('No entityItemDrop support:', error); }
 try {
   world.afterEvents.playerLeave.subscribe(ev => {
     forgetSession(ev.playerId);
