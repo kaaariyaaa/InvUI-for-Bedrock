@@ -29,7 +29,7 @@
 
 ## 何をするか
 
-`tests/manual-bedrock/data-driven-resource-pack/` の判定プローブと同じ候補パネルに、
+`resource_pack/` の接続テンプレートと同じ候補パネルに、
 既存の `invui_probe.invui_probe_root`（`ui/invui.json` のラベルと実験的 `button.send` 部品）を
 `insert_front` で差し込みます。加えて、適用範囲が全画面に及び得ることとブロッカーの限界を
 画面内に示す警告ラベルを重ねます。**透明ブロッカー**は、デスクトップではスロット領域の
@@ -90,10 +90,8 @@ node resource_pack/experimental/connect-data-driven/check.mjs
    `ui/invui_connect_data_driven.json` の 3 行を追加する（既存の登録は残す）。
 4. 対象パックを Development Resource Pack として使い捨てワールドで有効化し、
    Experimental / Beta APIs を有効にする。`VirtualContainer` を開くには
-   npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要
-   （リポジトリ専用の `tests/manual-bedrock/API-NOTES.md` 第 1 節・第 8 節。npm tarball 非同梱）。
-5. `VirtualContainer` はリポジトリ専用の raw probe（`tests/manual-bedrock/probe/`。npm tarball 非同梱）の
-   `!invui open 27` で開く。`Window.open()` を許可する独自アダプタやテスト用コードは使わない。
+   npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要。
+5. `VirtualContainer` は自前の raw probe の `!invui open 27` などで開く。`Window.open()` を許可する独自アダプタやテスト専用コードは使わない。
 6. 表示された警告ラベル・`InvUI probe (experimental, unverified)`・ボタンの有無、
    末尾が `.desktop` か `.pocket` か、通常チェストでの表示、画面サイズ・UI スケール・言語・
    入力方式を記録する。ボタン押下でチャットが送られるかも目視で確認する
@@ -127,7 +125,7 @@ node resource_pack/experimental/connect-data-driven/check.mjs
 | ボタンや inventory slot が押せない | ブロッカーがそれらも覆っている**可能性がある**。スロット単位の選択はできない |
 | プレイヤー側のインベントリ・ホットバーは動く | 想定どおり（ブロッカーはプレイヤー側を覆わない）。保護の不合格ではないが、保護でもない |
 | コントローラーでフォーカスが下のスロットへ移り操作できる | ブロッカーがフォーカス対象を除去できていない**可能性がある**。PC の結果を流用しない |
-| ボタンでチャットが送られた | `button.send` がこの画面で成立する**可能性がある**。ライブラリ側の受信経路（`Window` の `!invui:` 4 フィールド解析）は Node.js テスト済み・実機未検証だが、このパックからその形式が送られる保証はなく、動作を保証しない |
+| ボタンでチャットが送られた | `button.send` がこの画面で成立する**可能性がある**。ライブラリ側の受信経路（`Window` の `!invui:` 4 フィールド解析）は Node.js 上で確認済み・実機未検証だが、このパックからその形式が送られる保証はなく、動作を保証しない |
 
 ## 既知の制約
 

@@ -3,10 +3,10 @@
 > [!WARNING]
 > **このディレクトリのコードはビルド・実行の対象外です。**
 >
-> - このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）に含まれず、`npm run build` もここをコンパイルしません。ただし `npm test` の `tests/package.test.mjs` が、パックした公開型（`dist/index.d.ts`）に対して `usage-sketch.ts` を型検査します（実行はしません）。スケッチのコメントや記述内容が実装と一致しているかは、この型検査では判定できません。
-> - コア（レイアウト計算・アイテム・状態管理・Window のライフサイクル）は実装済みで Node.js 上でテストされていますが、**実機では一切検証していません**。
+> - このディレクトリは `tsconfig.json` の `include`（`src/**/*.ts`）に含まれず、`npm run build` もここをコンパイルしません。型検査は自動化されていません。スケッチのコメントや記述内容が実装と一致しているかは、型検査でも判定できません。
+> - コア（レイアウト計算・アイテム・状態管理・Window のライフサイクル）は実装済みで Node.js 上で確認されていますが、**実機では一切検証していません**。
 > - **`Window.open()` は既定の実アダプタで実画面を開きます（実機未検証）。** `minecraftVirtualContainerAdapter` は `canOpenScreens = true` を返し、`open()` は `VirtualContainer` を作成して `VirtualContainer.open()` を呼び、`close()` は `VirtualContainer.close()` を呼びます。実際に画面が表示されるか、close がいつ完了するかは未確認です。`close()` は要求時点で返るため、閉鎖直後の再 `open()` は失敗し得ます。`open()` は `async` なので、呼び出し側で catch しないと未処理の Promise rejection になります。
-> - **クリック通知を生成する UI も、アイテム保護もありません。** `Window` は最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` 行を `handleClick()` へ流します（Node.js テスト済み・実機未検証）。session-id は open ごとに作り直される `Window._inputSessionId`（公開 getter）で、`Window.id` の `window-N` ではありません。layout-generation は `Window._inputLayoutGeneration`（公開 getter）で、open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進みます。ページ変更前に生成され変更後に届いた行は `stale-layout-generation` として拒否され、世代を持たない旧3フィールド形式は受理されません。ただし `resource_pack/` はこの行を生成せず、行はプレイヤーが手入力できるため偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
+> - **クリック通知を生成する UI も、アイテム保護もありません。** `Window` は最初の `open()` で `world.beforeEvents.chatSend` を購読し、`!invui:<session-id>:<layout-generation>:<slot>:<sequence>` 行を `handleClick()` へ流します（Node.js 上で確認済み・実機未検証）。session-id は open ごとに作り直される `Window._inputSessionId`（公開 getter）で、`Window.id` の `window-N` ではありません。layout-generation は `Window._inputLayoutGeneration`（公開 getter）で、open ごとに 0 から始まり、ページ/行/タブ/スロット要素の変更で進みます。ページ変更前に生成され変更後に届いた行は `stale-layout-generation` として拒否され、世代を持たない旧3フィールド形式は受理されません。ただし `resource_pack/` はこの行を生成せず、行はプレイヤーが手入力できるため偽装可能です。`Item` の `button` 分類はハンドラー実行ガードにすぎません。画面のアイテムはそのまま取り出せます。
 > - **取り出し後の再描画で複製・消失が起こり得ます。** 表示アイテムは実際の `VirtualContainer` に `setItem()` で書き込まれます。プレイヤーが取り出した後に `refresh()`・状態更新・要素の更新通知で再描画が走ると、同じアイテムが書き戻されて複製され得ます。逆に、プレイヤーが入れたアイテムを再描画が上書きすると消失し得ます（実機未検証）。
 > - **実機で試す場合は、使い捨てワールドだけで行ってください。** 本番ワールドや配布用ワールドでは実行しないでください。アイテムの複製・消失を防ぐ仕組みは現行コアにありません。
 > - チャット通知を受けて `handleClick()` を呼ぶ経路だけは既定で接続されますが、通知を生成する UI 側は未実装で、実機未検証です。アイテム保護、`InventoryLink` のアイテム移動は実装していません。JSON UI は未検証の隔離テンプレート（`resource_pack/`）を同梱するだけで、チェスト画面へは接続していません。スケッチ内のクリック処理を動作する機能として前提にしないでください。
@@ -33,7 +33,7 @@
 
 | 項目 | 現行実装 | スケッチとの差 |
 |---|---|---|
-| `Gui` / `Structure` / `Markers` / `GuiLink` | 実装済み。Node.js のテストで確認済み | なし |
+| `Gui` / `Structure` / `Markers` / `GuiLink` | 実装済み。Node.js 上で確認済み | なし |
 | `Item` / `ItemBuilder` / `Item.simple()` / `Item.builder()` / クリックハンドラー | 実装済み。ハンドラーは登録順に呼ばれる | 自動接続の chatSend 通知から `handleClick()` へ届くが、通知を生成する UI は未実装で、手入力偽装・実機未検証が残る。それ以外は `Window.handleClick(slot)` を直接呼ぶ |
 | `ClickContext` | `player`、`slot`、`window: Window` | なし |
 | `Window` の設定・状態・`close()` | 実装済み | 画面を開く経路が既定で有効（実機未検証） |
@@ -43,7 +43,7 @@
 | `InventoryLink.moveTo()` | 常に `InventoryLinkMoveRejectedError` | スケッチには移動処理を置いていない |
 | JSON UI / Resource Pack | パッケージには未検証の隔離テンプレート（`resource_pack/`）を同梱するが、チェスト画面へは未接続。`!invui:` 通知を生成する部品もない | スケッチはこれらを前提にしない。入力抑制・画面識別は動かず、クリック通知も生成されない |
 
-型レベルでは、`npm test` の package テストがパックした `dist` の宣言に対してスケッチを型検査します。これは API の名前・型が公開面から消えていないことだけを確認するもので、スケッチのコメントや前提が実装と一致していること、ましてや実機で動くことは保証しません。手元で再検査する場合は、**先に `npm run build` を実行して `dist`（`dist/index.d.ts` を含む）を作成**し、そのうえでスケッチ専用の一時設定をリポジトリ直下に置いて型検査します。`npm run build` が作るのはパッケージ本体であり、`examples/` をコンパイルするものではありません。
+型レベルでは、パックした `dist` の宣言に対してスケッチを型検査できます。これは API の名前・型が公開面から消えていないことだけを確認するもので、スケッチのコメントや前提が実装と一致していること、ましてや実機で動くことは保証しません。手元で検査する場合は、**先に `npm run build` を実行して `dist`（`dist/index.d.ts` を含む）を作成**し、そのうえでスケッチ専用の一時設定をリポジトリ直下に置いて型検査します。`npm run build` が作るのはパッケージ本体であり、`examples/` をコンパイルするものではありません。
 
 ```json
 {
@@ -78,28 +78,24 @@ npx tsc -p tsconfig.examples-check.tmp.json
 - `close()` は `VirtualContainer.close()` を呼びます。close は「要求した」時点で返り、実際の close イベントは別 tick になることがあるため、直後に同じプレイヤーへ `open()` し直すと失敗し得ます。
 - `open()` は Container の作成・描画・open のどこで失敗しても reject し、エラーハンドラーにも報告します。スケッチの `openShop()` は `await window.open()` を `try` / `catch` で囲み、未処理 rejection にはなりません。
 - 画面が開いた状態では、表示専用アイテムをプレイヤーが取り出せます（実機未検証）。取り出した後に `refresh()`（状態更新や購読による再描画）が走ると、同じアイテムが `setItem()` で再び書き込まれるため、複製が起こり得ます。逆にプレイヤーが入れたアイテムが上書きされて消失し得ます。
-- 既定では `window.open()` した Window が `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流します（Node.js テスト済み・実機未検証）。ただし UI 側がその行を生成する実装はなく、行は手入力で偽装でき、入力抑制・アイテム保護もありません。ボタン押下が通知を生むかは未検証で、この経路を安全な機能として扱わないでください。
-- 退出時は、最初の `open()` で購読した `world.afterEvents.playerLeave` が退出したプレイヤーの Window（`opening` / `open`）を `PlayerLeft` で close します（Node.js テスト済み・実機未検証）。自動再オープンはしません。
-- 死亡時も、同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で close します（Node.js テスト済み・実機未検証）。プレイヤー以外や他プレイヤーの死亡は無視し、アダプタには close を要求しません。自動再オープンはしません。
-- ディメンション移動時は同じ `open()` で購読した `world.afterEvents.playerDimensionChange` が対象プレイヤーの Window を `ServerClosed` で、スペクテイター切替時は `world.afterEvents.playerGameModeChange` が `toGameMode === "Spectator"` のときだけ `PlayerSpectating` で close します（Node.js テスト済み・実機未検証）。どちらもプレイヤーが有効なのでアダプタにも close を要求し、自動再オープンはしません。
-- shutdown 時は、最初の `open()` で購読した `system.beforeEvents.shutdown` が `opening` / `open` の全 Window を `ServerClosed` で close します（Node.js テスト済み・実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面とアダプタ購読の破棄はエンジンに任せ、ローカル資源だけを解放します。close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）も同じ restricted なコールバック内で実行され、close ハンドラーは 1 回だけ呼ばれます。そこで `open()` しても画面は開かず `closed` のままで、shutdown 後の `open()` はモジュールの生存期間中ずっと抑止されます。2 回目の shutdown は何もしません。shutdown API がない環境では購読せず、Window は通常どおり動きます。スクリプト再読み込み時の後始末は未対応です。
+- 既定では `window.open()` した Window が `world.beforeEvents.chatSend` を購読し、`!invui:` 行を `handleClick()` へ流します（Node.js 上で確認済み・実機未検証）。ただし UI 側がその行を生成する実装はなく、行は手入力で偽装でき、入力抑制・アイテム保護もありません。ボタン押下が通知を生むかは未検証で、この経路を安全な機能として扱わないでください。
+- 退出時は、最初の `open()` で購読した `world.afterEvents.playerLeave` が退出したプレイヤーの Window（`opening` / `open`）を `PlayerLeft` で close します（Node.js 上で確認済み・実機未検証）。自動再オープンはしません。
+- 死亡時も、同じ `open()` で購読した `world.afterEvents.entityDie` が、死亡した entity の id が viewer id と一致する Window だけを `PlayerDied` で close します（Node.js 上で確認済み・実機未検証）。プレイヤー以外や他プレイヤーの死亡は無視し、アダプタには close を要求しません。自動再オープンはしません。
+- ディメンション移動時は同じ `open()` で購読した `world.afterEvents.playerDimensionChange` が対象プレイヤーの Window を `ServerClosed` で、スペクテイター切替時は `world.afterEvents.playerGameModeChange` が `toGameMode === "Spectator"` のときだけ `PlayerSpectating` で close します（Node.js 上で確認済み・実機未検証）。どちらもプレイヤーが有効なのでアダプタにも close を要求し、自動再オープンはしません。
+- shutdown 時は、最初の `open()` で購読した `system.beforeEvents.shutdown` が `opening` / `open` の全 Window を `ServerClosed` で close します（Node.js 上で確認済み・実機未検証）。このコールバックは restricted execution で走るため、`VirtualContainer.close()` とアダプタのイベント購読解除は呼ばず、画面とアダプタ購読の破棄はエンジンに任せ、ローカル資源だけを解放します。close ハンドラー（およびそこで例外が起きた場合のエラーハンドラー）も同じ restricted なコールバック内で実行され、close ハンドラーは 1 回だけ呼ばれます。そこで `open()` しても画面は開かず `closed` のままで、shutdown 後の `open()` はモジュールの生存期間中ずっと抑止されます。2 回目の shutdown は何もしません。shutdown API がない環境では購読せず、Window は通常どおり動きます。スクリプト再読み込み時の後始末は未対応です。
 
 ## 読み方
 
 - スケッチは設計意図の確認用です。実装済み・動作確認済みという意味ではありません。
 - クリックハンドラーや `InventoryLink` の利用例は、実機試験に合格するまで有効化しないでください。
 - 画面を開く実験は、使い捨てワールドでのみ行ってください。貴重なアイテムを持ち込まないでください。表示アイテムの取り出しと再描画による複製・消失リスクがあります。
-- 実際に動かせる例は、実機検証済みのテストビルドが用意された後に別途追加します。その際も、未検証機能を「動作例」として提示しないようにしてください。
+- 実際に動かせる例は、実機検証済みのビルドが用意された後に別途追加します。その際も、未検証機能を「動作例」として提示しないようにしてください。
 
 ## 将来の実行可能な例に必要なもの
 
 1. ビルド済みの `invui-bedrock`（ES Module と `.d.ts`）。
 2. `@minecraft/server` を外部化したバンドル設定。
 3. 対象ゲーム版に合う `manifest.json` と Resource Pack の扱い。
-4. 実機テストで合格した範囲だけを使うサンプル。
+4. 実機検証で合格した範囲だけを使うサンプル。
 
-現時点でこのディレクトリのスケッチは実行できません。実行可能な自動テストは `tests/` 配下にあります（CLI テストは次のコマンドで実行できます）。
-
-```bash
-node tests/manual-bedrock/cli.test.mjs
-```
+現時点でこのディレクトリのスケッチは実行できません。

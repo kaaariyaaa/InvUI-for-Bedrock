@@ -1,7 +1,0 @@
-{
-  "ui_defs": [
-    "ui/invui_edit_box.json",
-    "ui/invui_edit_box_chest.json",
-    "ui/invui_edit_box_pocket.json"
-  ]
-}

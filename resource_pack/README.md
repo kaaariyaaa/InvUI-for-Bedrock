@@ -86,7 +86,7 @@ resource_pack/
 
 したがって、**「押した slot・session・sequence を JSON UI が自動で送る」実装は、根拠のない binding を発明しない限り作る方法を確認できていません。** このプローブは、その未確認の部分を実装したふりをせず、**手入力の固定ペイロードで送信経路だけを切り分ける**ためのものです。
 
-`button.drop_one` → コンテナ変化、カーソル、マーカーアイテムを含む候補の比較と、実機で必要な観測項目は、リポジトリ専用の `tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md`（npm tarball 非同梱）にまとめています。自動通知は実装済みではありません。
+`button.drop_one` → コンテナ変化、カーソル、マーカーアイテムを含む候補の比較と、実機で必要な観測項目は、手元のメモにまとめておく必要があります。自動通知は実装済みではありません。
 
 ### 何をするか
 
@@ -95,7 +95,7 @@ resource_pack/
 送る形は **`!invui:<session-id>:<layout-generation>:<slot>:<sequence>`** です。`Window.id`（`window-N`）は使いません。
 
 - **session-id**: `Window` が `open()` の成功ごとに作り直す `_inputSessionId` を 1 フィールド目に入れます。
-- **layout-generation**: 通知を生成した時点のクリック可能レイアウトの世代 `_inputLayoutGeneration` を 2 フィールド目に入れます。open ごとに `0` から始まり、ページ・行・タブ・スロット要素の変更で進みます。**ページ変更前に控えた値のまま送ると、変更後に届いた通知は `stale-layout-generation` として拒否されます。** さらに、世代が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは入力ゲートが closed で、通知は button が無いものとして拒否されハンドラーは実行されません。`placeholder` を指定しない非同期 provider が未解決の間、Container 再生成中（`setTitle()` / サイズ変更 / `setUpperGui()`）、provider または `setItem()` が失敗したスロットも同じゲートで閉じます（失敗スロットは後で書き込みが成功するまで button にならない）。close・再オープンでゲートはリセットされます。Node.js テストのみで実機未検証です。
+- **layout-generation**: 通知を生成した時点のクリック可能レイアウトの世代 `_inputLayoutGeneration` を 2 フィールド目に入れます。open ごとに `0` から始まり、ページ・行・タブ・スロット要素の変更で進みます。**ページ変更前に控えた値のまま送ると、変更後に届いた通知は `stale-layout-generation` として拒否されます。** さらに、世代が一致していても、その世代のレイアウトが描画完了して画面に書かれるまでは入力ゲートが closed で、通知は button が無いものとして拒否されハンドラーは実行されません。`placeholder` を指定しない非同期 provider が未解決の間、Container 再生成中（`setTitle()` / サイズ変更 / `setUpperGui()`）、provider または `setItem()` が失敗したスロットも同じゲートで閉じます（失敗スロットは後で書き込みが成功するまで button にならない）。close・再オープンでゲートはリセットされます。Node.js 上での確認のみで実機未検証です。
 - **slot**: 現在のレイアウトで button mode の論理スロット（0〜53）へ合わせます。
 - **sequence**: 同じ session 内で厳密に増やします（最初の受理は `1`）。
 
@@ -140,15 +140,8 @@ resource_pack/
 - **キーボード入力を奪い得ます。** chat と同じ `#message_text_box` と `always_listening` を使うため、画面を開いている間、チャットやキー操作を壊す可能性があります。入力途中のチャットを残さないでください。
 - **自動送信ではありません。** 固定文字の初期表示、`bindings`、collection、slot / session / layout-generation / sequence の自動生成はありません。
 - **偽装可能です。** 通知はプレイヤーが手入力でき、`sender` 以外は信用できません。bridge の session / layout-generation / sequence 検査も認証ではありません。
-- **通常チェストの移動が壊れたら即時中止。** 他の手動プローブ（`tests/manual-bedrock/edit-box-resource-pack/` など）と同時に有効化しないでください。既定の接続（警告ラベルと `invui_probe`）と同じパネルへ差し込むため、ラベルやボタンが重なり得ます。単独試験を推奨します。
+- **通常チェストの移動が壊れたら即時中止。** 他の手動プローブと同時に有効化しないでください。既定の接続（警告ラベルと `invui_probe`）と同じパネルへ差し込むため、ラベルやボタンが重なり得ます。単独試験を推奨します。
 
-構造チェック（実機の代替ではありません）:
-
-```bash
-node --test tests/resource-pack-ui.test.mjs
-```
-
-確認できるのは、既定の `_ui_defs.json` に登録されていないこと、text input が chat と同じ 2 つの識別子だけを使っていること、初期文字・`bindings`・collection・発明した slot/session binding がないこと、ボタンが `button.send` だけを発火すること、README に制約と出典が残っていることです。実機での表示・入力・送信は確認できません。
 
 ## `ui/invui_grid_input.json`（自動コンテナ変更プローブ／オプトイン・未登録）
 
@@ -199,13 +192,6 @@ node --test tests/resource-pack-ui.test.mjs
 }
 ```
 
-構造チェック（実機の代替ではありません）:
-
-```bash
-node --test tests/resource-pack-ui.test.mjs
-```
-
-確認できるのは、既定の `_ui_defs.json` に登録されていないこと、デスクトップの `panel_top_half` の `item_grid` と同じ位置・サイズ・コレクションを参照していること、通常クリックが `button.drop_one` と `button.container_slot_hovered` だけへ向くこと、`button.send`・text box・`#collection_index` などの発明した binding がないこと、README に根拠・制約・影響範囲が残っていることです。**表示・クリック・ドロップ・イベント受信・close の挙動は確認できません。**
 
 ## `experimental/connect-data-driven/`（隔離コピー・独立した実験用）
 
@@ -269,7 +255,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
   - 内容が同梱テンプレートと同一なら、何も書き換えず「導入済み」と報告します。
   - 内容が異なる場合は**競合として中断**し、テンプレートと既存内容の差分を表示します。終了コードは `1` です。
 - `ui/` がファイルとして存在する、親ディレクトリを辿れない、導入先の検査にエラーがある（`manifest.json` がない、JSON として壊れている等）、などの場合は書き込み前に中断します。
-- 書き込みはファイルごとに一時ファイルへ行い、完成後にだけ排他的に配置します。失敗した場合は追加済みファイル・一時ファイル・この CLI が作成した空ディレクトリを削除する**ロールバックを試みます**が、**ロールバック自体が失敗しうる**ため部分適用が残る可能性があります。`npm test` はシミュレートした失敗経路でロールバックを確認するだけで、すべてのファイルシステム障害を再現しません。
+- 書き込みはファイルごとに一時ファイルへ行い、完成後にだけ排他的に配置します。失敗した場合は追加済みファイル・一時ファイル・この CLI が作成した空ディレクトリを削除する**ロールバックを試みます**が、**ロールバック自体が失敗しうる**ため部分適用が残る可能性があります。
 - 既存ファイルを変更しないため、既存内容のバックアップは不要です。ただし実験前に対象 Resource Pack 全体のバックアップを取ってください。導入後に元へ戻す場合は、追加された 3 ファイルを削除してください（`ui/` をこの CLI が作成した場合は、空なら削除できます）。
 - `ui/_ui_defs.json` と `ui/chest_screen.json` は変更しません（接続の登録は上記のとおり手動）。
 
@@ -286,9 +272,9 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を送って観察する。session-id は開いた `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration` をスクリプトから表示して取得し、open のたび・ページ変更のたびに読み直す（「session-id と layout-generation の取得手順」）。slot / session / layout-generation / sequence の自動生成はできない。既定 100 ms 間隔（10 回/秒）を超える連投は `rate-limited` で拒否される。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
 6. `ui/invui_grid_input.json` を使う場合は、既定の接続 2 ファイルを外した単独パックで、**使い捨てのマーカーアイテムだけ**をグリッドに置き、クリックごとにドロップ・スロット変化・`VirtualContainerItemChangeAfterEvent`・画面 close のどれが起きるかを記録する。`data_driven_container.desktop_panel` を使う全画面に影響し得る。pocket は対象外。通常画面への影響とアイテム消失が出た時点で中止する。**現行コアは itemChange をクリックとして扱わない**ため、このプローブ単体で `handleClick()` が走ることはない。
 
-画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細はリポジトリ専用の `tests/manual-bedrock/data-driven-resource-pack/README.md`（npm tarball 非同梱）を参照してください。
+画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。
 
-これらは `tests/manual-bedrock/` の手順と CHECKLIST で記録してください。合格するまで「チェスト画面で動く」「安全」と表現しないでください。
+これらは手元の手順とチェックリストで記録してください。合格するまで「チェスト画面で動く」「安全」と表現しないでください。
 
 ## 既知の制約
 
@@ -298,7 +284,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 - **アイテム保護・入力抑制・画面終了処理は未完成**です。表示アイテムの取り出し、再描画による複製・消失、チャット送信の成否は未検証です。
 - CLI が導入するのは接続込みの 3 ファイルです。既存 Resource Pack の `_ui_defs.json` への登録は手動です。
 - `generate-resource-pack` は接続込みの 5 ファイルを生成し、`_ui_defs.json` も登録済みですが、実機未検証です。
-- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id / layout-generation は開発者スクリプトが `Window._inputSessionId` / `Window._inputLayoutGeneration` を表示して取得します（JSON UI からは取得できません）。**入力ゲート**: 世代が一致していても、描画完了前・`placeholder` を指定しない未解決 provider・Container 再生成中・失敗スロットは button として扱われず、通知は拒否されます（Node.js テストのみ、実機未検証）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
+- `ui/invui_controls.json` は**手入力の静的ペイロード送信プローブ**で、既定では未登録・未接続・CLI 対象外です。JSON UI から slot / session / layout-generation / sequence を自動生成して送る方式は根拠がなく、このプローブでも行いません。現在の session-id / layout-generation は開発者スクリプトが `Window._inputSessionId` / `Window._inputLayoutGeneration` を表示して取得します（JSON UI からは取得できません）。**入力ゲート**: 世代が一致していても、描画完了前・`placeholder` を指定しない未解決 provider・Container 再生成中・失敗スロットは button として扱われず、通知は拒否されます（Node.js 上での確認のみ、実機未検証）。有効化するとキーボード入力を奪い得るため、使い捨てワールドでのオプトイン検証にだけ使ってください。
 - `ui/invui_grid_input.json` は**自動コンテナ変更プローブ**で、既定では未登録・未接続・CLI 対象外です。通常クリックを `button.drop_one` へ付け替えるため、**1 クリックごとにアイテムが 1 個ドロップされ得ます**（保護ではありません）。`button.drop_one` を通常クリックから発火させる書式と、オーバーレイが下の slot を対象にできるかは未検証です。サーバー側で itemChange をクリックとして処理する実装はなく、現行コアは itemChange を危険として close します。対象は `data_driven_container.desktop_panel` のみで、**同パネルを使う全画面に影響し得ます**。pocket は対象外です。既定の接続とは併用しないでください。
 - 既存 Resource Pack との競合をゼロにはできません。追加するファイルは最小限ですが、無影響を保証するものではありません。
 - `manifest.json` の UUID は固定のプレースホルダです。同じ内容のパックを複数入れると UUID が衝突し得ます。

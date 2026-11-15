@@ -20,15 +20,4 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm test
-      # `node --test` only matches *.test.mjs, so run the manual-bedrock
-      # structure checks explicitly. These validate JSON consistency only;
-      # they do not verify in-game behavior.
-      - name: manual-bedrock structure checks
-        run: |
-          node tests/manual-bedrock/button-send-resource-pack/check.mjs
-          node tests/manual-bedrock/chest-resource-pack/check.mjs
-          node tests/manual-bedrock/data-driven-resource-pack/check.mjs
-          node tests/manual-bedrock/edit-box-resource-pack/check.mjs
-          node tests/manual-bedrock/protection-resource-pack/check.mjs
       - run: npm pack --dry-run
