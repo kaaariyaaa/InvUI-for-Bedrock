@@ -6768,36 +6768,63 @@ function pagedPageButtons(viewer, clicks) {
     .build();
 }
 
-test("a line minted from the generation read after setState targets the state's page", async () => {
+test("a line minted after setState is discarded until the state's page is rendered", async () => {
   const viewer = { id: "chat-setstate-gap", name: "Gap" };
   const clicks = [];
   const window = pagedPageButtons(viewer, clicks);
 
   await window.open();
 
-  // The state already selects page 1. Reading the documented getter and sending
-  // the line in the same timing (before the refresh microtask) must name the
-  // page the state selected, not the page still on screen.
+  // The state already selects page 1, but page 0 is still on screen. The new
+  // generation names a layout that has no button on screen yet, so input must
+  // fail closed instead of running page 1's handler while page 0 is displayed.
   window.setState({ page: 1 });
   assert.equal(
     window._inputLayoutGeneration,
     1,
     "a state change advances the clickable-layout generation synchronously",
   );
+  assert.equal(
+    window._inputSlotModes(),
+    null,
+    "no slot is a button while the state's layout is not on screen",
+  );
   const line = chatPayload(window, 0, 1);
   assert.equal(emitChatSend(line, { id: viewer.id }).cancel, true);
-  for (const callback of scheduledRuns.splice(0)) {
-    callback();
-  }
-  await tick();
-  await tick();
-  await tick();
-
+  await flushChatInput();
   assert.deepEqual(
     clicks,
-    ["page1"],
-    "the line must run the button of the page the state selected, not the old page's button",
+    [],
+    "a line for the pending page must not run its button before the page is shown",
   );
+
+  // Once the refresh microtask has applied page 1, the line form works again.
+  assert.deepEqual(window._inputSlotModes(), ["button"]);
+  await sendChat(window, 0, 2);
+  await flushChatInput();
+  assert.deepEqual(clicks, ["page1"]);
+  window.close();
+});
+
+test("handleClick during the state-to-render gap does not run a button that is not on screen", async () => {
+  const viewer = { id: "handle-setstate-gap", name: "HandleGap" };
+  const clicks = [];
+  const window = pagedPageButtons(viewer, clicks);
+
+  await window.open();
+
+  window.setState({ page: 1 });
+  assert.equal(
+    await window.handleClick(0),
+    false,
+    "the public click path fails closed while the state's layout is not on screen",
+  );
+  assert.deepEqual(clicks, []);
+
+  await tick();
+  await tick();
+  assert.equal(await window.handleClick(0), true, "the displayed page 1 accepts the click");
+  assert.deepEqual(clicks, ["page1"]);
   window.close();
 });
 

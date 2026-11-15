@@ -27,10 +27,12 @@
  * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
  * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
  * or slot-element change; a state change advances it as soon as `setState()`
- * accepts it, so the value read before the render catches up already names the
- * new page. A line that names an older generation is rejected, so one sent
- * before a page change cannot click a button on the new page. The old
- * three-field notification form has no generation and is not accepted.
+ * accepts it, so a line minted for the page still on screen fails even before
+ * the render catches up. The new generation names a layout that has no button
+ * on screen yet, so chat input and `handleClick()` fail closed until the render
+ * applies it: the player can only click what is displayed, never a button of
+ * the pending page. The old three-field notification form has no generation
+ * and is not accepted.
  * Nothing is installed when the game API (or a test double) omits
  * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
  * input fails closed.
@@ -1192,11 +1194,12 @@ export class Window {
   /**
    * Layout the current state resolves to while `#layout` still shows an earlier
    * one (a `setState()` page/line/tab change whose refresh microtask has not run
-   * yet). Chat input is validated against this layout and its generation, not
-   * the rendered one: otherwise a notification minted right after `setState()` —
-   * the documented way to read the generation for the manual probe — would be
-   * accepted under the previous generation and could invoke whatever button the
-   * old layout happened to have in that slot.
+   * yet). It exists so the generation advances once per logical layout (and an
+   * A -> B -> A round trip in one timing still invalidates B's line), but it is
+   * not a click target: while it is set, `#inputLayout()` returns undefined and
+   * chat input and `handleClick()` fail closed until the render applies it.
+   * Otherwise a line minted right after `setState()` could run a new page's
+   * button while the old page is still on screen.
    */
   #inputPendingLayout: ResolvedGuiLayout | undefined;
   /**
@@ -1375,19 +1378,23 @@ export class Window {
   }
 
   /**
-   * The layout chat input is validated against: the state the Window has already
-   * accepted (`#inputPendingLayout`) when it differs from the one still being
-   * rendered, otherwise the rendered layout. Both are updated synchronously
-   * with the state change; only the render itself is asynchronous.
+   * The layout input may target: the one the render applied and that is on
+   * screen. While `#inputPendingLayout` is set, the state names a different
+   * layout whose render has not caught up, so there is no clickable layout to
+   * target and both `_inputSlotModes()` and `_inputClick()` fail closed. Running
+   * a pending page's button before it is displayed would invoke a handler the
+   * player never saw, which is not the same operation as clicking the button on
+   * screen.
    */
   #inputLayout(): ResolvedGuiLayout | undefined {
-    return this.#inputPendingLayout ?? this.#layout;
+    return this.#inputPendingLayout === undefined ? this.#layout : undefined;
   }
 
   /**
-   * Internal: mode of every logical slot of the current layout, used by the
-   * automatic chat input bridge. Returns null when there is no layout, which
-   * the bridge treats as "no slot is a button" (fail closed).
+   * Internal: mode of every logical slot of the layout on screen, used by the
+   * automatic chat input bridge. Returns null when there is no rendered layout
+   * or the state's layout is still pending, which the bridge treats as "no slot
+   * is a button" (fail closed).
    */
   _inputSlotModes(): readonly InputSlotMode[] | null {
     const layout = this.#inputLayout();
@@ -1421,11 +1428,13 @@ export class Window {
    * bridge. It changes when the page/line/tab or the slot-element mapping
    * changes, and starts again at 0 for each open (the session id already
    * distinguishes opens). A state change advances it as soon as `setState()`
-   * accepts the change, not when the render catches up, so the documented
-   * "read the generation, then send" probe already names the new page. A
-   * notification that names an older generation is rejected even if the same
-   * slot is a button again, so a line minted before a page change cannot be
-   * applied after it. Not part of the exported API.
+   * accepts the change, not when the render catches up, so a line minted for
+   * the page still on screen is already stale. The new generation names a
+   * layout that is not displayed yet, so input is rejected until the render
+   * applies it (`#inputPendingLayout` keeps the gap fail closed). A notification
+   * that names an older generation is rejected even if the same slot is a
+   * button again, so a line minted before a page change cannot be applied after
+   * it. Not part of the exported API.
    */
   get _inputLayoutGeneration(): number | undefined {
     return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
@@ -2773,6 +2782,9 @@ export class Window {
 
   /**
    * Routes a click to the button Item currently rendered at the logical `slot`.
+   * While a state change names a layout the render has not applied yet, no
+   * button is on screen for that layout, so the click is discarded (fail
+   * closed) instead of invoking a handler the player cannot see.
    *
    * Only `button`-mode Items accept input (design 10.5); a display Item, even
    * one that carries handlers, returns false without enqueueing anything.
@@ -3398,8 +3410,9 @@ export class Window {
    * is only replaced asynchronously. In between, the old generation still names
    * the old layout, so a notification minted from the just-read generation would
    * pass validation and could invoke the button the *previous* page had in that
-   * slot. Advancing here (and remembering the layout the generation now names)
-   * makes that line either name the new layout or fail as stale.
+   * slot. Advancing here makes that line fail as stale; remembering the layout
+   * also keeps input fail closed (`#inputPendingLayout`) until the render
+   * displays it, so the new generation cannot run an unseen button either.
    *
    * The layout is compared against the last one the generation was advanced for
    * (`#inputPendingLayout`) so an A -> B -> A state round trip in one timing
@@ -3632,9 +3645,10 @@ export class Window {
     //
     // A synchronous state-change listener may already have advanced the
     // generation for exactly this layout (`pending`); advancing again would
-    // invalidate a notification that correctly names the new generation before
-    // the render caught up. A pending layout that is *not* the one being applied
-    // is superseded, so it must still invalidate its generation.
+    // make a notification minted after this render stale for no layout change.
+    // A pending layout that is *not* the one being applied is superseded, so it
+    // must still invalidate its generation. Clearing `pending` here is what
+    // makes the new layout clickable (see `#inputLayout`).
     if (
       pending !== undefined
         ? !sameClickableLayout(pending, layout)
