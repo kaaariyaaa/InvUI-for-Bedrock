@@ -6740,6 +6740,99 @@ test("a notification minted before a page change cannot click the new page's but
   window.close();
 });
 
+/**
+ * A paged Window whose slot 0 is a distinct button on each page. The state
+ * selects page 1 synchronously; the render and the refresh microtask have not
+ * run yet when the tests below read the generation and deliver a line.
+ */
+function pagedPageButtons(viewer, clicks) {
+  const pageZero = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_0"))
+    .addClickHandler(() => clicks.push("page0"))
+    .build();
+  const pageOne = Item.builder()
+    .setItemProvider(() => stack("minecraft:page_1"))
+    .addClickHandler(() => clicks.push("page1"))
+    .build();
+  return Window.builder()
+    .setViewer(viewer)
+    .setUpperGui(
+      Gui.paged({
+        structure: ["."],
+        ingredients: { ".": Markers.CONTENT_LIST_SLOT_HORIZONTAL },
+        content: [pageZero, pageOne],
+      }),
+    )
+    .setContainerAdapter(new InMemoryTestAdapter())
+    .setErrorHandler(() => {})
+    .build();
+}
+
+test("a line minted from the generation read after setState targets the state's page", async () => {
+  const viewer = { id: "chat-setstate-gap", name: "Gap" };
+  const clicks = [];
+  const window = pagedPageButtons(viewer, clicks);
+
+  await window.open();
+
+  // The state already selects page 1. Reading the documented getter and sending
+  // the line in the same timing (before the refresh microtask) must name the
+  // page the state selected, not the page still on screen.
+  window.setState({ page: 1 });
+  assert.equal(
+    window._inputLayoutGeneration,
+    1,
+    "a state change advances the clickable-layout generation synchronously",
+  );
+  const line = chatPayload(window, 0, 1);
+  assert.equal(emitChatSend(line, { id: viewer.id }).cancel, true);
+  for (const callback of scheduledRuns.splice(0)) {
+    callback();
+  }
+  await tick();
+  await tick();
+  await tick();
+
+  assert.deepEqual(
+    clicks,
+    ["page1"],
+    "the line must run the button of the page the state selected, not the old page's button",
+  );
+  window.close();
+});
+
+test("a page round trip in one timing rejects a line minted for the transient page", async () => {
+  const viewer = { id: "chat-setstate-aba", name: "AbaState" };
+  const clicks = [];
+  const window = pagedPageButtons(viewer, clicks);
+
+  await window.open();
+
+  // The state goes to page 1 (not rendered) and back to page 0 in one timing.
+  // A line minted from the generation read while the state was on page 1 must
+  // not become valid again when the state returns: otherwise it would click the
+  // page-0 button in that slot although it was minted for the page-1 button.
+  window.setState({ page: 1 });
+  const transient = chatPayload(window, 0, 1);
+  window.setState({ page: 0 });
+  assert.equal(
+    window._inputLayoutGeneration,
+    2,
+    "the round trip advances the generation once per logical page change",
+  );
+
+  assert.equal(emitChatSend(transient, { id: viewer.id }).cancel, true);
+  await flushChatInput();
+  assert.deepEqual(clicks, [], "the transient page's line must not click the page that returned");
+
+  // A line minted after the round trip is accepted for page 0.
+  await sendChat(window, 0, 2);
+  await flushChatInput();
+  assert.deepEqual(clicks, ["page0"]);
+
+  window.close();
+});
+
 test("a slot element swap on the same page invalidates a notification queued for the old element", async () => {
   const viewer = { id: "chat-swap", name: "Swapper" };
   const adapter = new InMemoryTestAdapter();

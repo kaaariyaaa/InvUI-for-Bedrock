@@ -26,9 +26,11 @@
  * delayed line from an earlier open (or from before a script reload, when
  * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
  * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
- * or slot-element change; a line that names an older generation is rejected,
- * so one sent before a page change cannot click a button on the new page. The
- * old three-field notification form has no generation and is not accepted.
+ * or slot-element change; a state change advances it as soon as `setState()`
+ * accepts it, so the value read before the render catches up already names the
+ * new page. A line that names an older generation is rejected, so one sent
+ * before a page change cannot click a button on the new page. The old
+ * three-field notification form has no generation and is not accepted.
  * Nothing is installed when the game API (or a test double) omits
  * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
  * input fails closed.
@@ -957,6 +959,23 @@ function sameSlotElements(
   return true;
 }
 
+/**
+ * True when two resolved layouts address the same clickable slots. Width and
+ * height are included because a physical slot maps differently when they change
+ * (the container is regenerated for that, but the chat generation must cover it
+ * as well).
+ */
+function sameClickableLayout(left: ResolvedGuiLayout, right: ResolvedGuiLayout): boolean {
+  return (
+    left.page === right.page &&
+    left.line === right.line &&
+    left.tab === right.tab &&
+    left.width === right.width &&
+    left.height === right.height &&
+    sameSlotElements(left.slots, right.slots)
+  );
+}
+
 function containerSizeOf(layout: ResolvedGuiLayout): number {
   return layout.height * PHYSICAL_COLUMNS;
 }
@@ -1171,6 +1190,16 @@ export class Window {
    */
   #inputLayoutGeneration = 0;
   /**
+   * Layout the current state resolves to while `#layout` still shows an earlier
+   * one (a `setState()` page/line/tab change whose refresh microtask has not run
+   * yet). Chat input is validated against this layout and its generation, not
+   * the rendered one: otherwise a notification minted right after `setState()` —
+   * the documented way to read the generation for the manual probe — would be
+   * accepted under the previous generation and could invoke whatever button the
+   * old layout happened to have in that slot.
+   */
+  #inputPendingLayout: ResolvedGuiLayout | undefined;
+  /**
    * Viewer id captured at registration: playerLeave and entityDie are matched
    * against it rather than against a possibly invalid player object.
    */
@@ -1346,12 +1375,22 @@ export class Window {
   }
 
   /**
+   * The layout chat input is validated against: the state the Window has already
+   * accepted (`#inputPendingLayout`) when it differs from the one still being
+   * rendered, otherwise the rendered layout. Both are updated synchronously
+   * with the state change; only the render itself is asynchronous.
+   */
+  #inputLayout(): ResolvedGuiLayout | undefined {
+    return this.#inputPendingLayout ?? this.#layout;
+  }
+
+  /**
    * Internal: mode of every logical slot of the current layout, used by the
    * automatic chat input bridge. Returns null when there is no layout, which
    * the bridge treats as "no slot is a button" (fail closed).
    */
   _inputSlotModes(): readonly InputSlotMode[] | null {
-    const layout = this.#layout;
+    const layout = this.#inputLayout();
     if (!layout) {
       return null;
     }
@@ -1381,9 +1420,12 @@ export class Window {
    * Internal: generation of the current clickable layout for the chat input
    * bridge. It changes when the page/line/tab or the slot-element mapping
    * changes, and starts again at 0 for each open (the session id already
-   * distinguishes opens). A notification that names an older generation is
-   * rejected even if the same slot is a button again, so a line minted before a
-   * page change cannot be applied after it. Not part of the exported API.
+   * distinguishes opens). A state change advances it as soon as `setState()`
+   * accepts the change, not when the render catches up, so the documented
+   * "read the generation, then send" probe already names the new page. A
+   * notification that names an older generation is rejected even if the same
+   * slot is a button again, so a line minted before a page change cannot be
+   * applied after it. Not part of the exported API.
    */
   get _inputLayoutGeneration(): number | undefined {
     return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
@@ -1671,6 +1713,7 @@ export class Window {
       // handlers can change the page.
       this.#inputSessionId = createInputSessionId();
       this.#inputLayoutGeneration = 0;
+      this.#inputPendingLayout = undefined;
       // Register before open handlers run: a handler may immediately render a
       // button the player can click. Registration also installs the single
       // chatSend subscription on the first successful open.
@@ -2754,13 +2797,13 @@ export class Window {
    * a handler that ran and threw (replaying it would repeat its side effects).
    */
   async _inputClick(slot: number): Promise<ChatInputClickOutcome> {
-    if (this.#status !== "open" || !this.#layout || !this.#stateHandle) {
+    const layout = this.#status === "open" ? this.#inputLayout() : undefined;
+    if (!layout || !this.#stateHandle) {
       return "discarded";
     }
-    if (!Number.isInteger(slot) || slot < 0 || slot >= this.#layout.slots.length) {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= layout.slots.length) {
       return "discarded";
     }
-    const layout = this.#layout;
     const element = layout.slots[slot];
     if (!isButtonElement(element)) {
       return "discarded";
@@ -3285,6 +3328,7 @@ export class Window {
     this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
+    this.#inputPendingLayout = undefined;
   }
 
   #acquireState(
@@ -3340,7 +3384,52 @@ export class Window {
     ) {
       this.#revalidateStateRanges = true;
     }
+    if (this.#status === "open") {
+      this.#noteInputLayoutChange();
+    }
     this.#scheduleSlotRefresh();
+  }
+
+  /**
+   * Advance the clickable-layout generation as soon as the state change resolves
+   * to a different layout, instead of waiting for the refresh microtask.
+   *
+   * The state is accepted synchronously by `setState()` but the rendered layout
+   * is only replaced asynchronously. In between, the old generation still names
+   * the old layout, so a notification minted from the just-read generation would
+   * pass validation and could invoke the button the *previous* page had in that
+   * slot. Advancing here (and remembering the layout the generation now names)
+   * makes that line either name the new layout or fail as stale.
+   *
+   * The layout is compared against the last one the generation was advanced for
+   * (`#inputPendingLayout`) so an A -> B -> A state round trip in one timing
+   * advances twice: the B layout was the logical clickable layout in between,
+   * and a line minted for it must not become valid again when the state returns
+   * to A. This mirrors the render-side counter in `#applyLayout`.
+   */
+  #noteInputLayoutChange(): void {
+    const handle = this.#stateHandle;
+    if (!handle || this.#renderingHalted) {
+      return;
+    }
+    let layout: ResolvedGuiLayout;
+    try {
+      layout = this.upperGui.resolve(this.viewer, handle.get());
+    } catch {
+      // The scheduled refresh reports a resolve failure through the normal
+      // error channel; a state notification must not throw from here.
+      return;
+    }
+    const baseline = this.#inputPendingLayout ?? this.#layout;
+    if (baseline === undefined || sameClickableLayout(baseline, layout)) {
+      return;
+    }
+    this.#inputLayoutGeneration += 1;
+    invalidateChatInputWindow(this);
+    this.#inputPendingLayout =
+      this.#layout !== undefined && sameClickableLayout(this.#layout, layout)
+        ? undefined
+        : layout;
   }
 
   /**
@@ -3533,17 +3622,23 @@ export class Window {
 
   #applyLayout(layout: ResolvedGuiLayout): void {
     const previous = this.#layout;
+    const pending = this.#inputPendingLayout;
+    this.#inputPendingLayout = undefined;
     this.#layout = layout;
     // A page/line/tab change or a different slot element mapping is a new
     // clickable layout: notifications accepted against the previous one must
     // not run against this one. Content-only re-renders that keep every slot
     // element stay valid.
+    //
+    // A synchronous state-change listener may already have advanced the
+    // generation for exactly this layout (`pending`); advancing again would
+    // invalidate a notification that correctly names the new generation before
+    // the render caught up. A pending layout that is *not* the one being applied
+    // is superseded, so it must still invalidate its generation.
     if (
-      previous &&
-      (previous.page !== layout.page ||
-        previous.line !== layout.line ||
-        previous.tab !== layout.tab ||
-        !sameSlotElements(previous.slots, layout.slots))
+      pending !== undefined
+        ? !sameClickableLayout(pending, layout)
+        : previous !== undefined && !sameClickableLayout(previous, layout)
     ) {
       // Advance the wire generation before invalidating the queue: a line
       // minted for the previous layout must fail even if it is delivered only
