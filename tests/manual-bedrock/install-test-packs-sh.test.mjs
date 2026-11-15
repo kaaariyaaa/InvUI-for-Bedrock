@@ -139,7 +139,7 @@ test('削除コマンドを持たない（rm を使わない）', () => {
 
 
 test('全ての BP/RP を manifest.json から自動検出し、コピー先を決める', () => {
-  assert.match(sh, /find "\\$HERE" -type f -name manifest\\.json -print0/);
+  assert.match(sh, /find "\$HERE" -type f -name manifest\.json -print0/);
   assert.ok(PACKS.length >= 9, '既存の手動テストパックも検出する');
   for (const pack of PACKS) {
     assert.ok(fs.existsSync(path.join(here, pack.src, 'manifest.json')));
@@ -311,7 +311,7 @@ test('不正な選択は exit 1 で何も変更しない', () => {
   const home = makeHome();
   const com = makeComMojang(path.join(home, '.local/share/mcpelauncher/games/com.mojang'));
 
-  for (const input of ['8\n', '0\n', 'abc\n', '1 x\n']) {
+  for (const input of [String(PACKS.length + 1) + '\n', '0\n', 'abc\n', '1 x\n']) {
     const result = runScript({ home, input });
     assert.equal(result.status, 1, `${JSON.stringify(input)} は失敗する: ${result.stdout}`);
     assert.match(result.stderr, /\[ERROR\]/);
@@ -342,7 +342,7 @@ test('BP/RP を判定できない manifest は対象外にする', () => {
   const result = runScript({
     home: makeHome(),
     args: [com],
-    input: '1\\n',
+    input: '1\n',
     script,
   });
   assert.equal(result.status, 1, result.stdout + result.stderr);
