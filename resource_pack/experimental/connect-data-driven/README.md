@@ -91,8 +91,8 @@ node resource_pack/experimental/connect-data-driven/check.mjs
 4. 対象パックを Development Resource Pack として使い捨てワールドで有効化し、
    Experimental / Beta APIs を有効にする。`VirtualContainer` を開くには
    npm beta `2.13.0-beta.1.26.70-preview.24` に対応する Preview ビルドが必要
-   （[API-NOTES.md](../../../tests/manual-bedrock/API-NOTES.md) 第 1 節・第 8 節）。
-5. `VirtualContainer` は同梱の raw probe（[`tests/manual-bedrock/probe/`](../../../tests/manual-bedrock/probe/README.md)）の
+   （リポジトリ専用の `tests/manual-bedrock/API-NOTES.md` 第 1 節・第 8 節。npm tarball 非同梱）。
+5. `VirtualContainer` はリポジトリ専用の raw probe（`tests/manual-bedrock/probe/`。npm tarball 非同梱）の
    `!invui open 27` で開く。`Window.open()` を許可する独自アダプタやテスト用コードは使わない。
 6. 表示された警告ラベル・`InvUI probe (experimental, unverified)`・ボタンの有無、
    末尾が `.desktop` か `.pocket` か、通常チェストでの表示、画面サイズ・UI スケール・言語・

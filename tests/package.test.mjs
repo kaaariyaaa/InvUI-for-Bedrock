@@ -406,6 +406,30 @@ test("packed package contents and consumer type check", async (t) => {
     }
   });
 
+  // The shipped resource pack READMEs are the only in-package guidance left, so
+  // their relative links must resolve inside the tarball too.
+  await t.test("packed resource pack READMEs only link inside the tarball", () => {
+    const readmes = packedPaths.filter(
+      (packedPath) => packedPath.startsWith("resource_pack/") && packedPath.endsWith("README.md"),
+    );
+    assert.ok(readmes.length > 0, "no packed resource pack READMEs");
+
+    for (const packedReadme of readmes) {
+      const baseDir = path.posix.dirname(packedReadme);
+      const text = fs.readFileSync(path.join(installedDir, packedReadme), "utf8");
+      for (const match of text.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+        const href = match[1].trim();
+        if (/^(?:https?:|mailto:|#)/.test(href)) continue;
+        const target = decodeURI(href.split("#")[0]);
+        if (target === "") continue;
+        assert.ok(
+          packedSet.has(path.posix.normalize(path.posix.join(baseDir, target))),
+          `${packedReadme} links to a file outside the tarball: ${href}`,
+        );
+      }
+    }
+  });
+
   // The tarball excludes src/, so a source map that only points at ../src is
   // unusable for a consumer. `inlineSources` must embed the original TypeScript.
   await t.test("source maps embed the original sources", () => {

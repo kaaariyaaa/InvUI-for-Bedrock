@@ -86,7 +86,7 @@ resource_pack/
 
 したがって、**「押した slot・session・sequence を JSON UI が自動で送る」実装は、根拠のない binding を発明しない限り作る方法を確認できていません。** このプローブは、その未確認の部分を実装したふりをせず、**手入力の固定ペイロードで送信経路だけを切り分ける**ためのものです。
 
-`button.drop_one` → コンテナ変化、カーソル、マーカーアイテムを含む候補の比較と、実機で必要な観測項目は [`../tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md`](../tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md) にまとめています。自動通知は実装済みではありません。
+`button.drop_one` → コンテナ変化、カーソル、マーカーアイテムを含む候補の比較と、実機で必要な観測項目は、リポジトリ専用の `tests/manual-bedrock/CLICK-NOTIFICATION-NOTES.md`（npm tarball 非同梱）にまとめています。自動通知は実装済みではありません。
 
 ### 何をするか
 
@@ -286,7 +286,7 @@ CLI は既存 Resource Pack の **`ui/_ui_defs.json` を変更しません**。�
 5. `ui/invui_controls.json` を使う場合は、上記「オプトイン手順」で 2 ファイルを登録し、**手入力**で `!invui:<session-id>:<layout-generation>:<slot>:<sequence>` を送って観察する。session-id は開いた `Window._inputSessionId`、layout-generation は `Window._inputLayoutGeneration` をスクリプトから表示して取得し、open のたび・ページ変更のたびに読み直す（「session-id と layout-generation の取得手順」）。slot / session / layout-generation / sequence の自動生成はできない。既定 100 ms 間隔（10 回/秒）を超える連投は `rate-limited` で拒否される。キーボード入力の横取りと通常チェストへの影響を確認し、少しでも異常があれば即時中止する。
 6. `ui/invui_grid_input.json` を使う場合は、既定の接続 2 ファイルを外した単独パックで、**使い捨てのマーカーアイテムだけ**をグリッドに置き、クリックごとにドロップ・スロット変化・`VirtualContainerItemChangeAfterEvent`・画面 close のどれが起きるかを記録する。`data_driven_container.desktop_panel` を使う全画面に影響し得る。pocket は対象外。通常画面への影響とアイテム消失が出た時点で中止する。**現行コアは itemChange をクリックとして扱わない**ため、このプローブ単体で `handleClick()` が走ることはない。
 
-画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細は [data-driven 判定プローブ](../tests/manual-bedrock/data-driven-resource-pack/README.md) を参照してください。
+画面の接続先として `data_driven_container` 名前空間や `data_driven_container_screen.json` を変更する方法は、**Mojang は変更しないことを期待し、後方互換性を保証していません**（Minecraft Preview 26.70.23 告知）。このテンプレートは同名前空間の 2 パネルへ接続するため、検証専用の実験にとどめ、正式機能や配布物の前提にしないでください。詳細はリポジトリ専用の `tests/manual-bedrock/data-driven-resource-pack/README.md`（npm tarball 非同梱）を参照してください。
 
 これらは `tests/manual-bedrock/` の手順と CHECKLIST で記録してください。合格するまで「チェスト画面で動く」「安全」と表現しないでください。
 
