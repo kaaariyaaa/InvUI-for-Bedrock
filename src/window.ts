@@ -265,16 +265,8 @@ function toWindowCloseReason(reason: VirtualContainerCloseReason): WindowCloseRe
 }
 
 /**
- * Real Bedrock adapter, enabled by default. `openContainer` and
- * `closeContainer` forward to `VirtualContainer.open(player)` and
- * `close(player)`.
- *
- * NOT VERIFIED ON A REAL DEVICE. The event hooks are detection, not
- * prevention: both game events are `after` events, so a close or item change
- * has already happened when the handler runs; subscribing cannot prevent it.
- * The Window restores a changed container slot and reverts the matching
- * player-side change on the next tick (see the module comment), and fails
- * closed only when the container slot cannot be restored.
+ * Default VirtualContainer adapter. The Window restores changed screen slots
+ * and reconciles matching player-side after-events.
  */
 export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter {
   readonly canOpenScreens = true;
@@ -621,36 +613,10 @@ function ensureShutdownSubscription(): void {
   }
 }
 
-/* ------------------------------------------------------------------------- *
- * Screen item guard
- *
- * `virtualContainerItemChange` is an `after` event: by the time the Window
- * hears about a take, the item is already in the player's inventory or on
- * their cursor. The guard therefore does not try to prevent it; it records the
- * change and reconciles it with the player's own after-events on the next tick:
- *
- * - the container slot is restored from `beforeItemStack` immediately, so the
- *   screen keeps showing the display item;
- * - the player-side change that the screen move caused is reverted to its own
- *   `beforeItemStack` (inventory slot), cleared (cursor), or the dropped item
- *   entity is removed (`entityItemDrop`), so the item the screen lost does not
- *   remain with the player or on the ground;
- * - the player's own items are never scanned for or deleted wholesale: only a
- *   slot whose current content still matches the event's `itemStack` is
- *   written, and only when a same-tick screen change of the same item type
- *   exists. An item the player already had is left alone because the revert
- *   writes the slot's own previous stack, not an "empty" value.
- *
- * Deferring the player-side write to the next tick removes the event-order
- * dependency: whichever of the container event and the player event arrives
- * first, both are recorded before reconciliation.
- *
- * ponytail: one deferred reconciliation from event payloads, no per-tick
- * inventory scan. Bedrock has no item identity, so a scan would have to guess
- * which stack is the GUI copy and could delete a player's own item. Add a tick
- * scan only if a device is seen to deliver the pair across ticks or to miss
- * `playerInventoryItemChange`.
- * ------------------------------------------------------------------------- */
+/* Screen item guard
+ * Restore changed screen slots immediately. On the next tick, reconcile
+ * matching inventory, cursor, and drop events without scanning unrelated items.
+ */
 
 /** One item type the screen lost (`take`) or gained (`placement`). */
 interface ScreenItemChange {
@@ -1045,31 +1011,10 @@ function schemaNodeOf(gui: Gui, ancestors: readonly Gui[]): unknown {
  */
 const PHYSICAL_COLUMNS = 9;
 
-/**
- * Maximum render passes `open()` performs before it refuses to keep chasing
- * changes. A normal open settles in one pass; the extra headroom covers a
- * provider or listener that changes state a finite number of times while the
- * screen is being prepared.
- *
- * ponytail: a fixed pass count is a blunt ceiling: a legitimately slow but
- * finite caller (for example one deferred state write per tick) that needs more
- * than this many passes fails instead of opening. Raise the constant, or
- * replace the count with a time budget or a state-version comparison, if such
- * an opening flow ever becomes real.
- */
+/** Limit opening renders to avoid loops from repeated state updates. */
 export const MAX_OPEN_RENDER_PASSES = 100;
 
-/**
- * `VirtualContainer.close()` only requests closure; the close event arrives
- * after the client has closed its UI, which may be a later tick. A following
- * `open()` then throws `VirtualContainerOpenError` with
- * `PreviousScreenClosing`. The official docs say to open after the close event
- * or retry on a later tick, so `open()` retries only that reason.
- *
- * ponytail: a fixed tick budget, no close-event handshake. The screen should
- * finish closing well within this; raise it or wait for the close event if a
- * slow client is reported to exceed it.
- */
+/** Retry PreviousScreenClosing on later ticks while a client closes its screen. */
 const PREVIOUS_SCREEN_CLOSING_RETRIES = 20;
 
 function isPreviousScreenClosingError(error: unknown): boolean {
@@ -1293,18 +1238,7 @@ export class WindowBuilder {
   }
 }
 
-/**
- * Builder for a merged Window (design 4.4, Java `Window.mergedBuilder()`).
- *
- * Java's merged window paints one GUI over both the upper inventory and the
- * player's own inventory. Bedrock does not expose the player inventory as a
- * `VirtualContainer` we may paint, so the single GUI fills the container only
- * and the player area keeps the standard screen (design 7.4). `setGui()` is the
- * merged spelling of `setUpperGui()`.
- *
- * ponytail: API parity with an explicit limit, not a merged renderer. Add the
- * real merge only if Bedrock exposes writable player-inventory slots.
- */
+/** setGui() configures the upper GUI; lower player slots are not rendered. */
 export class MergedWindowBuilder extends WindowBuilder {
   setGui(gui: Gui): this {
     return this.setUpperGui(gui);
@@ -1394,17 +1328,7 @@ export class Window {
   /** Container the Window itself asked the adapter to close (title regeneration). */
   #expectedCloseContainer: VirtualContainer | undefined;
   #layout: ResolvedGuiLayout | undefined;
-  /**
-   * Skips only clearing a physical slot this container last cleared (design
-   * 11.2). It describes one container's slots, so it is created together with
-   * the container and dropped with it in `#teardown()`: a reopened Window or a
-   * container replaced during open starts with an empty cache.
-   *
-   * It is only consulted after the render guards in `#isCurrentSlot()`, so a
-   * stale provider result, a layout change, or a closed generation never reads
-   * or writes it. `markWritten()` runs only after `setItem()` returned, so a
-   * failed write is retried on the next pass.
-   */
+  /** Skip empty-to-empty writes per container; retry previously failed writes. */
   #writeCache: SlotWriteCache | undefined;
   /**
    * Structure width the current container's physical slots were last laid out
@@ -1902,23 +1826,7 @@ export class Window {
     await this.#refresh();
   }
 
-  /**
-   * Change the title of the Window (design 8.4 / 20).
-   *
-   * `VirtualContainer.title` cannot change after creation, so an open Window is
-   * regenerated: the new container is created and rendered first, then the old
-   * screen is closed and the new one is shown. The state handle, GUI and
-   * element subscriptions are kept, and neither the open nor the close handlers
-   * run again for this internal reopen.
-   *
-   * A created or closed Window stores the title synchronously, so an `open()`
-   * called without awaiting `setTitle()` already uses it. An open Window
-   * regenerates asynchronously. Changing the title while `open()` is still
-   * running is rejected: the container may already exist with the previous
-   * title. Failures are reported through the error handler
-   * (`operation: "titleChange"`); if the old screen had to be closed already,
-   * the Window fails closed instead of leaving an unknown screen.
-   */
+  /** Recreate an open container to change its title, keeping state and handlers. */
   async setTitle(title: string): Promise<void> {
     if (typeof title !== "string") {
       throw new TypeError("InvUI: Window title must be a string.");
@@ -1976,25 +1884,7 @@ export class Window {
     await this.#regenerateContainer(title, this.#layout, "titleChange");
   }
 
-  /**
-   * Regenerate the container while the Window stays logically open (design
-   * 8.4 / 11.4). The caller has checked status, layout, and state handle.
-   *
-   * `title` and `layout` are what the new container must show; `operation` is
-   * the error-operation name used by the caller (`titleChange`, `resize`). The
-   * new container is created and fully rendered before the old screen is
-   * closed, so a render failure leaves the old screen showing. Only after that
-   * is the old screen closed and the new one opened. Open and close handlers do
-   * not run again for this internal reopen.
-   *
-   * `reportBeforeCloseFailure` is false when the caller restores more than the
-   * container on a failure that leaves the old screen showing (the
-   * size-changing GUI swap also restores the GUI and state registration). The
-   * caller then reports the error after that restore, so an error handler that
-   * reads or writes the Window sees the old GUI and the registration the screen
-   * still shows; it cannot discard the failed candidate or its own state write.
-   * A failure after the old screen was closed is always reported here.
-   */
+  /** Render the new container before closing the old one; restore state on error. */
   async #regenerateContainer(
     title: string,
     layout: ResolvedGuiLayout,
@@ -2161,39 +2051,8 @@ export class Window {
   }
 
   /**
-   * Replace the upper GUI of an open Window (design 8.4).
-   *
-   * A layout with the same container size is applied in place: the slot layout
-   * is re-evaluated and written again, so the container and the screen are
-   * kept.
-   *
-   * A different size cannot be applied to an existing container, so it is
-   * queued on the regeneration queue used by `setTitle()` and a state-driven
-   * resize: the replacement container is created and rendered, then the old
-   * screen is closed and the new one shown. The candidate is re-resolved when
-   * its turn arrives, and dropped when a newer `setUpperGui()` request already
-   * superseded it.
-   *
-   * The state schema contains the Structure rows, so a size change always
-   * describes a different GUI shape. Before the replacement is shown, the
-   * Window re-registers its state for the new schema. The StateManager's
-   * existing rules decide whether that is allowed: a shared identity still in
-   * use by another registration, an idle `session` registration, and a
-   * `persistent` registration keep their schema and reject the
-   * re-registration. (A declared migration only runs for an acquire with no
-   * live registration, so it cannot rescue a live Window here.) On a rejection
-   * the previous GUI, screen, and state registration stay as they were, and
-   * the conflict is reported (`guiChange`) without writing anything under the
-   * new schema, so shared and persisted data cannot be mixed or damaged. A
-   * registration that does change schema starts from the previous values as its
-   * initial state, so a size change does not discard the user's page, tab,
-   * selection, or data; the new layout clamps out-of-range values. This means
-   * the swap applies in full only while the identity is not pinned by another
-   * registration, which is the default `window` lifetime with no other live
-   * user of the same state identity.
-   *
-   * A same-size swap that also changes the schema fails closed through the
-   * structural-change path below, as before.
+   * Update changed slots in place for same-size GUIs.
+   * Size changes recreate the container and require a compatible state schema.
    */
   setUpperGui(gui: Gui): void {
     if (!gui || typeof gui.resolve !== "function" || typeof gui.subscribe !== "function") {
@@ -2338,15 +2197,8 @@ export class Window {
   }
 
   /**
-   * Apply a queued size-changing upper GUI swap (design 8.4).
-   *
-   * The new schema is registered before the replacement container is created,
-   * because the final layout (and therefore the container size) depends on the
-   * state the new registration holds. A registration that is refused leaves
-   * everything as it was. If the container cannot be created afterwards, the
-   * GUI and the previous registration are restored; the Window only fails
-   * closed when the previous registration cannot be recovered, because then
-   * no acquired state describes the screen still on display.
+   * Register compatible state, render the new container, and swap.
+   * Restore previous state and GUI if the replacement fails.
    */
   async #applyGuiSizeSwap(
     gui: Gui,
@@ -2518,21 +2370,7 @@ export class Window {
     );
   }
 
-  /**
-   * Restore the state registration for the GUI that is still displayed after a
-   * refused or failed swap. The re-registration attempt fails before any write
-   * for schema/lifetime conflicts, so the stored record and any other
-   * registration are untouched; re-acquiring the previous schema returns the
-   * state that survived the release. A Window-lifetime entry that only this
-   * Window held was dropped by the release, so `previousState` seeds the new
-   * registration instead of resetting the values; an existing registration
-   * ignores `initial`, so shared state is not overwritten with a stale
-   * snapshot. If even that re-acquire fails, the Window has no state describing
-   * the screen and fails closed — but only for the generation that owned the
-   * failed swap: a close handler or error handler that closed and reopened the
-   * Window during that report owns a new generation, which never saw the failed
-   * swap and must not be torn down here.
-   */
+  /** Restore the old state registration after a failed GUI swap. */
   #restoreStateRegistration(
     previousState?: StateSnapshot,
     generation: number = this.#generation,
@@ -2587,20 +2425,7 @@ export class Window {
     this.#scheduleRefresh();
   }
 
-  /**
-   * Repair a size-changing swap that failed while the old screen was still
-   * showing, then report it.
-   *
-   * The repair must finish before the report: the error handler may read the
-   * Window, write state, or close and reopen it. Reporting first would let it
-   * observe the GUI and state registration that were never applied, discard
-   * the write during the later rollback, or reopen into the failed candidate.
-   * The report is delivered only while the generation that owned the swap still
-   * shows the old GUI; a handler that already started a newer generation keeps
-   * the original error from reaching it. A restore failure inside the rollback
-   * reports its own error and fails closed, and the original is still reported
-   * because no newer screen exists to disturb.
-   */
+  /** Restore the previous GUI and state before reporting the error. */
   #failGuiSizeSwap(
     error: unknown,
     previousGui: Gui,
@@ -2617,21 +2442,7 @@ export class Window {
     }
   }
 
-  /**
-   * Queue the slots whose element differs between two layouts of the same
-   * container (design 8.4). Unchanged slots keep their displayed stack and any
-   * in-flight provider result stays valid; #queueSlotRender bumps the per-slot
-   * token for changed slots so an older result cannot overwrite them. The
-   * slots join the normal refresh flush, so a queued click or state change in
-   * the same timing still renders each slot once. Returns how many slots were
-   * queued, so the caller can present immediately when none were.
-   *
-   * Skipping an unchanged slot is only safe because the caller accepts the
-   * same state schema: the schema contains the Structure rows, so both layouts
-   * have the same width/height and a logical slot maps to the same physical
-   * slot in both. The Window's state is also unchanged on this path; a clamped
-   * page/line/tab forces a full refresh instead (see setUpperGui).
-   */
+  /** Render changed slots only when a replacement GUI keeps the same size. */
   #queueChangedSlots(previous: ResolvedGuiLayout, next: ResolvedGuiLayout): number {
     const cache = this.#writeCache;
     let queued = 0;
@@ -2741,15 +2552,8 @@ export class Window {
   }
 
   /**
-   * Apply a state-change refresh as a slot diff (design 11.4): resolve the new
-   * layout, move subscriptions, then render only the slots whose element changed
-   * or whose element cannot be proven independent of the new state. Slots that
-   * were notified by an Item/Inventory in the same timing are rendered too,
-   * because this path replaces the notification-only flush.
-   *
-   * Falls back to a full render when the layout's shape changed (a different
-   * width remaps physical slots and may leave stale columns) or the container
-   * must be regenerated.
+   * Render only changed and potentially state-dependent slots.
+   * Use a full render when the layout shape changes.
    */
   async #refreshSlots(notified: ReadonlySet<number>): Promise<void> {
     if (
@@ -3055,20 +2859,7 @@ export class Window {
     this.#performClose(reason, true);
   }
 
-  /**
-   * The single close path for explicit close calls and adapter close events.
-   * `requestAdapterClose` is false for a close event: the screen is already
-   * closing, and asking again is neither needed nor safe.
-   *
-   * `opening` is notified too, even though no screen was requested and no
-   * adapter close is sent: a close during opening still reports its reason
-   * once, and `open()` resolves with the Window already `closed`.
-   *
-   * Close handlers run in registration order. One of them may close and reopen
-   * the Window, starting a new generation: the notification then belongs to the
-   * generation that is gone, so the remaining handlers are skipped and a
-   * throwing handler's error is not reported (see `WindowCloseHandler`).
-   */
+  /** Close once, even during opening; skip old handlers if reopened. */
   #performClose(reason: WindowCloseReason, requestAdapterClose: boolean): void {
     if (this.#status === "closed") {
       return;
@@ -3200,17 +2991,7 @@ export class Window {
     this.#performClose(event.reason, false);
   }
 
-  /**
-   * A player changed the container through the screen. This is not a click:
-   * restore the slot from the event's `beforeItemStack` and reconcile the item
-   * the player gained (or placed) on the next tick. The change is not reported
-   * when the restore succeeds; only a container write that throws fails closed.
-   *
-   * The `opening` status is covered too: `openContainer` may dispatch the event
-   * synchronously, before `open()` sets `open`. Dropping that event would let
-   * the following render pass put the item the player already took back into
-   * the container (a duplicate), so it is handled like an open one.
-   */
+  /** Restore the screen slot and reconcile matching player-side changes next tick. */
   #onContainerItemChange(
     generation: number,
     event: WindowContainerItemChangeEvent,
@@ -3329,13 +3110,7 @@ export class Window {
     }
   }
 
-  /**
-   * Queue one reconciliation for the next game tick. `system.run` runs after
-   * the current tick's events, so both the container event and the player-side
-   * event it caused are recorded regardless of delivery order. Without a
-   * scheduler (a test double) the pass runs immediately and only sees what has
-   * arrived so far.
-   */
+  /** Schedule one pass after the current tick's events are collected. */
   #queueGuardReconcile(): void {
     if (this.#guardReconcileQueued) {
       return;
@@ -3362,11 +3137,8 @@ export class Window {
   }
 
   /**
-   * Pair the recorded container changes with the player-side changes and undo
-   * the player side. Only the amount still unmatched is considered, so a take
-   * split over several inventory slots (or a stack swap) is not over-reverted.
-   * A change that no player-side event explains is forgotten; the container
-   * slot is already restored.
+   * Match net screen changes to inventory, cursor, and drop events.
+   * Leave unmatched player changes untouched.
    */
   #reconcileScreenChanges(): void {
     const screenChanges = this.#screenChanges;
