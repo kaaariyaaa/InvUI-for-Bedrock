@@ -1,170 +1,183 @@
 # API reference
 
-Public exports: [`src/index.ts`](../src/index.ts). Package version: `0.1.0-beta.1`.
+Import the public API from `invui-bedrock`. The complete list of exports is in [`src/index.ts`](../src/index.ts).
 
-## GUI
+## GUIs
 
-[`src/gui.ts`](../src/gui/gui.ts)
+A GUI uses a `Structure` to place items in slots. Each character is one slot, with a maximum size of 9 columns by 6 rows.
 
-| API | Description |
-| --- | --- |
-| `new Structure(...rows)` | Character-based layout, up to 9 columns and 6 rows |
-| `Structure.addIngredient(key, value)` | Map a character to an item, link, or marker |
-| `Structure.getIngredient(key)`, `clone()` | Read an ingredient or copy the layout |
-| `Gui.normal(options)` | Normal GUI |
-| `Gui.paged(options)` | Paged GUI |
-| `Gui.scroll(options)` | Scrolling GUI |
-| `Gui.tab({ tabs })` | Tabbed GUI |
-| `Gui.resolve(viewer?, state?)` | Resolve slots and page/scroll/tab state |
-| `Gui.setContent(items)` | Replace content |
-| `Gui.setIngredient(key, value)`, `removeIngredient(key)` | Change ingredients |
-| `Gui.subscribe(listener)` | Subscribe to layout updates |
-
-`GuiOptions` accepts `structure` (required), `ingredients?`, and `content?`. Scrolling adds `direction?`, `contentWidth?`, and `contentHeight?`.
-
-```ts
+~~~ts
 import { Gui, Item, ItemBuilder, Markers } from "invui-bedrock";
 
 const gui = Gui.paged({
   structure: ["xxxxxxxxx"],
   ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
-  content: [Item.simple(new ItemBuilder("minecraft:stone"))],
+  content: [
+    Item.simple(new ItemBuilder("minecraft:stone")),
+    Item.simple(new ItemBuilder("minecraft:diamond")),
+  ],
 });
-```
+~~~
 
-Builders: `Gui.builder()`, `Gui.normal()`, `Gui.paged()`, `Gui.scroll()`, `Gui.tab()`, and `PagedGui.itemsBuilder()`. Use `setStructure()`, `addIngredient()`, `setContent()`, and `build()`. Scroll builders add `setDirection()`, `setContentWidth()`, and `setContentHeight()`; tab builders use `setTabs()` or `addTab()`.
-
-`GuiLink(child, { key?, state?, mapping? })` embeds a child GUI. `Markers.CONTENT_LIST_SLOT_HORIZONTAL` and `Markers.CONTENT_LIST_SLOT_VERTICAL` identify content slots.
-
-## Items
-
-[`src/item.ts`](../src/item.ts)
-
-| API | Description |
+| API | Purpose |
 | --- | --- |
-| `new ItemBuilder(typeId, amount?)` | Create an item stack provider |
-| `setAmount()`, `setName()`, `addLoreLines()`, `setLoreLines()` | Configure a stack |
-| `ItemBuilder.build()` | Create an `ItemStack` |
-| `Item.simple(source)`, `new Item(source)` | Create an item definition |
-| `Item.builder()` | Create an `ItemDefinitionBuilder` |
-| `setItemProvider()`, `setPlaceholder()` | Configure item providers |
-| `addClickHandler(handler)` | Register a click handler |
-| `setMode(mode)`, `getMode()` | Display or button mode |
-| `updateOnClick()`, `updatePeriodically(ticks)` | Configure updates |
-| `resolve(viewer)`, `resolveForDisplay(viewer)` | Resolve a provider |
-| `subscribe(listener)`, `notifyWindows()` | Notify open windows |
+| `new Structure(...rows)` | Define a character-based layout |
+| `Gui.normal(options)` | Fixed layout |
+| `Gui.paged(options)` | Pages of content |
+| `Gui.scroll(options)` | Scrolling content |
+| `Gui.tab({ tabs })` | Switch between child GUIs |
+| `Gui.resolve(viewer?, state?)` | Calculate the displayed slots |
+| `gui.setContent(items)` | Replace the content |
+| `gui.setIngredient(key, value)` | Change a character's item or marker |
+| `gui.removeIngredient(key)` | Remove an ingredient |
+| `gui.subscribe(listener)` | Listen for layout changes |
 
-```ts
-const item = Item.builder()
-  .setItemProvider(new ItemBuilder("minecraft:emerald"))
-  .addClickHandler(({ player, slot, window }) => {
-    // Handle the click.
+`GuiOptions` contains `structure`, optional `ingredients`, and optional `content`. Scrolling GUIs also accept `direction`, `contentWidth`, and `contentHeight`.
+
+Use `GuiLink(child, options)` to embed a GUI. The `key`, `state`, and `mapping` options control its state and slot placement. The horizontal and vertical content markers are in `Markers`.
+
+Builder-style construction is also available through `Gui.builder()` or the no-argument `Gui.normal()`, `Gui.paged()`, `Gui.scroll()`, and `Gui.tab()` methods.
+
+[GUI source](../src/gui/gui.ts)
+
+## Items and buttons
+
+`Item` controls what appears in a slot. An `ItemBuilder` creates the underlying Minecraft `ItemStack`.
+
+~~~ts
+import { Item, ItemBuilder } from "invui-bedrock";
+
+const button = Item.builder()
+  .setItemProvider(new ItemBuilder("minecraft:emerald").setName("Select"))
+  .addClickHandler(({ player }) => {
+    player.sendMessage("Selected");
   })
   .build();
-```
+~~~
 
-`ClickContext` contains `player`, `slot`, and `window`. Sources may be `ItemStack`, a provider function (including async), or an `ItemProvider`. `Item.EMPTY` represents an empty element.
+| API | Purpose |
+| --- | --- |
+| `new ItemBuilder(typeId, amount?)` | Create an item stack |
+| `setAmount()`, `setName()`, `addLoreLines()` | Set item details |
+| `Item.simple(source)`, `new Item(source)` | Create an item |
+| `Item.builder()` | Configure an item with a builder |
+| `setItemProvider(source)` | Change its item source |
+| `setPlaceholder(stack)` | Display an item while an async source loads |
+| `addClickHandler(handler)` | Register a button callback |
+| `setMode(mode)` | Choose `button` or `display` |
+| `updateOnClick()`, `updatePeriodically(ticks)` | Configure refreshes |
+| `notifyWindows()` | Ask subscribed windows to refresh |
+
+An item source can be an `ItemStack`, an `ItemProvider`, or a function returning an item (including asynchronously). Items with click handlers default to `button` mode; `display` items do not run those handlers. `Item.EMPTY` represents an empty slot.
+
+**Click handlers are not connected to actual Minecraft screen clicks.** Call `Window.handleClick(slot)` explicitly to dispatch them.
+
+[Item source](../src/item.ts)
 
 ## Windows
 
-[`src/window.ts`](../src/window/window.ts)
+A `Window` displays a GUI to a player using `VirtualContainer`.
 
-### `WindowBuilder`
-
-```ts
+~~~ts
 import { Window, type Gui } from "invui-bedrock";
 import type { Player } from "@minecraft/server";
 
-async function openGui(player: Player, gui: Gui) {
+async function openMenu(player: Player, gui: Gui) {
   const window = Window.builder()
     .setViewer(player)
-    .setTitle("Example")
+    .setTitle("Menu")
     .setUpperGui(gui)
     .build();
 
   await window.open();
 }
-```
+~~~
 
-| Method | Description |
+### Window builder
+
+| Method | Purpose |
 | --- | --- |
-| `setViewer(player)` | Set the player (required) |
-| `setUpperGui(gui)` | Set the GUI (required) |
-| `setTitle(title)` | Window title |
-| `setLowerGui(gui)` | Store a lower GUI reference; does not render lower slots |
+| `setViewer(player)` | Required player |
+| `setUpperGui(gui)` | Required GUI |
+| `setTitle(title)` | Set the title |
+| `setLowerGui(gui)` | Store a lower GUI reference; it is not rendered |
 | `setStateScope(scope)` | `player` or `shared` |
-| `setStateKey(key)` | State identity |
+| `setStateKey(key)` | Identify the state; required for shared state |
 | `setStateLifetime(lifetime)` | `window`, `session`, or `persistent` |
-| `setStateManager(manager)` | State manager |
-| `setContainerAdapter(adapter)` | Container adapter |
-| `addOpenHandler(fn)`, `addCloseHandler(fn)` | Lifecycle callbacks |
-| `setErrorHandler(fn)` | Error callback |
+| `setStateManager(manager)` | Supply a state manager |
+| `setContainerAdapter(adapter)` | Replace the default container adapter |
+| `addOpenHandler(fn)`, `addCloseHandler(fn)` | Register lifecycle callbacks |
+| `setErrorHandler(fn)` | Register error reporting |
 | `build()` | Create the window |
 
-`Window.mergedBuilder()` supports `setGui(gui)` before `build()`.
+`Window.mergedBuilder()` also provides `setGui(gui)` as an alias for `setUpperGui(gui)`.
 
-### `Window`
+### Window methods
 
-| Member | Description |
+| Member | Purpose |
 | --- | --- |
-| `open()`, `close(reason?)` | Open or close |
-| `refresh()`, `setTitle(title)` | Refresh or update title |
+| `open()`, `close(reason?)` | Open or close the screen |
+| `refresh()` | Refresh the displayed content |
+| `setTitle(title)` | Change the window title |
 | `setUpperGui(gui)`, `setLowerGui(gui)` | Replace GUI references |
-| `setState(patch)`, `getState()` | Write/read state |
-| `handleClick(slot)` | Dispatch an eligible item handler |
-| `setErrorHandler(fn)` | Replace error callback |
-| `status`, `isOpen`, `container` | Read lifecycle state |
+| `setState(patch)`, `getState()` | Update or read GUI state |
+| `handleClick(slot)` | Call the rendered button's handler explicitly |
+| `setErrorHandler(fn)` | Change error reporting |
+| `status`, `isOpen`, `container` | Inspect the current window |
 | `viewer`, `title`, `upperGui`, `lowerGui`, `id` | Window properties |
 
-The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters implement `WindowContainerAdapter`. `handleClick(slot)` is invoked explicitly; no automatic UI click transport is included.
+The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters implement `WindowContainerAdapter`.
 
-`WindowCloseReason` includes `PlayerClosed`, `PlayerDied`, `PlayerLeft`, `PlayerSpectating`, `ServerClosed`, and `UserBusy`.
+[Window source](../src/window/window.ts)
 
 ## Inventories
 
-[`src/inventory.ts`](../src/inventory/inventory.ts) · [`src/player-inventory.ts`](../src/inventory/player-inventory.ts)
-
-| API | Description |
+| API | Purpose |
 | --- | --- |
-| `new VirtualInventory(size)` | In-memory inventory |
-| `getItem(slot)`, `setItem(slot, item)`, `clear()` | Inventory operations |
-| `getContents()`, `subscribe(listener)` | Read contents or changes |
-| `serialize(codec)`, `VirtualInventory.deserialize(snapshot, codec)` | Save/restore snapshots |
-| `serializeInventory(inventory, codec)` | Serialize any `Inventory` |
-| `new InventoryLink(inventory, slot)` | Link to an inventory slot |
-| `new PlayerInventory(player, options?)` | Read-only player inventory |
-| `createPlayerInventoryChangeSource(signal, mapSlot)` | Optional event adapter |
+| `new VirtualInventory(size)` | Inventory held in memory |
+| `getItem(slot)`, `setItem(slot, item)`, `clear()` | Read or change items |
+| `getContents()`, `subscribe(listener)` | Read contents or listen for changes |
+| `serialize(codec)`, `VirtualInventory.deserialize(snapshot, codec)` | Save and load an inventory |
+| `new InventoryLink(inventory, slot)` | Refer to an inventory slot |
+| `new PlayerInventory(player, options?)` | Read the player's inventory |
+| `createPlayerInventoryChangeSource(signal, mapSlot)` | Connect an inventory change event |
 
-`InventoryItemCodec` supplies `encode()` and `decode()`. There is no built-in codec. `InventoryLink.moveTo()` always throws; `PlayerInventory.setItem()` and `clear()` also throw.
+Inventory snapshots require an `InventoryItemCodec` with `encode` and `decode` methods. No default codec is provided. `PlayerInventory` is read-only, and `InventoryLink.moveTo()` is not implemented.
+
+[Inventory source](../src/inventory/inventory.ts) · [Player inventory source](../src/inventory/player-inventory.ts)
 
 ## State
 
-[`src/state.ts`](../src/state/state.ts) · [`src/bedrock-store.ts`](../src/state/bedrock-store.ts)
+Use `StateManager` to hold GUI state and, optionally, save it across sessions.
 
-```ts
+~~~ts
 import { StateManager } from "invui-bedrock";
 
 const manager = new StateManager();
-const state = manager.acquire({ ownerId: "player-id", initial: { page: 0 } });
+const state = manager.acquire({
+  ownerId: "player-id",
+  initial: { page: 0 },
+});
+
 state.set({ page: 1 });
 state.release();
-```
+~~~
 
-| API | Description |
+| API | Purpose |
 | --- | --- |
-| `new StateManager(store?, options?)` | Manage state; persistence requires a `StateStore` |
-| `acquire(options)`, `release(handle)` | Open/release a state handle |
-| `migrate(options, fn)`, `remove(options)` | Migrate or remove stored state |
-| `StateHandle.get()`, `set(patch)`, `subscribe(fn)` | Read/update/listen |
-| `StateHandle.enqueue(task)`, `update(fn)` | Queue updates |
-| `new BedrockWorldStateStore(world, options?)` | Persist state in world dynamic properties |
+| `new StateManager(store?, options?)` | Manage state |
+| `manager.acquire(options)` | Obtain a state handle |
+| `manager.migrate(options, fn)`, `manager.remove(options)` | Change or delete stored state |
+| `state.get()`, `state.set(patch)` | Read and update state |
+| `state.subscribe(fn)` | Listen for changes |
+| `state.enqueue(task)`, `state.update(fn)` | Run ordered updates |
+| `state.release()` | Release a handle |
+| `new BedrockWorldStateStore(world, options?)` | Store data in world dynamic properties |
 
-`StateAcquireOptions`: `scope?`, `key?`, `ownerId?`, `lifetime?`, `schema?`, `initial?`. Scopes: `player` / `shared`. Lifetimes: `window` / `session` / `persistent`.
+`StateAcquireOptions` accepts `scope`, `key`, `ownerId`, `lifetime`, `schema`, and `initial`. GUI state can contain `page`, `line`, `tab`, `selection`, `data`, `tabs`, and `children`.
 
-`GuiState` fields: `page`, `line`, `tab`, `selection`, `data`, `tabs`, `children`. Optional manager settings include `onError`, `quarantineCorrupt`, and `migrations`.
+State is scoped to a `player` or `shared`. Its lifetime is `window`, `session`, or `persistent`. Persistent state requires a store; the default Window manager uses world dynamic properties when available.
 
-For additional types and errors, see the generated `dist/index.d.ts` or the linked source files.
+[State source](../src/state/state.ts) · [Storage source](../src/state/bedrock-store.ts)
 
-## Limitations
-
-`VirtualContainer` is experimental. Item changes are handled after they occur and can lead to duplication or loss. `InventoryLink.moveTo()` is disabled; custom JSON UI and automatic click notifications are not included. See [Status and limitations](status.md).
+For supported behavior and restrictions, see [Feature status](status.md). For complete signatures and error types, see the generated `dist/index.d.ts`.
