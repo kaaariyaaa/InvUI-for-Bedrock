@@ -29,7 +29,7 @@ import type { WindowCloseReason, WindowStatus, WindowErrorContext, WindowErrorHa
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
 import { lifecycleWindows, shutdownInProgress, readId, ensurePlayerLeaveSubscription, ensureEntityDieSubscription, ensurePlayerDimensionChangeSubscription, ensurePlayerGameModeChangeSubscription, ensureShutdownSubscription } from "./window-lifecycle.js";
-import { collapseScreenChanges, collapsePlayerChanges, collapseCursorChanges, resolvePlayerSlot, revertGainedByPlayer, revertPlacedByPlayer, recordScreenItemChange, pruneGuardRecords } from "./window-item-guard.js";
+import { WindowItemGuard } from "./window-item-guard.js";
 import { playerSlotOffsets, MAX_SCREEN_GUARD_RECORDS, stackType, stackAmount, gainedBy, lostBy, playerInventoryContainer, readContainerItem, sameTypeAndAmount, sameItemContent, itemGuardWindows, ensureItemGuardSubscriptions } from "./window-item-guard.js";
 import type { ScreenItemChange, PlayerSlotChangeRecord, CursorItemChangeRecord, DroppedItemChangeRecord } from "./window-item-guard.js";
 export { WindowOpenRejectedError, WindowItemChangeDangerError, WindowStateSchemaChangedError, WindowOpenRenderLimitError } from "./window-types.js";
@@ -236,23 +236,7 @@ export class Window {
   #containerEventUnsubscribers = new Map<VirtualContainer, Array<() => void>>();
   /** Set once `openContainer` has been called, before the screen may emit events. */
   #screenRequested = false;
-  /**
-   * Item changes of this Window's own container through the screen, waiting for
-   * the player-side change they caused to be reconciled on the next tick.
-   */
-  #screenChanges: ScreenItemChange[] = [];
-  /** Player inventory changes recorded for the current reconciliation. */
-  #playerChanges: PlayerSlotChangeRecord[] = [];
-  /** Cursor grab/release events recorded for the current reconciliation. */
-  #cursorChanges: CursorItemChangeRecord[] = [];
-  /** Item-drop events recorded for the current reconciliation. */
-  #dropChanges: DroppedItemChangeRecord[] = [];
-  /** A reconciliation is queued for the next game tick. */
-  #guardReconcileQueued = false;
-  /** Invalidates a reconciliation queued before a close/reopen. */
-  #guardReconcileToken = 0;
-  /** True while the guard writes to the player's inventory/cursor. */
-  #applyingGuard = false;
+  readonly #itemGuard: WindowItemGuard;
   /** Set when an item change through the screen must not be rendered over. */
   #renderingHalted = false;
   /** Per-slot render tokens so an older async provider cannot overwrite a newer result. */
@@ -324,6 +308,12 @@ export class Window {
     this.#openHandlers = config.openHandlers;
     this.#closeHandlers = config.closeHandlers;
     this.#errorHandler = config.errorHandler;
+    this.#itemGuard = new WindowItemGuard(this.viewer, {
+      isActive: () => this.#status === "opening" || this.#status === "open",
+      samePlayer: (player) => isSamePlayer(player, this.viewer),
+      getViewerId: () => this.#viewerId,
+      report: (error, operation, slot) => this.#report(error, operation, slot),
+    });
   }
 
   static builder(): WindowBuilder {
@@ -1894,11 +1884,11 @@ export class Window {
       this.#performClose("ServerClosed", true);
       return;
     }
-    recordScreenItemChange(this.#screenChanges, event.beforeItemStack, event.itemStack);
+    this.#itemGuard.recordScreenChange(event.beforeItemStack, event.itemStack);
     if (!this.#restoreScreenSlot(generation, container, event.slot, event.beforeItemStack)) {
       return;
     }
-    this.#queueGuardReconcile();
+    this.#itemGuard.queueReconcile();
   }
 
 
@@ -1944,342 +1934,38 @@ export class Window {
     }
   }
 
-  /** Schedule one pass after the current tick's events are collected. */
-  #queueGuardReconcile(): void {
-    if (this.#guardReconcileQueued) {
-      return;
-    }
-    this.#guardReconcileQueued = true;
-    const token = ++this.#guardReconcileToken;
-    const run = (): void => {
-      if (token !== this.#guardReconcileToken || !this.#guardReconcileQueued) {
-        return;
-      }
-      this.#guardReconcileQueued = false;
-      this.#reconcileScreenChanges();
-    };
-    const gameSystem: typeof server.system | undefined = server.system;
-    if (gameSystem && typeof gameSystem.run === "function") {
-      try {
-        gameSystem.run(run);
-        return;
-      } catch {
-        // A broken scheduler must not leave the guard pending forever.
-      }
-    }
-    run();
-  }
-
-  /**
-   * Match net screen changes to inventory, cursor, and drop events.
-   * Leave unmatched player changes untouched.
-   */
-  #reconcileScreenChanges(): void {
-    const screenChanges = this.#screenChanges;
-    const playerChanges = this.#playerChanges;
-    const cursorChanges = this.#cursorChanges;
-    const dropChanges = this.#dropChanges;
-    this.#screenChanges = [];
-    this.#playerChanges = [];
-    this.#cursorChanges = [];
-    this.#dropChanges = [];
-    if (screenChanges.length === 0) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
-      return;
-    }
-    const container = playerInventoryContainer(this.viewer);
-    const cursor = this.#cursorInventory();
-    if (!container && !cursor) {
-      return;
-    }
-    const netScreenChanges = collapseScreenChanges(screenChanges);
-    const netPlayerChanges = collapsePlayerChanges(playerChanges);
-    const netCursorChanges = collapseCursorChanges(cursorChanges);
-    const effects = {
-      revertPlayerSlot: (container: Container, change: PlayerSlotChangeRecord) =>
-        this.#revertPlayerSlot(container, change),
-      clearCursorItem: (cursor: PlayerCursorInventoryComponent, item: ItemStack) =>
-        this.#clearCursorItem(cursor, item),
-      removeDroppedItem: (change: DroppedItemChangeRecord) => this.#removeDroppedItem(change),
-      returnToInventory: (container: Container, item: ItemStack) =>
-        this.#returnToInventory(container, item),
-    };
-    this.#applyingGuard = true;
-    try {
-      for (const screenChange of netScreenChanges) {
-        if (screenChange.kind === "take") {
-          revertGainedByPlayer(
-            effects,
-            screenChange,
-            container,
-            cursor,
-            netPlayerChanges,
-            netCursorChanges,
-            dropChanges,
-          );
-        } else {
-          revertPlacedByPlayer(
-            effects,
-            screenChange,
-            container,
-            cursor,
-            netPlayerChanges,
-            netCursorChanges,
-          );
-        }
-      }
-    } finally {
-      this.#applyingGuard = false;
-    }
-  }
 
 
 
 
 
-  /**
-   * Remove the item entity the viewer dropped through the screen, when it is
-   * still there with the stack the event reported. A gone or changed entity is
-   * left alone: the pickup or a merge is then explained by another event.
-   */
-  #removeDroppedItem(change: DroppedItemChangeRecord): boolean {
-    try {
-      if (!change.entity.isValid) {
-        return false;
-      }
-      const component = change.entity.getComponent("minecraft:item");
-      if (!component || !sameItemContent(component.itemStack, change.item)) {
-        return false;
-      }
-      change.entity.remove();
-      return true;
-    } catch (error) {
-      this.#report(error, "itemChange");
-      return false;
-    }
-  }
 
 
-  /**
-   * The cursor inventory component, or undefined when the API is absent (the
-   * cursor is not used on touch input, so a failure only skips that branch).
-   */
-  #cursorInventory(): PlayerCursorInventoryComponent | undefined {
-    try {
-      return this.viewer.getComponent("minecraft:cursor_inventory");
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Restore one changed player inventory slot to its `beforeItemStack`.
-   *
-   * The event's `slot` is not documented to be the container index, so the
-   * write is made only to a candidate the live container confirms still holds
-   * the event's `itemStack`. When two candidates match, or none does, nothing
-   * is written: refusing to guess is safer than deleting a player's own stack.
-   */
-  #revertPlayerSlot(container: Container, change: PlayerSlotChangeRecord): boolean {
-    const expected = change.after;
-    if (!expected) {
-      return false;
-    }
-    const slot = resolvePlayerSlot(container, change);
-    if (slot === undefined) {
-      return false;
-    }
-    try {
-      container.setItem(slot, change.before);
-      return true;
-    } catch (error) {
-      // The duplicate stays, but the screen content is consistent; closing
-      // would not remove it, so report and keep the Window usable.
-      this.#report(error, "itemChange", slot);
-      return false;
-    }
-  }
 
 
-  /** Clear the cursor when it still holds exactly the item the event reports. */
-  #clearCursorItem(
-    cursor: PlayerCursorInventoryComponent,
-    expected: ItemStack,
-  ): boolean {
-    let current: ItemStack | undefined;
-    try {
-      current = cursor.item;
-    } catch {
-      return false;
-    }
-    if (!sameTypeAndAmount(current, expected)) {
-      return false;
-    }
-    try {
-      cursor.clear();
-      return true;
-    } catch (error) {
-      this.#report(error, "itemChange");
-      return false;
-    }
-  }
-
-  /** Give a cursor-released item back to the player after the slot was restored. */
-  #returnToInventory(container: Container, item: ItemStack): boolean {
-    try {
-      const leftover = container.addItem(item);
-      if (leftover !== undefined) {
-        // The inventory is full: the item cannot be returned, but it must not
-        // stay behind a screen slot that was already restored.
-        this.#report(
-          new Error("InvUI: cannot return the item placed into the screen; the inventory is full."),
-          "itemChange",
-        );
-        return false;
-      }
-      return true;
-    } catch (error) {
-      this.#report(error, "itemChange");
-      return false;
-    }
-  }
 
 
-  /**
-   * Internal: one `playerInventoryItemChange` of any player; the viewer filter
-   * and the "screen is open" check happen here. Only recorded, never acted on:
-   * the reconciliation pass decides whether a screen change explains it.
-   */
+
+
+
+
+
+
+
   _onViewerInventoryChange(event: PlayerInventoryItemChangeAfterEvent): void {
-    if (this.#applyingGuard) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
-      return;
-    }
-    if (!isSamePlayer(event.player, this.viewer)) {
-      return;
-    }
-    let inventoryType: PlayerInventoryType;
-    let slot: number;
-    let before: ItemStack | undefined;
-    let after: ItemStack | undefined;
-    try {
-      inventoryType = event.inventoryType;
-      slot = event.slot;
-      before = event.beforeItemStack;
-      after = event.itemStack;
-    } catch {
-      // The event may expose an invalid player/stack.
-      return;
-    }
-    if (!Number.isInteger(slot) || slot < 0) {
-      return;
-    }
-    if (stackType(before) === undefined && stackType(after) === undefined) {
-      return;
-    }
-    this.#playerChanges.push({
-      inventoryType,
-      slot,
-      before,
-      after,
-      matchedGain: false,
-      matchedLoss: false,
-    });
-    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+    this.#itemGuard._onViewerInventoryChange(event);
   }
 
-  /** Internal: one `playerCursorItemGrab`; see {@link _onViewerInventoryChange}. */
   _onViewerCursorGrab(event: PlayerCursorItemGrabAfterEvent): void {
-    if (this.#applyingGuard) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
-      return;
-    }
-    if (!isSamePlayer(event.player, this.viewer)) {
-      return;
-    }
-    let item: ItemStack;
-    try {
-      item = event.item;
-    } catch {
-      return;
-    }
-    if (stackType(item) === undefined) {
-      return;
-    }
-    this.#cursorChanges.push({ kind: "grab", item, matched: false });
-    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+    this.#itemGuard._onViewerCursorGrab(event);
   }
 
-  /** Internal: one `playerCursorItemRelease`; see {@link _onViewerInventoryChange}. */
   _onViewerCursorRelease(event: PlayerCursorItemReleaseAfterEvent): void {
-    if (this.#applyingGuard) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
-      return;
-    }
-    if (!isSamePlayer(event.player, this.viewer)) {
-      return;
-    }
-    let item: ItemStack;
-    try {
-      item = event.item;
-    } catch {
-      return;
-    }
-    if (stackType(item) === undefined) {
-      return;
-    }
-    this.#cursorChanges.push({ kind: "release", item, matched: false });
-    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+    this.#itemGuard._onViewerCursorRelease(event);
   }
 
-  /**
-   * Internal: one `entityItemDrop`. Records every item entity the viewer
-   * dropped so the reconciliation can remove the one that came out of the
-   * screen. Only the viewer's own drops are considered.
-   */
   _onViewerItemDrop(event: EntityItemDropAfterEvent): void {
-    if (this.#applyingGuard) {
-      return;
-    }
-    if (this.#status !== "opening" && this.#status !== "open") {
-      return;
-    }
-    const viewerId = this.#viewerId ?? readId(this.viewer);
-    if (!viewerId) {
-      return;
-    }
-    let droppedBy: string | undefined;
-    let items: Entity[];
-    try {
-      droppedBy = event.entity?.id;
-      items = event.items;
-    } catch {
-      return;
-    }
-    if (droppedBy !== viewerId || !Array.isArray(items)) {
-      return;
-    }
-    for (const itemEntity of items) {
-      let item: ItemStack | undefined;
-      try {
-        item = itemEntity.getComponent("minecraft:item")?.itemStack;
-      } catch {
-        item = undefined;
-      }
-      if (!item || stackType(item) === undefined) {
-        continue;
-      }
-      this.#dropChanges.push({ entity: itemEntity, item, matched: false });
-    }
-    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+    this.#itemGuard._onViewerItemDrop(event);
   }
 
   /**
@@ -3347,15 +3033,7 @@ export class Window {
     // afresh (with its own viewer id) instead of inheriting this teardown.
     lifecycleWindows.delete(this);
     itemGuardWindows.delete(this);
-    // A reconciliation queued for the old generation must not touch the
-    // player after a close/reopen; the token invalidates it.
-    this.#guardReconcileToken += 1;
-    this.#guardReconcileQueued = false;
-    this.#applyingGuard = false;
-    this.#screenChanges = [];
-    this.#playerChanges = [];
-    this.#cursorChanges = [];
-    this.#dropChanges = [];
+    this.#itemGuard.reset();
 
     // Detach every handle before calling it. An adapter or element unsubscribe
     // may throw, and its error handler can close and reopen the Window: the

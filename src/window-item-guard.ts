@@ -1,4 +1,6 @@
 /** Event capture and matching helpers for screen item restoration. */
+import * as server from "@minecraft/server";
+import { readId } from "./window-lifecycle.js";
 import type { Container, Entity, ItemStack, Player, PlayerCursorInventoryComponent, PlayerInventoryType, PlayerInventoryItemChangeAfterEvent, PlayerCursorItemGrabAfterEvent, PlayerCursorItemReleaseAfterEvent, EntityItemDropAfterEvent } from "@minecraft/server";
 import type { Window } from "./window.js";
 import { afterEventState, ensureAfterEventSubscription } from "./window-lifecycle.js";
@@ -555,4 +557,358 @@ export function pruneGuardRecords(playerChanges: PlayerSlotChangeRecord[], curso
   if (entityDrop > 0) {
     dropChanges.splice(0, entityDrop);
   }
+}
+
+interface WindowItemGuardOptions {
+  isActive(): boolean;
+  samePlayer(player: Player | undefined): boolean;
+  getViewerId(): string | undefined;
+  report(error: unknown, operation: "itemChange", slot?: number): void;
+}
+
+export class WindowItemGuard {
+  readonly viewer: Player;
+  readonly #isActive: () => boolean;
+  readonly #samePlayer: (player: Player | undefined) => boolean;
+  readonly #getViewerId: () => string | undefined;
+  readonly #report: (error: unknown, operation: "itemChange", slot?: number) => void;
+  #screenChanges: ScreenItemChange[] = [];
+  #playerChanges: PlayerSlotChangeRecord[] = [];
+  #cursorChanges: CursorItemChangeRecord[] = [];
+  #dropChanges: DroppedItemChangeRecord[] = [];
+  #guardReconcileQueued = false;
+  #guardReconcileToken = 0;
+  #applyingGuard = false;
+
+  constructor(viewer: Player, options: WindowItemGuardOptions) {
+    this.viewer = viewer;
+    this.#isActive = options.isActive;
+    this.#samePlayer = options.samePlayer;
+    this.#getViewerId = options.getViewerId;
+    this.#report = options.report;
+  }
+
+  recordScreenChange(before: ItemStack | undefined, after: ItemStack | undefined): void {
+    recordScreenItemChange(this.#screenChanges, before, after);
+  }
+
+  queueReconcile(): void {
+    this.#queueGuardReconcile();
+  }
+
+  reset(): void {
+    this.#guardReconcileToken += 1;
+    this.#guardReconcileQueued = false;
+    this.#applyingGuard = false;
+    this.#screenChanges = [];
+    this.#playerChanges = [];
+    this.#cursorChanges = [];
+    this.#dropChanges = [];
+  }
+
+  #queueGuardReconcile(): void {
+    if (this.#guardReconcileQueued) {
+      return;
+    }
+    this.#guardReconcileQueued = true;
+    const token = ++this.#guardReconcileToken;
+    const run = (): void => {
+      if (token !== this.#guardReconcileToken || !this.#guardReconcileQueued) {
+        return;
+      }
+      this.#guardReconcileQueued = false;
+      this.#reconcileScreenChanges();
+    };
+    const gameSystem: typeof server.system | undefined = server.system;
+    if (gameSystem && typeof gameSystem.run === "function") {
+      try {
+        gameSystem.run(run);
+        return;
+      } catch {
+        // A broken scheduler must not leave the guard pending forever.
+      }
+    }
+    run();
+  }
+
+
+  #reconcileScreenChanges(): void {
+    const screenChanges = this.#screenChanges;
+    const playerChanges = this.#playerChanges;
+    const cursorChanges = this.#cursorChanges;
+    const dropChanges = this.#dropChanges;
+    this.#screenChanges = [];
+    this.#playerChanges = [];
+    this.#cursorChanges = [];
+    this.#dropChanges = [];
+    if (screenChanges.length === 0) {
+      return;
+    }
+    if (!this.#isActive()) {
+      return;
+    }
+    const container = playerInventoryContainer(this.viewer);
+    const cursor = this.#cursorInventory();
+    if (!container && !cursor) {
+      return;
+    }
+    const netScreenChanges = collapseScreenChanges(screenChanges);
+    const netPlayerChanges = collapsePlayerChanges(playerChanges);
+    const netCursorChanges = collapseCursorChanges(cursorChanges);
+    const effects = {
+      revertPlayerSlot: (container: Container, change: PlayerSlotChangeRecord) =>
+        this.#revertPlayerSlot(container, change),
+      clearCursorItem: (cursor: PlayerCursorInventoryComponent, item: ItemStack) =>
+        this.#clearCursorItem(cursor, item),
+      removeDroppedItem: (change: DroppedItemChangeRecord) => this.#removeDroppedItem(change),
+      returnToInventory: (container: Container, item: ItemStack) =>
+        this.#returnToInventory(container, item),
+    };
+    this.#applyingGuard = true;
+    try {
+      for (const screenChange of netScreenChanges) {
+        if (screenChange.kind === "take") {
+          revertGainedByPlayer(
+            effects,
+            screenChange,
+            container,
+            cursor,
+            netPlayerChanges,
+            netCursorChanges,
+            dropChanges,
+          );
+        } else {
+          revertPlacedByPlayer(
+            effects,
+            screenChange,
+            container,
+            cursor,
+            netPlayerChanges,
+            netCursorChanges,
+          );
+        }
+      }
+    } finally {
+      this.#applyingGuard = false;
+    }
+  }
+
+
+  #removeDroppedItem(change: DroppedItemChangeRecord): boolean {
+    try {
+      if (!change.entity.isValid) {
+        return false;
+      }
+      const component = change.entity.getComponent("minecraft:item");
+      if (!component || !sameItemContent(component.itemStack, change.item)) {
+        return false;
+      }
+      change.entity.remove();
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+
+  #cursorInventory(): PlayerCursorInventoryComponent | undefined {
+    try {
+      return this.viewer.getComponent("minecraft:cursor_inventory");
+    } catch {
+      return undefined;
+    }
+  }
+
+
+  #revertPlayerSlot(container: Container, change: PlayerSlotChangeRecord): boolean {
+    const expected = change.after;
+    if (!expected) {
+      return false;
+    }
+    const slot = resolvePlayerSlot(container, change);
+    if (slot === undefined) {
+      return false;
+    }
+    try {
+      container.setItem(slot, change.before);
+      return true;
+    } catch (error) {
+      // The duplicate stays, but the screen content is consistent; closing
+      // would not remove it, so report and keep the Window usable.
+      this.#report(error, "itemChange", slot);
+      return false;
+    }
+  }
+
+
+  #clearCursorItem(
+    cursor: PlayerCursorInventoryComponent,
+    expected: ItemStack,
+  ): boolean {
+    let current: ItemStack | undefined;
+    try {
+      current = cursor.item;
+    } catch {
+      return false;
+    }
+    if (!sameTypeAndAmount(current, expected)) {
+      return false;
+    }
+    try {
+      cursor.clear();
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+
+  #returnToInventory(container: Container, item: ItemStack): boolean {
+    try {
+      const leftover = container.addItem(item);
+      if (leftover !== undefined) {
+        // The inventory is full: the item cannot be returned, but it must not
+        // stay behind a screen slot that was already restored.
+        this.#report(
+          new Error("InvUI: cannot return the item placed into the screen; the inventory is full."),
+          "itemChange",
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.#report(error, "itemChange");
+      return false;
+    }
+  }
+
+
+  _onViewerInventoryChange(event: PlayerInventoryItemChangeAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (!this.#isActive()) {
+      return;
+    }
+    if (!this.#samePlayer(event.player)) {
+      return;
+    }
+    let inventoryType: PlayerInventoryType;
+    let slot: number;
+    let before: ItemStack | undefined;
+    let after: ItemStack | undefined;
+    try {
+      inventoryType = event.inventoryType;
+      slot = event.slot;
+      before = event.beforeItemStack;
+      after = event.itemStack;
+    } catch {
+      // The event may expose an invalid player/stack.
+      return;
+    }
+    if (!Number.isInteger(slot) || slot < 0) {
+      return;
+    }
+    if (stackType(before) === undefined && stackType(after) === undefined) {
+      return;
+    }
+    this.#playerChanges.push({
+      inventoryType,
+      slot,
+      before,
+      after,
+      matchedGain: false,
+      matchedLoss: false,
+    });
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+  }
+
+
+  _onViewerCursorGrab(event: PlayerCursorItemGrabAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (!this.#isActive()) {
+      return;
+    }
+    if (!this.#samePlayer(event.player)) {
+      return;
+    }
+    let item: ItemStack;
+    try {
+      item = event.item;
+    } catch {
+      return;
+    }
+    if (stackType(item) === undefined) {
+      return;
+    }
+    this.#cursorChanges.push({ kind: "grab", item, matched: false });
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+  }
+
+
+  _onViewerCursorRelease(event: PlayerCursorItemReleaseAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (!this.#isActive()) {
+      return;
+    }
+    if (!this.#samePlayer(event.player)) {
+      return;
+    }
+    let item: ItemStack;
+    try {
+      item = event.item;
+    } catch {
+      return;
+    }
+    if (stackType(item) === undefined) {
+      return;
+    }
+    this.#cursorChanges.push({ kind: "release", item, matched: false });
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+  }
+
+
+  _onViewerItemDrop(event: EntityItemDropAfterEvent): void {
+    if (this.#applyingGuard) {
+      return;
+    }
+    if (!this.#isActive()) {
+      return;
+    }
+    const viewerId = this.#getViewerId() ?? readId(this.viewer);
+    if (!viewerId) {
+      return;
+    }
+    let droppedBy: string | undefined;
+    let items: Entity[];
+    try {
+      droppedBy = event.entity?.id;
+      items = event.items;
+    } catch {
+      return;
+    }
+    if (droppedBy !== viewerId || !Array.isArray(items)) {
+      return;
+    }
+    for (const itemEntity of items) {
+      let item: ItemStack | undefined;
+      try {
+        item = itemEntity.getComponent("minecraft:item")?.itemStack;
+      } catch {
+        item = undefined;
+      }
+      if (!item || stackType(item) === undefined) {
+        continue;
+      }
+      this.#dropChanges.push({ entity: itemEntity, item, matched: false });
+    }
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
+  }
+
 }
