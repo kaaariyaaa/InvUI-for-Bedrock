@@ -42,6 +42,7 @@ import type {
   WindowContainerCloseHandler,
   WindowContainerItemChangeHandler,
 } from "./window-types.js";
+import { clearUnmappedColumns, writeRenderedSlot, watchPendingSlot, resolveSlotElement } from "./window-render.js";
 import { WindowContainerSubscriptions } from "./window-container-subscriptions.js";
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
@@ -2572,31 +2573,12 @@ export class Window {
    * slots that were cleared are marked empty, so a retry skips them.
    */
   #clearUnmappedColumns(layout: ResolvedGuiLayout): boolean {
-    const container = this.#container;
-    const cache = this.#writeCache;
-    if (!container || !cache) {
-      return true;
-    }
-    let cleared = true;
-    for (let row = 0; row < layout.height; row += 1) {
-      for (let column = layout.width; column < PHYSICAL_COLUMNS; column += 1) {
-        const physicalSlot = row * PHYSICAL_COLUMNS + column;
-        if (physicalSlot >= container.size || !cache.shouldWrite(physicalSlot, undefined)) {
-          continue;
-        }
-        try {
-          // The layout has no logical slot for this index, so the reported
-          // slot is the physical one.
-          container.setItem(physicalSlot, undefined);
-        } catch (error) {
-          this.#report(error, "setItem", physicalSlot);
-          cleared = false;
-          continue;
-        }
-        cache.markWritten(physicalSlot, undefined);
-      }
-    }
-    return cleared;
+    return clearUnmappedColumns(
+      layout,
+      this.#container,
+      this.#writeCache,
+      (error, slot) => this.#report(error, "setItem", slot),
+    );
   }
 
   async #renderSlot(slot: number, epoch: number = this.#renderEpoch): Promise<void> {
@@ -2641,7 +2623,7 @@ export class Window {
         stack = element.getItem();
       } else {
         awaited = true;
-        stack = await this.#resolveElement(element);
+        stack = await resolveSlotElement(this.viewer, element);
       }
     } catch (error) {
       // Keep the previous display item for provider failures (design 14.2).
@@ -2684,7 +2666,11 @@ export class Window {
       // still attached in the same tick as the provider call, so a rejection
       // cannot become unhandled.
       this.#applySlotStack(generation, epoch, slot, element, token, stack);
-      this.#watchPendingSlot(pending, slot, element, generation, epoch, token);
+      watchPendingSlot(pending, {
+        apply: (result) => this.#applySlotStack(generation, epoch, slot, element, token, result),
+        isCurrent: () => this.#isCurrentSlot(generation, epoch, slot, element, token),
+        onError: (error) => this.#report(error, "itemProvider", slot),
+      });
       return;
     }
     this.#applySlotStack(generation, epoch, slot, element, token, stack);
@@ -2754,79 +2740,17 @@ export class Window {
     if (!layout || !container || !cache) {
       return;
     }
-    const physicalSlot = physicalSlotOf(layout, slot);
-    // The one provable skip: this container's slot was last cleared by this
-    // Window and is cleared again. It cannot delete data and it never skips a
-    // stack, so display content is never withheld. Skipping anything else
-    // would require an ItemStack equality that Bedrock does not provide.
-    if (!cache.shouldWrite(physicalSlot, stack)) {
-      // The container is already proven empty here, which is what the layout
-      // asks for: the slot is displayed.
-      this.#unrenderedSlots.delete(slot);
-      return;
-    }
-    try {
-      container.setItem(physicalSlot, stack);
-    } catch (error) {
-      // Remember the failure so a slot-skipping diff still re-renders this
-      // slot; otherwise the failed write's stale display would persist. The
-      // slot still shows the previous item, so input must not target it.
-      cache.markFailed(physicalSlot);
+
+    const result = writeRenderedSlot(layout, container, cache, slot, stack);
+    if (result.status === "failed") {
       this.#unrenderedSlots.add(slot);
-      this.#report(error, "setItem", slot);
+      this.#report(result.error, "setItem", slot);
       return;
     }
-    // Record only after the write returned: a throwing setItem stays
-    // unrecorded, so the next pass retries it instead of skipping it.
-    cache.markWritten(physicalSlot, stack);
     this.#unrenderedSlots.delete(slot);
   }
 
-  /**
-   * Attach the final result of an asynchronous provider that is currently
-   * represented by a placeholder. The caller does not await this promise, so
-   * open() is not delayed; the result still passes the slot guards when it
-   * arrives. A rejection is reported through the Window error channel instead
-   * of becoming an unhandled rejection.
-   */
-  #watchPendingSlot(
-    pending: Promise<ItemStack | undefined>,
-    slot: number,
-    element: SlotElement | null | undefined,
-    generation: number,
-    epoch: number,
-    token: number,
-  ): void {
-    void pending
-      .then(
-        (stack) => this.#applySlotStack(generation, epoch, slot, element, token, stack),
-        (error) => {
-          // Keep the previous display item, including the placeholder, and
-          // report the failure like the awaited provider path does. A rejection
-          // for a stale slot is dropped for the same reason as a stale result:
-          // the error handler could close the screen that is now showing.
-          if (!this.#isCurrentSlot(generation, epoch, slot, element, token)) {
-            return;
-          }
-          this.#report(error, "itemProvider", slot);
-        },
-      )
-      .catch((error) => {
-        // The callbacks above already handle provider failures; this only
-        // guards the error channel itself from producing an unhandled rejection.
-        console.error("InvUI: pending item provider result failed.", error);
-      });
-  }
 
-  async #resolveElement(element: SlotElement | null | undefined): Promise<ItemStack | undefined> {
-    if (isItemElement(element)) {
-      return element.resolve(this.viewer);
-    }
-    if (isInventoryLinkElement(element)) {
-      return element.getItem();
-    }
-    return undefined;
-  }
 
   /**
    * Move element subscriptions to the current layout. A slot that still shows
