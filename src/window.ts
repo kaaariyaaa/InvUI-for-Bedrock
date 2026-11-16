@@ -1,106 +1,9 @@
 /**
- * Window lifecycle (design chapter 8).
+ * Window lifecycle and VirtualContainer adapter.
  *
- * The real adapter is enabled by default: `canOpenScreens` is true and
- * `openContainer`/`closeContainer` call `VirtualContainer.open(player)` /
- * `close(player)`. This path has NOT been verified on a real device.
- *
- * Screen protection is detection plus best-effort recovery, not prevention.
- * `virtualContainerItemChange` is an `after` event, so a move the player
- * performs through the screen has already happened when the handler runs. The
- * Window therefore lets the move happen and undoes it:
- *
- * 1. `virtualContainerItemChange` restores the changed container slot from its
- *    `beforeItemStack`, so the screen keeps showing what it showed before.
- * 2. A reconciliation pass on the next tick pairs the container change with
- *    the player's own events (`playerInventoryItemChange`,
- *    `playerCursorItemGrab`, `playerCursorItemRelease`) and reverts only the
- *    player-side slot or cursor the screen move created. It never scans for
- *    "GUI-tagged" items: the Window knows what it rendered, and the player-side
- *    event describes the destination slot and its previous content exactly, so
- *    the player's own identical stacks are left alone.
- * 3. A container slot that cannot be restored fails closed
- *    (`WindowItemChangeDangerError`, rendering stopped, Window closed).
- *
- * A drop straight from the screen to the ground is covered by the same pairing:
- * `entityItemDrop` records the dropped item entity and the reconciliation
- * removes that entity when it still holds the item the screen lost. Limit: this
- * is `after`-the-fact and Script API only; a player-side change that cannot be
- * mapped to a slot is skipped rather than guessed. Not verified on a real
- * device.
- *
- * `createContainer()` uses the official
- * `world.virtualContainerManager.create()` so layout sizes and titles can be
- * checked against the documented 1..54 / 256-byte limits.
- *
- * Chat input is wired automatically: the first successful `open()` installs a
- * single `world.beforeEvents.chatSend` subscription and registers the open
- * Window for its viewer. `Window.close()` and every layout page/line/tab change
- * invalidate the bridge generation, so a queued notification can never click a
- * closed, reopened, or replaced screen. Every successful `open()` also mints a
- * new `_inputSessionId`: the chat notification must name the current open, so a
- * delayed line from an earlier open (or from before a script reload, when
- * `Window.id` restarts at `window-1`) cannot match a new screen. Every open
- * also starts `_inputLayoutGeneration` at 0 and advances it on a page/line/tab
- * or slot-element change; a state change advances it as soon as `setState()`
- * accepts it, so a line minted for the page still on screen fails even before
- * the render catches up. The new generation names a layout that has no button
- * on screen yet, so chat input and `handleClick()` fail closed until the render
- * applies and writes it (`#layoutPresented`), and across a container
- * regeneration until the replacement is shown: the player can only click what
- * is displayed, never a button of the pending page or of a screen that is
- * still being built. The old three-field notification form has no generation
- * and is not accepted.
- * Nothing is installed when the game API (or a test double) omits
- * `beforeEvents.chatSend` or `system.run`; the Window still works and chat
- * input fails closed.
- *
- * The notification is a player-typed chat line. Every field except the sender
- * id is attacker controlled and can be typed by hand, so the bridge's checks
- * are consistency checks, not authentication. No code here produces the JSON UI
- * `button.send` payload either: design 10.4 does not guarantee a notification
- * is generated at all, so an Item click must still work without one. Like the
- * screen path, this is NOT verified on a real device.
- *
- * `world.afterEvents.playerLeave` closes the Window of the viewer that left
- * with `PlayerLeft`, whether it is still `opening` or already `open`. The event
- * carries only the player id, captured when the open cycle registers, and an
- * id that belongs to another player is ignored. One module-level subscription
- * serves every Window; closing releases the chat registry, state handle, GUI
- * and element subscriptions, and adapter subscriptions through the normal
- * close path (generation checks intact). An environment without the event
- * (older API, test double) is detected once and Windows keep working without
- * the automatic close.
- *
- * `world.afterEvents.entityDie` closes the Window of its viewer with
- * `PlayerDied` while it is still `opening` or already `open`. Only the dead
- * entity's id is read and matched against the id captured at open, so a
- * non-player death, another player, or an entity whose id cannot be read is
- * ignored; the game's own `PlayerDied` close event is the fallback. It reuses
- * the same close path and module-level subscription shape as `playerLeave`, and
- * the adapter is not asked to close a screen that went away with the player.
- * An environment without the event is detected separately and latches off.
- *
- * `world.afterEvents.playerDimensionChange` closes the viewer's Window with
- * `ServerClosed` (design 13.1) and `world.afterEvents.playerGameModeChange`
- * closes it with `PlayerSpectating` when the new mode is `Spectator`. Both
- * match the viewer id captured at open, ignore other players and non-spectator
- * mode changes, and are feature-detected separately, so one missing event never
- * disables the others. The player is still valid here, so these closes also ask
- * the adapter to close the screen; the game usually closes it first and the
- * duplicate request is harmless. Both are NOT verified on a real device.
- *
- * `system.beforeEvents.shutdown` closes every `opening`/`open` Window with
- * `ServerClosed` before the world goes away. No close event is raised on that
- * path, so the subscription is installed with the leave/death ones on the
- * first `open()`. The callback runs with restricted-execution privilege: it
- * does not call `VirtualContainer.close()`, adapter unsubscribers, or any event
- * `unsubscribe()`. Only local resources are released (chat routing, registry
- * entries, state handle, GUI/element subscriptions, container references); the
- * engine drops the screens and subscriptions with the session. Close handlers
- * still run exactly once, and an `open()` they attempt is suppressed for the
- * rest of the module lifetime, so a shutdown cannot be followed by a new
- * screen. A repeated shutdown event is a no-op.
+ * Screen slot changes are restored from beforeItemStack. Matching player
+ * inventory, cursor, and dropped-item changes are reconciled on the next tick.
+ * If the screen slot cannot be restored, the Window closes.
  */
 import { world } from "@minecraft/server";
 import * as server from "@minecraft/server";
@@ -121,11 +24,8 @@ import type {
   VirtualContainerItemChangeAfterEvent,
   VirtualContainerOptions,
 } from "@minecraft/server";
-import { connectChatSendInput, createChatInputBridge } from "./chat-input-bridge.js";
-import type { ChatInputBridge, ChatInputClickOutcome } from "./chat-input-bridge.js";
 import { GuiLink, ScrollGui, TabGui } from "./gui.js";
 import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
-import type { InputSlotMode } from "./input.js";
 import type { InventoryLink } from "./inventory.js";
 import type { Item } from "./item.js";
 import { BedrockWorldStateStore } from "./bedrock-store.js";
@@ -464,97 +364,6 @@ export class MinecraftVirtualContainerAdapter implements WindowContainerAdapter 
 export const minecraftVirtualContainerAdapter = new MinecraftVirtualContainerAdapter();
 
 /**
- * Open Windows tracked for chat input, one set shared by the whole module so
- * the before-event is subscribed exactly once. The bridge filters by viewer id,
- * so a message from another player never reaches a Window it does not own.
- */
-const chatInputWindows = new Set<Window>();
-let chatInputBridge: ChatInputBridge | undefined;
-/** Latches the feature-detection failure: never retried, never thrown at open(). */
-let chatInputUnavailable = false;
-
-/**
- * Installs the chat input bridge on first use, or returns undefined when the
- * game API is absent (older `@minecraft/server`, test doubles, or a world with
- * the event disabled). The failure is latched so opening Windows stays cheap
- * and chat input fails closed instead of breaking screen handling.
- */
-function ensureChatInputBridge(): ChatInputBridge | undefined {
-  if (chatInputBridge) {
-    return chatInputBridge;
-  }
-  if (chatInputUnavailable) {
-    return undefined;
-  }
-  const gameSystem: typeof server.system | undefined = server.system;
-  let chatSend: typeof world.beforeEvents.chatSend | undefined;
-  try {
-    chatSend = world.beforeEvents?.chatSend;
-  } catch {
-    chatSend = undefined;
-  }
-  if (
-    !gameSystem ||
-    typeof gameSystem.run !== "function" ||
-    !chatSend ||
-    typeof chatSend.subscribe !== "function"
-  ) {
-    chatInputUnavailable = true;
-    return undefined;
-  }
-  try {
-    const bridge = createChatInputBridge({
-      windows: () => chatInputWindows,
-      // The Window exposes the modes of its current layout; a missing or
-      // throwing probe becomes [] in the bridge and rejects every slot.
-      slotModes: (window) => window._inputSlotModes?.() ?? [],
-    });
-    connectChatSendInput({ world, system: gameSystem }, bridge, (error) => {
-      console.error("InvUI: chat input dispatch failed.", error);
-    });
-    chatInputBridge = bridge;
-    return bridge;
-  } catch (error) {
-    // A broken event signal must not make open() fail: disable chat input.
-    console.error(
-      "InvUI: chat input bridge could not be installed; chat input is disabled.",
-      error,
-    );
-    chatInputUnavailable = true;
-    return undefined;
-  }
-}
-
-function registerChatInputWindow(window: Window): void {
-  ensureChatInputBridge();
-  chatInputWindows.add(window);
-}
-
-/** Close path: stop routing chat to the Window before handlers can reopen it. */
-function forgetChatInputWindow(window: Window): void {
-  if (!chatInputWindows.delete(window)) {
-    return;
-  }
-  try {
-    chatInputBridge?.invalidate(window);
-  } catch {
-    // Invalidation is best effort; the Window is already out of the registry.
-  }
-}
-
-/** Page/line/tab change: old notifications must not click the new layout. */
-function invalidateChatInputWindow(window: Window): void {
-  if (!chatInputWindows.has(window)) {
-    return;
-  }
-  try {
-    chatInputBridge?.invalidate(window);
-  } catch {
-    // Best effort: handleClick() still re-validates the slot and layout.
-  }
-}
-
-/**
  * Windows that are `opening` or `open` and must be closed when their viewer's
  * session ends (leave, death, dimension change, spectator) or the world shuts
  * down, one set shared by the module so each game event is subscribed once for
@@ -565,7 +374,7 @@ const lifecycleWindows = new Set<Window>();
 
 interface AfterEventSubscriptionState {
   subscribed: boolean;
-  /** Latches the feature-detection failure, like the chat input bridge. */
+  /** Latches the feature-detection failure, for this optional event. */
   unavailable: boolean;
 }
 
@@ -1306,12 +1115,7 @@ function sameSlotElements(
   return true;
 }
 
-/**
- * True when two resolved layouts address the same clickable slots. Width and
- * height are included because a physical slot maps differently when they change
- * (the container is regenerated for that, but the chat generation must cover it
- * as well).
- */
+/** Compare clickable slots, page, tab, and dimensions. */
 function sameClickableLayout(left: ResolvedGuiLayout, right: ResolvedGuiLayout): boolean {
   return (
     left.page === right.page &&
@@ -1508,22 +1312,6 @@ export class MergedWindowBuilder extends WindowBuilder {
 }
 
 let nextWindowId = 1;
-let nextInputSessionId = 1;
-
-/**
- * Mints the input session id of one open cycle. `Window.id` cannot be used:
- * after a script reload it starts at `window-1` again, so a delayed
- * notification from the previous run could match. The wall clock, a
- * process-local counter, and a random tail keep the id unique per open; the
- * format fits the notification grammar and is not a secret or authentication.
- */
-function createInputSessionId(): string {
-  const time = Date.now().toString(36);
-  const counter = (nextInputSessionId++).toString(36);
-  const random = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-  return `session-${time}-${counter}-${random}`;
-}
-
 export class Window {
   readonly id = `window-${nextWindowId++}`;
   readonly viewer: Player;
@@ -1532,30 +1320,14 @@ export class Window {
   #lowerGui: Gui | undefined;
 
   #status: WindowStatus = "created";
-  /** Per-open chat input session id; see `_inputSessionId`. */
-  #inputSessionId: string | undefined;
-  /**
-   * Generation of the current clickable layout; see `_inputLayoutGeneration`.
-   * Starts at 0 for each open and advances on a page/line/tab or slot-element
-   * change. A chat notification names this value, so one sent for the previous
-   * layout cannot click a button that now occupies the same slot.
-   */
-  #inputLayoutGeneration = 0;
-  /**
-   * Layout the current state resolves to while `#layout` still shows an earlier
-   * one (a `setState()` page/line/tab change whose refresh microtask has not run
-   * yet). It exists so the generation advances once per logical layout (and an
-   * A -> B -> A round trip in one timing still invalidates B's line), but it is
-   * not a click target: while it is set, `#inputLayout()` returns undefined and
-   * chat input and `handleClick()` fail closed until the render applies it.
-   * Otherwise a line minted right after `setState()` could run a new page's
-   * button while the old page is still on screen.
-   */
-  #inputPendingLayout: ResolvedGuiLayout | undefined;
+  /** Invalidate queued clicks when the layout changes. */
+  #clickLayoutGeneration = 0;
+  /** Layout pending rendering; it cannot receive clicks yet. */
+  #pendingClickLayout: ResolvedGuiLayout | undefined;
   /**
    * Logical slots of `#layout` whose last render attempt failed or whose write
    * threw. They still show whatever the container had before (the previous
-   * layout's item after a mapping change), so chat input and `handleClick()`
+   * layout's item after a mapping change), so `handleClick()`
    * treat them as non-buttons until a later write succeeds. Without this the
    * gate would open for a layout where a failed slot was never drawn, and a
    * click could run the new page's handler while the player sees the old item.
@@ -1563,7 +1335,7 @@ export class Window {
   #unrenderedSlots = new Set<number>();
   /**
    * Full-layout render passes still running per applied layout. A layout does
-   * not settle while any pass for it is in flight, so a notification flush that
+   * not settle while any pass for it is in flight, so a queued click flush that
    * wrote a single slot cannot present a layout whose remaining slots are still
    * being rendered.
    */
@@ -1781,76 +1553,11 @@ export class Window {
     return this.#status === "open";
   }
 
-  /**
-   * The layout input may target: the one the render applied *and* wrote to the
-   * screen. While `#inputPendingLayout` is set the state names a different
-   * layout whose render has not caught up; while `#layoutPresented` is false
-   * the applied layout (or the regeneration's replacement) is not on screen
-   * yet. In both cases there is no clickable layout to target and both
-   * `_inputSlotModes()` and `_inputClick()` fail closed. Running a button
-   * before it is displayed would invoke a handler the player never saw, which
-   * is not the same operation as clicking the button on screen.
-   */
-  #inputLayout(): ResolvedGuiLayout | undefined {
-    return this.#inputPendingLayout === undefined && this.#layoutPresented
+  /** Only the fully displayed layout can receive clicks. */
+  #clickableLayout(): ResolvedGuiLayout | undefined {
+    return this.#pendingClickLayout === undefined && this.#layoutPresented
       ? this.#layout
       : undefined;
-  }
-
-  /**
-   * Internal: mode of every logical slot of the layout on screen, used by the
-   * automatic chat input bridge. Returns null when there is no presented layout
-   * (the state's layout is still pending, its render has not completed, or a
-   * regeneration has not shown the replacement yet), which the bridge treats as
-   * "no slot is a button" (fail closed).
-   */
-  _inputSlotModes(): readonly InputSlotMode[] | null {
-    const layout = this.#inputLayout();
-    if (!layout) {
-      return null;
-    }
-    return layout.slots.map((element, slot) => {
-      if (this.#unrenderedSlots.has(slot)) {
-        // The slot shows an earlier render (or nothing); do not offer it.
-        return "display";
-      }
-      if (isButtonElement(element)) {
-        return "button";
-      }
-      if (isInventoryLinkElement(element)) {
-        return "inventory";
-      }
-      return "display";
-    });
-  }
-
-  /**
-   * Internal: identifies the current open cycle to the chat input bridge.
-   * Changes on every successful `open()`. `Window.id` stays the public,
-   * stable `window-N` identity and is deliberately not used for this: it is
-   * reused across script reloads, where a delayed notification could match.
-   * Not part of the exported API; no UI payload is generated yet.
-   */
-  get _inputSessionId(): string | undefined {
-    return this.#inputSessionId;
-  }
-
-  /**
-   * Internal: generation of the current clickable layout for the chat input
-   * bridge. It changes when the page/line/tab or the slot-element mapping
-   * changes, and starts again at 0 for each open (the session id already
-   * distinguishes opens). A state change advances it as soon as `setState()`
-   * accepts the change, not when the render catches up, so a line minted for
-   * the page still on screen is already stale. The new generation names a
-   * layout that is not displayed yet, so input is rejected until the render
-   * applies and writes it (`#inputPendingLayout` and `#layoutPresented` keep the
-   * gap fail closed). A notification
-   * that names an older generation is rejected even if the same slot is a
-   * button again, so a line minted before a page change cannot be applied after
-   * it. Not part of the exported API.
-   */
-  get _inputLayoutGeneration(): number | undefined {
-    return this.#inputSessionId === undefined ? undefined : this.#inputLayoutGeneration;
   }
 
   /**
@@ -2003,7 +1710,7 @@ export class Window {
     this.#layoutRenders.clear();
     this.#unrenderedSlots.clear();
     this.#containerSwapPending = false;
-    this.#inputPendingLayout = undefined;
+    this.#pendingClickLayout = undefined;
     const generation = ++this.#generation;
 
     try {
@@ -2148,17 +1855,8 @@ export class Window {
         this.#layoutPresented = false;
         this.#scheduleRefresh();
       }
-      // A new open cycle is a new input session: a notification naming the
-      // previous session (or a previous script reload's `window-N`) must fail.
-      // The layout generation is per open too, and is reset before open
-      // handlers can change the page.
-      this.#inputSessionId = createInputSessionId();
-      this.#inputLayoutGeneration = 0;
-      this.#inputPendingLayout = undefined;
-      // Register before open handlers run: a handler may immediately render a
-      // button the player can click. Registration also installs the single
-      // chatSend subscription on the first successful open.
-      registerChatInputWindow(this);
+      this.#clickLayoutGeneration = 0;
+      this.#pendingClickLayout = undefined;
       this.#runOpenHandlers();
     } catch (error) {
       // The failing operation may have reported an error (for example a
@@ -2600,7 +2298,7 @@ export class Window {
    * from the new GUI are missing.
    */
   #attachGuiSubscription(gui: Gui, generation: number): void {
-    // Detach the old GUI before attaching the new one so a notification from
+    // Detach the old GUI before attaching the new one so a queued click from
     // either cannot refresh against the other GUI's layout.
     const previousUnsubscribe = this.#guiSubscription;
     this.#guiSubscription = undefined;
@@ -2924,7 +2622,7 @@ export class Window {
    * container (design 8.4). Unchanged slots keep their displayed stack and any
    * in-flight provider result stays valid; #queueSlotRender bumps the per-slot
    * token for changed slots so an older result cannot overwrite them. The
-   * slots join the normal refresh flush, so a notification or state change in
+   * slots join the normal refresh flush, so a queued click or state change in
    * the same timing still renders each slot once. Returns how many slots were
    * queued, so the caller can present immediately when none were.
    *
@@ -3268,60 +2966,35 @@ export class Window {
   }
 
   /**
-   * Routes a click to the button Item currently rendered at the logical `slot`.
-   * While a state change names a layout the render has not applied yet, no
-   * button is on screen for that layout, so the click is discarded (fail
-   * closed) instead of invoking a handler the player cannot see.
-   *
-   * Only `button`-mode Items accept input (design 10.5); a display Item, even
-   * one that carries handlers, returns false without enqueueing anything.
-   *
-   * Clicks run on the state handle's queue, so shared-state windows process
-   * them in order (design 12.1). The layout generation, the whole slot mapping,
-   * and the mode are checked again when the queued task actually runs: a click
-   * that waited behind a close, reopen, page/line/tab change, a swapped slot
-   * element, or a slot that turned display while waiting is discarded instead
-   * of invoking a handler for a layout that is no longer current. The
-   * generation is what catches a layout that changed and then returned to the
-   * same slot mapping: the mapping comparison alone cannot see that round trip.
+   * Dispatch a click to a displayed button Item. Queued clicks are checked
+   * against the current layout and mode before running their handlers.
    */
   async handleClick(slot: number): Promise<boolean> {
-    return (await this._inputClick(slot)) === "clicked";
-  }
-
-  /**
-   * Internal: routes one click and reports whether a handler was invoked, for
-   * the automatic chat input bridge. `handleClick()` keeps the public boolean
-   * form; the boolean alone cannot tell a discarded click (safe to retry) from
-   * a handler that ran and threw (replaying it would repeat its side effects).
-   */
-  async _inputClick(slot: number): Promise<ChatInputClickOutcome> {
-    const layout = this.#status === "open" ? this.#inputLayout() : undefined;
+    const layout = this.#status === "open" ? this.#clickableLayout() : undefined;
     if (!layout || !this.#stateHandle) {
-      return "discarded";
+      return false;
     }
     if (!Number.isInteger(slot) || slot < 0 || slot >= layout.slots.length) {
-      return "discarded";
+      return false;
     }
     const element = layout.slots[slot];
     if (this.#unrenderedSlots.has(slot)) {
       // The slot never showed this layout's item: its button is not clickable.
-      return "discarded";
+      return false;
     }
     if (!isButtonElement(element)) {
-      return "discarded";
+      return false;
     }
     const generation = this.#generation;
-    const layoutGeneration = this.#inputLayoutGeneration;
+    const layoutGeneration = this.#clickLayoutGeneration;
     const handle = this.#stateHandle;
-    let handlerInvoked = false;
     try {
       const clicked = await handle.enqueue(async () => {
         if (
           this.#status !== "open" ||
           this.#stateHandle !== handle ||
           generation !== this.#generation ||
-          layoutGeneration !== this.#inputLayoutGeneration
+          layoutGeneration !== this.#clickLayoutGeneration
         ) {
           return false;
         }
@@ -3341,9 +3014,9 @@ export class Window {
           layout.width !== currentLayout.width ||
           layout.height !== currentLayout.height ||
           // Compare the whole mapping, not only this slot: a change that
-          // swapped another slot is a new clickable layout (the wire layout
+          // swapped another slot is a new clickable layout (the logical layout
           // generation advances for it too), and a handler may read the rest
-          // of the layout. A notification accepted before that change must not
+          // of the layout. A queued click started before that change must not
           // run its handler after it (design 10.5, 12.3).
           !sameSlotElements(layout.slots, currentLayout.slots)
         ) {
@@ -3354,11 +3027,10 @@ export class Window {
         if (!isButtonElement(element)) {
           return false;
         }
-        handlerInvoked = true;
         await element.handleClick({ player: this.viewer, slot, window: this });
         return true;
       });
-      return clicked ? "clicked" : "discarded";
+      return clicked;
     } catch (error) {
       // A closed/reopened window discards queued clicks silently; a handler or
       // state-update failure while the window is live goes to the error channel.
@@ -3367,7 +3039,7 @@ export class Window {
       }
       // A rejection after the handler was invoked (or after the item's own
       // click path started) may already have applied side effects.
-      return handlerInvoked ? "failed" : "discarded";
+      return false;
     }
   }
 
@@ -4539,7 +4211,7 @@ export class Window {
     this.#slotRefreshQueued = false;
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
-    this.#inputPendingLayout = undefined;
+    this.#pendingClickLayout = undefined;
     this.#layoutPresented = false;
     this.#layoutSettled = false;
     this.#layoutRenders.clear();
@@ -4601,30 +4273,16 @@ export class Window {
       this.#revalidateStateRanges = true;
     }
     if (this.#status === "open") {
-      this.#noteInputLayoutChange();
+      this.#noteClickLayoutChange();
     }
     this.#scheduleSlotRefresh();
   }
 
   /**
-   * Advance the clickable-layout generation as soon as the state change resolves
-   * to a different layout, instead of waiting for the refresh microtask.
-   *
-   * The state is accepted synchronously by `setState()` but the rendered layout
-   * is only replaced asynchronously. In between, the old generation still names
-   * the old layout, so a notification minted from the just-read generation would
-   * pass validation and could invoke the button the *previous* page had in that
-   * slot. Advancing here makes that line fail as stale; remembering the layout
-   * also keeps input fail closed (`#inputPendingLayout`) until the render
-   * displays it, so the new generation cannot run an unseen button either.
-   *
-   * The layout is compared against the last one the generation was advanced for
-   * (`#inputPendingLayout`) so an A -> B -> A state round trip in one timing
-   * advances twice: the B layout was the logical clickable layout in between,
-   * and a line minted for it must not become valid again when the state returns
-   * to A. This mirrors the render-side counter in `#applyLayout`.
+   * Invalidate queued clicks as soon as the logical layout changes.
+   * Clicks remain disabled until the replacement is rendered.
    */
-  #noteInputLayoutChange(): void {
+  #noteClickLayoutChange(): void {
     const handle = this.#stateHandle;
     if (!handle || this.#renderingHalted) {
       return;
@@ -4637,13 +4295,12 @@ export class Window {
       // error channel; a state notification must not throw from here.
       return;
     }
-    const baseline = this.#inputPendingLayout ?? this.#layout;
+    const baseline = this.#pendingClickLayout ?? this.#layout;
     if (baseline === undefined || sameClickableLayout(baseline, layout)) {
       return;
     }
-    this.#inputLayoutGeneration += 1;
-    invalidateChatInputWindow(this);
-    this.#inputPendingLayout =
+    this.#clickLayoutGeneration += 1;
+    this.#pendingClickLayout =
       this.#layout !== undefined && sameClickableLayout(this.#layout, layout)
         ? undefined
         : layout;
@@ -4856,8 +4513,8 @@ export class Window {
 
   #applyLayout(layout: ResolvedGuiLayout): void {
     const previous = this.#layout;
-    const pending = this.#inputPendingLayout;
-    this.#inputPendingLayout = undefined;
+    const pending = this.#pendingClickLayout;
+    this.#pendingClickLayout = undefined;
     this.#layout = layout;
     this.#layoutSettled = false;
     // Keep #unrenderedSlots: applying a layout does not re-write a slot the diff
@@ -4868,13 +4525,13 @@ export class Window {
     // it; see #settleLayout. Input fails closed in the gap.
     this.#layoutPresented = false;
     // A page/line/tab change or a different slot element mapping is a new
-    // clickable layout: notifications accepted against the previous one must
+    // clickable layout: queued clicks targeting the previous one must
     // not run against this one. Content-only re-renders that keep every slot
     // element stay valid.
     //
     // A synchronous state-change listener may already have advanced the
     // generation for exactly this layout (`pending`); advancing again would
-    // make a notification minted after this render stale for no layout change.
+    // make a queued click started after this render stale for no layout change.
     // A pending layout that is *not* the one being applied is superseded, so it
     // must still invalidate its generation. Clearing `pending` here is what
     // makes the new layout clickable (see `#inputLayout`).
@@ -4883,14 +4540,13 @@ export class Window {
         ? !sameClickableLayout(pending, layout)
         : previous !== undefined && !sameClickableLayout(previous, layout)
     ) {
-      // Advance the wire generation before invalidating the queue: a line
+      // Advance the click generation before invalidating the queue: a line
       // minted for the previous layout must fail even if it is delivered only
-      // after this change (the queue epoch alone cannot catch that).
-      this.#inputLayoutGeneration += 1;
-      invalidateChatInputWindow(this);
+      // after this change (the click's layout check cannot catch that).
+      this.#clickLayoutGeneration += 1;
     }
     // Move element subscriptions as soon as the new layout exists. Waiting for
-    // async renders would let a notification hit the previous slot mapping and
+    // async renders would let a queued click hit the previous slot mapping and
     // be lost for the slot's new position (design 11.4).
     this.#subscribeToUpdates();
   }
@@ -4939,7 +4595,7 @@ export class Window {
       (this.#status !== "opening" && this.#status !== "open") ||
       this.#container !== container ||
       this.#layout !== layout ||
-      this.#inputPendingLayout !== undefined ||
+      this.#pendingClickLayout !== undefined ||
       this.#layoutRenders.has(layout)
     ) {
       return;
@@ -4960,7 +4616,7 @@ export class Window {
       this.#containerSwapPending ||
       this.#renderingHalted ||
       (this.#status !== "opening" && this.#status !== "open") ||
-      this.#inputPendingLayout !== undefined
+      this.#pendingClickLayout !== undefined
     ) {
       return;
     }
@@ -5350,10 +5006,9 @@ export class Window {
    * execution forbids. Everything else is local and released either way.
    */
   #teardown(restricted = false): void {
-    // Drop the Window from chat routing and lifecycle handling first: a close
+    // Drop the Window from lifecycle handling first: a close
     // handler may reopen it, and the reopened generation must be registered
     // afresh (with its own viewer id) instead of inheriting this teardown.
-    forgetChatInputWindow(this);
     lifecycleWindows.delete(this);
     itemGuardWindows.delete(this);
     // A reconciliation queued for the old generation must not touch the

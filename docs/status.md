@@ -19,7 +19,7 @@ Version `0.1.0-beta.1` (unpublished beta).
 | Feature | Status |
 | --- | --- |
 | Screen UI | Uses experimental `VirtualContainer` |
-| Click input | Accepts formatted chat notifications; no UI component sends them automatically |
+| Click handlers | `Window.handleClick(slot)` dispatches an eligible button callback when called explicitly |
 | Item protection | Post-event restoration and reconciliation, not preventative locking |
 | Inventory movement | `InventoryLink.moveTo()` disabled; `PlayerInventory` read-only |
 | Lower inventory | `setLowerGui()` stores a reference but does not render it |
@@ -27,6 +27,6 @@ Version `0.1.0-beta.1` (unpublished beta).
 | Script reload cleanup | Not implemented |
 | Runtime compatibility | Depends on the pinned experimental Script API |
 
-Chat notifications can be typed manually and are not authenticated clicks. Real item changes may not be fully reversible.
+Real item changes may not be fully reversible.
 
 See the [API reference](api.md) and [development guide](development.md).

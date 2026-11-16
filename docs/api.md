@@ -116,7 +116,7 @@ async function openGui(player: Player, gui: Gui) {
 | `status`, `isOpen`, `container` | Read lifecycle state |
 | `viewer`, `title`, `upperGui`, `lowerGui`, `id` | Window properties |
 
-The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters implement `WindowContainerAdapter`. The library does not generate UI click notifications; `handleClick()` does not identify a real UI event.
+The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters implement `WindowContainerAdapter`. `handleClick(slot)` is invoked explicitly; no automatic UI click transport is included.
 
 `WindowCloseReason` includes `PlayerClosed`, `PlayerDied`, `PlayerLeft`, `PlayerSpectating`, `ServerClosed`, and `UserBusy`.
 
