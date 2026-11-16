@@ -1,10 +1,10 @@
 # API reference
 
-Import the public API from `invui-bedrock`. The complete list of exports is in [`src/index.ts`](../src/index.ts).
+All public exports come from [`src/index.ts`](../src/index.ts). For a complete screen example, start with the [README](../README.md).
 
 ## GUIs
 
-A GUI uses a `Structure` to place items in slots. Each character is one slot, with a maximum size of 9 columns by 6 rows.
+A `Structure` uses one character per slot (up to 9 columns and 6 rows). Map characters to items, links, or content markers.
 
 ~~~ts
 import { Gui, Item, ItemBuilder, Markers } from "invui-bedrock";
@@ -12,172 +12,128 @@ import { Gui, Item, ItemBuilder, Markers } from "invui-bedrock";
 const gui = Gui.paged({
   structure: ["xxxxxxxxx"],
   ingredients: { x: Markers.CONTENT_LIST_SLOT_HORIZONTAL },
-  content: [
-    Item.simple(new ItemBuilder("minecraft:stone")),
-    Item.simple(new ItemBuilder("minecraft:diamond")),
-  ],
+  content: [Item.simple(new ItemBuilder("minecraft:diamond"))],
 });
 ~~~
 
-| API | Purpose |
+| API | What it does |
 | --- | --- |
-| `new Structure(...rows)` | Define a character-based layout |
-| `Gui.normal(options)` | Fixed layout |
-| `Gui.paged(options)` | Pages of content |
-| `Gui.scroll(options)` | Scrolling content |
-| `Gui.tab({ tabs })` | Switch between child GUIs |
-| `Gui.resolve(viewer?, state?)` | Calculate the displayed slots |
+| `new Structure(...rows)`, `addIngredient(key, value)` | Define a layout |
+| `Gui.normal(options)`, `Gui.paged(options)` | Fixed or paged GUI |
+| `Gui.scroll(options)`, `Gui.tab({ tabs })` | Scrolling or tabbed GUI |
+| `gui.resolve(viewer?, state?)` | Calculate visible slots |
 | `gui.setContent(items)` | Replace the content |
-| `gui.setIngredient(key, value)` | Change a character's item or marker |
-| `gui.removeIngredient(key)` | Remove an ingredient |
-| `gui.subscribe(listener)` | Listen for layout changes |
+| `gui.setIngredient(key, value)`, `removeIngredient(key)` | Edit the layout |
+| `gui.subscribe(fn)` | Listen for changes |
 
-`GuiOptions` contains `structure`, optional `ingredients`, and optional `content`. Scrolling GUIs also accept `direction`, `contentWidth`, and `contentHeight`.
+GUI options: `structure`, `ingredients?`, `content?`. Scrolling also supports `direction?`, `contentWidth?`, and `contentHeight?`. `GuiLink` embeds a child GUI with optional `key`, `state`, or `mapping`.
 
-Use `GuiLink(child, options)` to embed a GUI. The `key`, `state`, and `mapping` options control its state and slot placement. The horizontal and vertical content markers are in `Markers`.
+For a builder instead of options, call `Gui.builder()` or a no-argument `Gui.normal()`, `Gui.paged()`, `Gui.scroll()`, or `Gui.tab()`.
 
-Builder-style construction is also available through `Gui.builder()` or the no-argument `Gui.normal()`, `Gui.paged()`, `Gui.scroll()`, and `Gui.tab()` methods.
+[Source](../src/gui/gui.ts)
 
-[GUI source](../src/gui/gui.ts)
+## Items
 
-## Items and buttons
-
-`Item` controls what appears in a slot. An `ItemBuilder` creates the underlying Minecraft `ItemStack`.
+`ItemBuilder` creates a Minecraft `ItemStack`. `Item` determines what a GUI slot displays.
 
 ~~~ts
 import { Item, ItemBuilder } from "invui-bedrock";
 
 const button = Item.builder()
-  .setItemProvider(new ItemBuilder("minecraft:emerald").setName("Select"))
-  .addClickHandler(({ player }) => {
-    player.sendMessage("Selected");
-  })
+  .setItemProvider(new ItemBuilder("minecraft:emerald"))
+  .addClickHandler(({ player }) => player.sendMessage("Selected"))
   .build();
 ~~~
 
-| API | Purpose |
+| API | What it does |
 | --- | --- |
-| `new ItemBuilder(typeId, amount?)` | Create an item stack |
-| `setAmount()`, `setName()`, `addLoreLines()` | Set item details |
+| `new ItemBuilder(typeId, amount?)` | Create a stack; configure with `setAmount()`, `setName()`, or lore methods |
 | `Item.simple(source)`, `new Item(source)` | Create an item |
-| `Item.builder()` | Configure an item with a builder |
-| `setItemProvider(source)` | Change its item source |
-| `setPlaceholder(stack)` | Display an item while an async source loads |
-| `addClickHandler(handler)` | Register a button callback |
-| `setMode(mode)` | Choose `button` or `display` |
-| `updateOnClick()`, `updatePeriodically(ticks)` | Configure refreshes |
-| `notifyWindows()` | Ask subscribed windows to refresh |
+| `Item.builder()` | Configure an item using a builder |
+| `setItemProvider(source)`, `setPlaceholder(stack)` | Set the item or async placeholder |
+| `addClickHandler(fn)`, `setMode(mode)` | Configure button behavior |
+| `updateOnClick()`, `updatePeriodically(ticks)`, `notifyWindows()` | Request updates |
 
-An item source can be an `ItemStack`, an `ItemProvider`, or a function returning an item (including asynchronously). Items with click handlers default to `button` mode; `display` items do not run those handlers. `Item.EMPTY` represents an empty slot.
+Sources can be `ItemStack` values, providers, or functions (including async functions). Items with handlers default to `button` mode; `display` items do not execute handlers. `Item.EMPTY` creates an empty slot.
 
-**Click handlers are not connected to actual Minecraft screen clicks.** Call `Window.handleClick(slot)` explicitly to dispatch them.
+**Minecraft screen clicks are not automatically passed to button handlers.** Use `window.handleClick(slot)` to call a handler explicitly.
 
-[Item source](../src/item.ts)
+[Source](../src/item.ts)
 
 ## Windows
 
-A `Window` displays a GUI to a player using `VirtualContainer`.
+`Window.builder()` creates a screen for a player. Open it with `await window.open()`, as shown in the [README](../README.md#quick-start).
 
-~~~ts
-import { Window, type Gui } from "invui-bedrock";
-import type { Player } from "@minecraft/server";
-
-async function openMenu(player: Player, gui: Gui) {
-  const window = Window.builder()
-    .setViewer(player)
-    .setTitle("Menu")
-    .setUpperGui(gui)
-    .build();
-
-  await window.open();
-}
-~~~
-
-### Window builder
-
-| Method | Purpose |
+| Builder method | What it does |
 | --- | --- |
-| `setViewer(player)` | Required player |
-| `setUpperGui(gui)` | Required GUI |
+| `setViewer(player)`, `setUpperGui(gui)` | Required player and GUI |
 | `setTitle(title)` | Set the title |
-| `setLowerGui(gui)` | Store a lower GUI reference; it is not rendered |
-| `setStateScope(scope)` | `player` or `shared` |
-| `setStateKey(key)` | Identify the state; required for shared state |
+| `setStateScope(scope)`, `setStateKey(key)` | Choose `player` or `shared` state; shared state needs a key |
 | `setStateLifetime(lifetime)` | `window`, `session`, or `persistent` |
 | `setStateManager(manager)` | Supply a state manager |
-| `setContainerAdapter(adapter)` | Replace the default container adapter |
-| `addOpenHandler(fn)`, `addCloseHandler(fn)` | Register lifecycle callbacks |
-| `setErrorHandler(fn)` | Register error reporting |
+| `setContainerAdapter(adapter)` | Use a custom screen adapter |
+| `addOpenHandler(fn)`, `addCloseHandler(fn)`, `setErrorHandler(fn)` | Register callbacks |
+| `setLowerGui(gui)` | Store a reference; lower slots are not drawn |
 | `build()` | Create the window |
 
-`Window.mergedBuilder()` also provides `setGui(gui)` as an alias for `setUpperGui(gui)`.
+`Window.mergedBuilder().setGui(gui)` is another way to set the upper GUI.
 
-### Window methods
-
-| Member | Purpose |
+| Window member | What it does |
 | --- | --- |
-| `open()`, `close(reason?)` | Open or close the screen |
-| `refresh()` | Refresh the displayed content |
-| `setTitle(title)` | Change the window title |
-| `setUpperGui(gui)`, `setLowerGui(gui)` | Replace GUI references |
-| `setState(patch)`, `getState()` | Update or read GUI state |
-| `handleClick(slot)` | Call the rendered button's handler explicitly |
-| `setErrorHandler(fn)` | Change error reporting |
-| `status`, `isOpen`, `container` | Inspect the current window |
+| `open()`, `close(reason?)`, `refresh()` | Control the screen |
+| `setTitle(title)`, `setUpperGui(gui)` | Change displayed content |
+| `setLowerGui(gui)` | Replace the lower GUI reference |
+| `getState()`, `setState(patch)` | Read or update state |
+| `handleClick(slot)` | Call a displayed button's handler explicitly |
+| `status`, `isOpen`, `container` | Inspect the window |
 | `viewer`, `title`, `upperGui`, `lowerGui`, `id` | Window properties |
 
 The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters implement `WindowContainerAdapter`.
 
-[Window source](../src/window/window.ts)
+[Source](../src/window/window.ts)
 
 ## Inventories
 
-| API | Purpose |
+| API | What it does |
 | --- | --- |
-| `new VirtualInventory(size)` | Inventory held in memory |
-| `getItem(slot)`, `setItem(slot, item)`, `clear()` | Read or change items |
-| `getContents()`, `subscribe(listener)` | Read contents or listen for changes |
-| `serialize(codec)`, `VirtualInventory.deserialize(snapshot, codec)` | Save and load an inventory |
-| `new InventoryLink(inventory, slot)` | Refer to an inventory slot |
+| `new VirtualInventory(size)` | Store items in memory |
+| `getItem(slot)`, `setItem(slot, item)`, `clear()` | Work with slots |
+| `getContents()`, `subscribe(fn)` | Read or watch changes |
+| `serialize(codec)`, `VirtualInventory.deserialize(snapshot, codec)` | Save or load a snapshot |
+| `new InventoryLink(inventory, slot)` | Refer to a slot |
 | `new PlayerInventory(player, options?)` | Read the player's inventory |
-| `createPlayerInventoryChangeSource(signal, mapSlot)` | Connect an inventory change event |
+| `createPlayerInventoryChangeSource(signal, mapSlot)` | Adapt change events |
 
-Inventory snapshots require an `InventoryItemCodec` with `encode` and `decode` methods. No default codec is provided. `PlayerInventory` is read-only, and `InventoryLink.moveTo()` is not implemented.
+Serialization needs an `InventoryItemCodec` with `encode()` and `decode()`. There is no built-in codec. `PlayerInventory` is read-only; `InventoryLink.moveTo()` is unavailable.
 
-[Inventory source](../src/inventory/inventory.ts) · [Player inventory source](../src/inventory/player-inventory.ts)
+[Source](../src/inventory/inventory.ts) · [Player inventory](../src/inventory/player-inventory.ts)
 
 ## State
 
-Use `StateManager` to hold GUI state and, optionally, save it across sessions.
+`StateManager` manages GUI state. A store is required for persistent state.
 
 ~~~ts
 import { StateManager } from "invui-bedrock";
 
-const manager = new StateManager();
-const state = manager.acquire({
+const state = new StateManager().acquire({
   ownerId: "player-id",
   initial: { page: 0 },
 });
-
 state.set({ page: 1 });
 state.release();
 ~~~
 
-| API | Purpose |
+| API | What it does |
 | --- | --- |
-| `new StateManager(store?, options?)` | Manage state |
-| `manager.acquire(options)` | Obtain a state handle |
-| `manager.migrate(options, fn)`, `manager.remove(options)` | Change or delete stored state |
-| `state.get()`, `state.set(patch)` | Read and update state |
-| `state.subscribe(fn)` | Listen for changes |
-| `state.enqueue(task)`, `state.update(fn)` | Run ordered updates |
-| `state.release()` | Release a handle |
-| `new BedrockWorldStateStore(world, options?)` | Store data in world dynamic properties |
+| `new StateManager(store?, options?)` | Manage state and optional persistence |
+| `acquire(options)`, `release(handle)` | Acquire or release a state handle |
+| `get()`, `set(patch)`, `subscribe(fn)` | Read, update, or observe state |
+| `enqueue(task)`, `update(fn)` | Run ordered state updates |
+| `migrate(options, fn)`, `remove(options)` | Manage persisted records |
+| `new BedrockWorldStateStore(world, options?)` | Store state in world dynamic properties |
 
-`StateAcquireOptions` accepts `scope`, `key`, `ownerId`, `lifetime`, `schema`, and `initial`. GUI state can contain `page`, `line`, `tab`, `selection`, `data`, `tabs`, and `children`.
+Options include `scope` (`player` or `shared`), `lifetime` (`window`, `session`, or `persistent`), `key`, `ownerId`, `schema`, and `initial`. State fields include `page`, `line`, `tab`, `selection`, `data`, `tabs`, and `children`.
 
-State is scoped to a `player` or `shared`. Its lifetime is `window`, `session`, or `persistent`. Persistent state requires a store; the default Window manager uses world dynamic properties when available.
+[Source](../src/state/state.ts) · [Bedrock store](../src/state/bedrock-store.ts)
 
-[State source](../src/state/state.ts) · [Storage source](../src/state/bedrock-store.ts)
-
-For supported behavior and restrictions, see [Feature status](status.md). For complete signatures and error types, see the generated `dist/index.d.ts`.
+See [Feature status](status.md) for limitations. The generated `dist/index.d.ts` contains full signatures and types.
