@@ -29,6 +29,7 @@ import type { WindowCloseReason, WindowStatus, WindowErrorContext, WindowErrorHa
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
 import { lifecycleWindows, shutdownInProgress, readId, ensurePlayerLeaveSubscription, ensureEntityDieSubscription, ensurePlayerDimensionChangeSubscription, ensurePlayerGameModeChangeSubscription, ensureShutdownSubscription } from "./window-lifecycle.js";
+import { collapseScreenChanges, collapsePlayerChanges, collapseCursorChanges, resolvePlayerSlot, revertGainedByPlayer, revertPlacedByPlayer, recordScreenItemChange, pruneGuardRecords } from "./window-item-guard.js";
 import { playerSlotOffsets, MAX_SCREEN_GUARD_RECORDS, stackType, stackAmount, gainedBy, lostBy, playerInventoryContainer, readContainerItem, sameTypeAndAmount, sameItemContent, itemGuardWindows, ensureItemGuardSubscriptions } from "./window-item-guard.js";
 import type { ScreenItemChange, PlayerSlotChangeRecord, CursorItemChangeRecord, DroppedItemChangeRecord } from "./window-item-guard.js";
 export { WindowOpenRejectedError, WindowItemChangeDangerError, WindowStateSchemaChangedError, WindowOpenRenderLimitError } from "./window-types.js";
@@ -2244,48 +2245,13 @@ export class Window {
       this.#performClose("ServerClosed", true);
       return;
     }
-    this.#recordScreenItemChange(event.beforeItemStack, event.itemStack);
+    recordScreenItemChange(this.#screenChanges, event.beforeItemStack, event.itemStack);
     if (!this.#restoreScreenSlot(generation, container, event.slot, event.beforeItemStack)) {
       return;
     }
     this.#queueGuardReconcile();
   }
 
-  /** Split one container change into the item types the screen lost or gained. */
-  #recordScreenItemChange(
-    before: ItemStack | undefined,
-    after: ItemStack | undefined,
-  ): void {
-    const beforeType = stackType(before);
-    const afterType = stackType(after);
-    if (beforeType !== undefined && beforeType === afterType) {
-      const lost = stackAmount(before) - stackAmount(after);
-      if (lost > 0) {
-        this.#screenChanges.push({ kind: "take", typeId: beforeType, remaining: lost });
-      } else if (lost < 0) {
-        this.#screenChanges.push({
-          kind: "placement",
-          typeId: afterType,
-          remaining: -lost,
-        });
-      }
-      return;
-    }
-    if (beforeType !== undefined) {
-      this.#screenChanges.push({
-        kind: "take",
-        typeId: beforeType,
-        remaining: stackAmount(before),
-      });
-    }
-    if (afterType !== undefined) {
-      this.#screenChanges.push({
-        kind: "placement",
-        typeId: afterType,
-        remaining: stackAmount(after),
-      });
-    }
-  }
 
   /**
    * Write the slot's previous stack back through the screen change. Script
@@ -2379,14 +2345,24 @@ export class Window {
     if (!container && !cursor) {
       return;
     }
-    const netScreenChanges = this.#collapseScreenChanges(screenChanges);
-    const netPlayerChanges = this.#collapsePlayerChanges(playerChanges);
-    const netCursorChanges = this.#collapseCursorChanges(cursorChanges);
+    const netScreenChanges = collapseScreenChanges(screenChanges);
+    const netPlayerChanges = collapsePlayerChanges(playerChanges);
+    const netCursorChanges = collapseCursorChanges(cursorChanges);
+    const effects = {
+      revertPlayerSlot: (container: Container, change: PlayerSlotChangeRecord) =>
+        this.#revertPlayerSlot(container, change),
+      clearCursorItem: (cursor: PlayerCursorInventoryComponent, item: ItemStack) =>
+        this.#clearCursorItem(cursor, item),
+      removeDroppedItem: (change: DroppedItemChangeRecord) => this.#removeDroppedItem(change),
+      returnToInventory: (container: Container, item: ItemStack) =>
+        this.#returnToInventory(container, item),
+    };
     this.#applyingGuard = true;
     try {
       for (const screenChange of netScreenChanges) {
         if (screenChange.kind === "take") {
-          this.#revertGainedByPlayer(
+          revertGainedByPlayer(
+            effects,
             screenChange,
             container,
             cursor,
@@ -2395,7 +2371,8 @@ export class Window {
             dropChanges,
           );
         } else {
-          this.#revertPlacedByPlayer(
+          revertPlacedByPlayer(
+            effects,
             screenChange,
             container,
             cursor,
@@ -2409,177 +2386,9 @@ export class Window {
     }
   }
 
-  /**
-   * Cancel screen changes that undo each other in the same batch (a take
-   * followed by putting the same amount back) and subtract partial opposites.
-   * What remains is the net item flow, which is what the player-side changes
-   * must explain; without this, a take-and-put-back would revert both sides and
-   * duplicate the item.
-   */
-  #collapseScreenChanges(changes: readonly ScreenItemChange[]): ScreenItemChange[] {
-    const net: ScreenItemChange[] = [];
-    for (const change of changes) {
-      if (change.remaining <= 0) {
-        continue;
-      }
-      const oppositeKind = change.kind === "take" ? "placement" : "take";
-      const other = net.find(
-        (candidate) =>
-          candidate.kind === oppositeKind &&
-          candidate.typeId === change.typeId &&
-          candidate.remaining > 0,
-      );
-      if (!other) {
-        net.push({ ...change });
-        continue;
-      }
-      const amount = Math.min(other.remaining, change.remaining);
-      other.remaining -= amount;
-      const leftover = change.remaining - amount;
-      if (leftover > 0) {
-        net.push({
-          kind: change.kind,
-          typeId: change.typeId,
-          remaining: leftover,
-        });
-      }
-    }
-    return net.filter((change) => change.remaining > 0);
-  }
 
-  /**
-   * Merge repeated changes of one inventory slot into its first `before` and
-   * last `after`. A gain followed by a loss of the same item is a no-op and is
-   * dropped; two separate records would otherwise be reverted twice, writing
-   * the intermediate stack back as a duplicate.
-   */
-  #collapsePlayerChanges(changes: readonly PlayerSlotChangeRecord[]): PlayerSlotChangeRecord[] {
-    const merged: PlayerSlotChangeRecord[] = [];
-    const bySlot = new Map<string, PlayerSlotChangeRecord>();
-    for (const change of changes) {
-      const key = `${change.inventoryType}:${change.slot}`;
-      const existing = bySlot.get(key);
-      if (existing) {
-        existing.after = change.after;
-        continue;
-      }
-      const record: PlayerSlotChangeRecord = {
-        inventoryType: change.inventoryType,
-        slot: change.slot,
-        before: change.before,
-        after: change.after,
-        matchedGain: false,
-        matchedLoss: false,
-      };
-      bySlot.set(key, record);
-      merged.push(record);
-    }
-    return merged.filter((change) => !sameItemContent(change.before, change.after));
-  }
 
-  /**
-   * Pair a cursor grab with a later release of the same item (and the reverse)
-   * so a take-and-put-back is not treated as both a take and a placement.
-   */
-  #collapseCursorChanges(changes: readonly CursorItemChangeRecord[]): CursorItemChangeRecord[] {
-    const net: CursorItemChangeRecord[] = [];
-    for (const change of changes) {
-      const oppositeKind = change.kind === "grab" ? "release" : "grab";
-      const match = net.findIndex(
-        (candidate) =>
-          candidate.kind === oppositeKind &&
-          sameItemContent(candidate.item, change.item),
-      );
-      if (match >= 0) {
-        net.splice(match, 1);
-        continue;
-      }
-      net.push({ kind: change.kind, item: change.item, matched: false });
-    }
-    return net;
-  }
 
-  /**
-   * Remove what the screen lost from an inventory slot, from the cursor, or
-   * from an item entity the viewer dropped straight from the screen.
-   */
-  #revertGainedByPlayer(
-    screenChange: ScreenItemChange,
-    container: Container | undefined,
-    cursor: PlayerCursorInventoryComponent | undefined,
-    playerChanges: readonly PlayerSlotChangeRecord[],
-    cursorChanges: readonly CursorItemChangeRecord[],
-    dropChanges: readonly DroppedItemChangeRecord[],
-  ): void {
-    for (const change of playerChanges) {
-      if (screenChange.remaining <= 0) {
-        return;
-      }
-      if (change.matchedGain) {
-        continue;
-      }
-      const gained = gainedBy(change);
-      if (
-        !gained ||
-        gained.typeId !== screenChange.typeId ||
-        gained.amount > screenChange.remaining
-      ) {
-        continue;
-      }
-      if (!container || !this.#revertPlayerSlot(container, change)) {
-        continue;
-      }
-      change.matchedGain = true;
-      screenChange.remaining -= gained.amount;
-    }
-    if (screenChange.remaining <= 0) {
-      return;
-    }
-    if (cursor) {
-      for (const change of cursorChanges) {
-        if (screenChange.remaining <= 0) {
-          return;
-        }
-        if (change.kind !== "grab" || change.matched) {
-          continue;
-        }
-        if (
-          stackType(change.item) !== screenChange.typeId ||
-          stackAmount(change.item) > screenChange.remaining
-        ) {
-          continue;
-        }
-        if (!this.#clearCursorItem(cursor, change.item)) {
-          continue;
-        }
-        change.matched = true;
-        screenChange.remaining -= stackAmount(change.item);
-      }
-    }
-    if (screenChange.remaining <= 0) {
-      return;
-    }
-    for (const change of dropChanges) {
-      if (screenChange.remaining <= 0) {
-        return;
-      }
-      if (change.matched) {
-        continue;
-      }
-      if (stackType(change.item) !== screenChange.typeId) {
-        continue;
-      }
-      const amount = stackAmount(change.item);
-      if (amount <= 0 || amount > screenChange.remaining) {
-        continue;
-      }
-      if (!this.#removeDroppedItem(change)) {
-        continue;
-      }
-      change.matched = true;
-      screenChange.remaining -= amount;
-    }
-  }
 
   /**
    * Remove the item entity the viewer dropped through the screen, when it is
@@ -2603,58 +2412,6 @@ export class Window {
     }
   }
 
-  /** Return what the player placed into the screen to their inventory/cursor. */
-  #revertPlacedByPlayer(
-    screenChange: ScreenItemChange,
-    container: Container | undefined,
-    cursor: PlayerCursorInventoryComponent | undefined,
-    playerChanges: readonly PlayerSlotChangeRecord[],
-    cursorChanges: readonly CursorItemChangeRecord[],
-  ): void {
-    for (const change of playerChanges) {
-      if (screenChange.remaining <= 0) {
-        return;
-      }
-      if (change.matchedLoss) {
-        continue;
-      }
-      const lost = lostBy(change);
-      if (
-        !lost ||
-        lost.typeId !== screenChange.typeId ||
-        lost.amount > screenChange.remaining
-      ) {
-        continue;
-      }
-      if (!container || !this.#revertPlayerSlot(container, change)) {
-        continue;
-      }
-      change.matchedLoss = true;
-      screenChange.remaining -= lost.amount;
-    }
-    if (screenChange.remaining <= 0 || !cursor) {
-      return;
-    }
-    for (const change of cursorChanges) {
-      if (screenChange.remaining <= 0) {
-        return;
-      }
-      if (change.kind !== "release" || change.matched) {
-        continue;
-      }
-      if (
-        stackType(change.item) !== screenChange.typeId ||
-        stackAmount(change.item) > screenChange.remaining
-      ) {
-        continue;
-      }
-      if (!container || !this.#returnToInventory(container, change.item)) {
-        continue;
-      }
-      change.matched = true;
-      screenChange.remaining -= stackAmount(change.item);
-    }
-  }
 
   /**
    * The cursor inventory component, or undefined when the API is absent (the
@@ -2681,7 +2438,7 @@ export class Window {
     if (!expected) {
       return false;
     }
-    const slot = this.#resolvePlayerSlot(container, change);
+    const slot = resolvePlayerSlot(container, change);
     if (slot === undefined) {
       return false;
     }
@@ -2696,46 +2453,6 @@ export class Window {
     }
   }
 
-  /** Map the event's slot to a container index, confirmed by current content. */
-  #resolvePlayerSlot(
-    container: Container,
-    change: PlayerSlotChangeRecord,
-  ): number | undefined {
-    const expected = change.after;
-    if (!expected) {
-      return undefined;
-    }
-    const learned = playerSlotOffsets.get(change.inventoryType);
-    const candidates: number[] = [];
-    const add = (slot: number): void => {
-      if (
-        Number.isInteger(slot) &&
-        slot >= 0 &&
-        slot < container.size &&
-        !candidates.includes(slot)
-      ) {
-        candidates.push(slot);
-      }
-    };
-    if (learned !== undefined) {
-      add(change.slot + learned);
-    }
-    add(change.slot);
-    // The main inventory may be reported relative to the 27-slot area instead
-    // of as an absolute container index. The hotbar is 0..8 in either
-    // convention, so only the main inventory gets the second candidate.
-    if (change.inventoryType !== "Hotbar") {
-      add(change.slot + 9);
-    }
-    const matches = candidates.filter((slot) =>
-      sameTypeAndAmount(readContainerItem(container, slot), expected),
-    );
-    if (matches.length !== 1) {
-      return undefined;
-    }
-    playerSlotOffsets.set(change.inventoryType, matches[0] - change.slot);
-    return matches[0];
-  }
 
   /** Clear the cursor when it still holds exactly the item the event reports. */
   #clearCursorItem(
@@ -2780,27 +2497,6 @@ export class Window {
     }
   }
 
-  /**
-   * Keep the recorded player-side changes bounded: they only matter for the
-   * single reconciliation their tick schedules, and a Window whose container is
-   * never touched still sees every inventory change of its viewer.
-   */
-  #pruneGuardRecords(): void {
-    const drop = (length: number, limit: number): number =>
-      length <= limit ? 0 : length - limit;
-    const playerDrop = drop(this.#playerChanges.length, MAX_SCREEN_GUARD_RECORDS);
-    if (playerDrop > 0) {
-      this.#playerChanges.splice(0, playerDrop);
-    }
-    const cursorDrop = drop(this.#cursorChanges.length, MAX_SCREEN_GUARD_RECORDS);
-    if (cursorDrop > 0) {
-      this.#cursorChanges.splice(0, cursorDrop);
-    }
-    const entityDrop = drop(this.#dropChanges.length, MAX_SCREEN_GUARD_RECORDS);
-    if (entityDrop > 0) {
-      this.#dropChanges.splice(0, entityDrop);
-    }
-  }
 
   /**
    * Internal: one `playerInventoryItemChange` of any player; the viewer filter
@@ -2844,7 +2540,7 @@ export class Window {
       matchedGain: false,
       matchedLoss: false,
     });
-    this.#pruneGuardRecords();
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
   }
 
   /** Internal: one `playerCursorItemGrab`; see {@link _onViewerInventoryChange}. */
@@ -2868,7 +2564,7 @@ export class Window {
       return;
     }
     this.#cursorChanges.push({ kind: "grab", item, matched: false });
-    this.#pruneGuardRecords();
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
   }
 
   /** Internal: one `playerCursorItemRelease`; see {@link _onViewerInventoryChange}. */
@@ -2892,7 +2588,7 @@ export class Window {
       return;
     }
     this.#cursorChanges.push({ kind: "release", item, matched: false });
-    this.#pruneGuardRecords();
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
   }
 
   /**
@@ -2934,7 +2630,7 @@ export class Window {
       }
       this.#dropChanges.push({ entity: itemEntity, item, matched: false });
     }
-    this.#pruneGuardRecords();
+    pruneGuardRecords(this.#playerChanges, this.#cursorChanges, this.#dropChanges);
   }
 
   /**

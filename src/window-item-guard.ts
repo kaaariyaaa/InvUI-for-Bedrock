@@ -1,5 +1,5 @@
 /** Event capture and matching helpers for screen item restoration. */
-import type { Container, Entity, ItemStack, Player, PlayerInventoryType, PlayerInventoryItemChangeAfterEvent, PlayerCursorItemGrabAfterEvent, PlayerCursorItemReleaseAfterEvent, EntityItemDropAfterEvent } from "@minecraft/server";
+import type { Container, Entity, ItemStack, Player, PlayerCursorInventoryComponent, PlayerInventoryType, PlayerInventoryItemChangeAfterEvent, PlayerCursorItemGrabAfterEvent, PlayerCursorItemReleaseAfterEvent, EntityItemDropAfterEvent } from "@minecraft/server";
 import type { Window } from "./window.js";
 import { afterEventState, ensureAfterEventSubscription } from "./window-lifecycle.js";
 
@@ -243,4 +243,316 @@ export function ensureItemGuardSubscriptions(): void {
       }
     },
   );
+}
+
+export interface ReconciliationEffects {
+  revertPlayerSlot(container: Container, change: PlayerSlotChangeRecord): boolean;
+  clearCursorItem(cursor: PlayerCursorInventoryComponent, item: ItemStack): boolean;
+  removeDroppedItem(change: DroppedItemChangeRecord): boolean;
+  returnToInventory(container: Container, item: ItemStack): boolean;
+}
+
+export function collapseScreenChanges(changes: readonly ScreenItemChange[]): ScreenItemChange[] {
+  const net: ScreenItemChange[] = [];
+  for (const change of changes) {
+    if (change.remaining <= 0) {
+      continue;
+    }
+    const oppositeKind = change.kind === "take" ? "placement" : "take";
+    const other = net.find(
+      (candidate) =>
+        candidate.kind === oppositeKind &&
+        candidate.typeId === change.typeId &&
+        candidate.remaining > 0,
+    );
+    if (!other) {
+      net.push({ ...change });
+      continue;
+    }
+    const amount = Math.min(other.remaining, change.remaining);
+    other.remaining -= amount;
+    const leftover = change.remaining - amount;
+    if (leftover > 0) {
+      net.push({
+        kind: change.kind,
+        typeId: change.typeId,
+        remaining: leftover,
+      });
+    }
+  }
+  return net.filter((change) => change.remaining > 0);
+}
+
+
+export function collapsePlayerChanges(changes: readonly PlayerSlotChangeRecord[]): PlayerSlotChangeRecord[] {
+  const merged: PlayerSlotChangeRecord[] = [];
+  const bySlot = new Map<string, PlayerSlotChangeRecord>();
+  for (const change of changes) {
+    const key = `${change.inventoryType}:${change.slot}`;
+    const existing = bySlot.get(key);
+    if (existing) {
+      existing.after = change.after;
+      continue;
+    }
+    const record: PlayerSlotChangeRecord = {
+      inventoryType: change.inventoryType,
+      slot: change.slot,
+      before: change.before,
+      after: change.after,
+      matchedGain: false,
+      matchedLoss: false,
+    };
+    bySlot.set(key, record);
+    merged.push(record);
+  }
+  return merged.filter((change) => !sameItemContent(change.before, change.after));
+}
+
+
+export function collapseCursorChanges(changes: readonly CursorItemChangeRecord[]): CursorItemChangeRecord[] {
+  const net: CursorItemChangeRecord[] = [];
+  for (const change of changes) {
+    const oppositeKind = change.kind === "grab" ? "release" : "grab";
+    const match = net.findIndex(
+      (candidate) =>
+        candidate.kind === oppositeKind &&
+        sameItemContent(candidate.item, change.item),
+    );
+    if (match >= 0) {
+      net.splice(match, 1);
+      continue;
+    }
+    net.push({ kind: change.kind, item: change.item, matched: false });
+  }
+  return net;
+}
+
+
+export function resolvePlayerSlot(
+  container: Container,
+  change: PlayerSlotChangeRecord,
+): number | undefined {
+  const expected = change.after;
+  if (!expected) {
+    return undefined;
+  }
+  const learned = playerSlotOffsets.get(change.inventoryType);
+  const candidates: number[] = [];
+  const add = (slot: number): void => {
+    if (
+      Number.isInteger(slot) &&
+      slot >= 0 &&
+      slot < container.size &&
+      !candidates.includes(slot)
+    ) {
+      candidates.push(slot);
+    }
+  };
+  if (learned !== undefined) {
+    add(change.slot + learned);
+  }
+  add(change.slot);
+  // The main inventory may be reported relative to the 27-slot area instead
+  // of as an absolute container index. The hotbar is 0..8 in either
+  // convention, so only the main inventory gets the second candidate.
+  if (change.inventoryType !== "Hotbar") {
+    add(change.slot + 9);
+  }
+  const matches = candidates.filter((slot) =>
+    sameTypeAndAmount(readContainerItem(container, slot), expected),
+  );
+  if (matches.length !== 1) {
+    return undefined;
+  }
+  playerSlotOffsets.set(change.inventoryType, matches[0] - change.slot);
+  return matches[0];
+}
+
+
+export function revertGainedByPlayer(
+  effects: ReconciliationEffects,
+  screenChange: ScreenItemChange,
+  container: Container | undefined,
+  cursor: PlayerCursorInventoryComponent | undefined,
+  playerChanges: readonly PlayerSlotChangeRecord[],
+  cursorChanges: readonly CursorItemChangeRecord[],
+  dropChanges: readonly DroppedItemChangeRecord[],
+): void {
+  for (const change of playerChanges) {
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    if (change.matchedGain) {
+      continue;
+    }
+    const gained = gainedBy(change);
+    if (
+      !gained ||
+      gained.typeId !== screenChange.typeId ||
+      gained.amount > screenChange.remaining
+    ) {
+      continue;
+    }
+    if (!container || !effects.revertPlayerSlot(container, change)) {
+      continue;
+    }
+    change.matchedGain = true;
+    screenChange.remaining -= gained.amount;
+  }
+  if (screenChange.remaining <= 0) {
+    return;
+  }
+  if (cursor) {
+    for (const change of cursorChanges) {
+      if (screenChange.remaining <= 0) {
+        return;
+      }
+      if (change.kind !== "grab" || change.matched) {
+        continue;
+      }
+      if (
+        stackType(change.item) !== screenChange.typeId ||
+        stackAmount(change.item) > screenChange.remaining
+      ) {
+        continue;
+      }
+      if (!effects.clearCursorItem(cursor, change.item)) {
+        continue;
+      }
+      change.matched = true;
+      screenChange.remaining -= stackAmount(change.item);
+    }
+  }
+  if (screenChange.remaining <= 0) {
+    return;
+  }
+  for (const change of dropChanges) {
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    if (change.matched) {
+      continue;
+    }
+    if (stackType(change.item) !== screenChange.typeId) {
+      continue;
+    }
+    const amount = stackAmount(change.item);
+    if (amount <= 0 || amount > screenChange.remaining) {
+      continue;
+    }
+    if (!effects.removeDroppedItem(change)) {
+      continue;
+    }
+    change.matched = true;
+    screenChange.remaining -= amount;
+  }
+}
+
+
+export function revertPlacedByPlayer(
+  effects: ReconciliationEffects,
+  screenChange: ScreenItemChange,
+  container: Container | undefined,
+  cursor: PlayerCursorInventoryComponent | undefined,
+  playerChanges: readonly PlayerSlotChangeRecord[],
+  cursorChanges: readonly CursorItemChangeRecord[],
+): void {
+  for (const change of playerChanges) {
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    if (change.matchedLoss) {
+      continue;
+    }
+    const lost = lostBy(change);
+    if (
+      !lost ||
+      lost.typeId !== screenChange.typeId ||
+      lost.amount > screenChange.remaining
+    ) {
+      continue;
+    }
+    if (!container || !effects.revertPlayerSlot(container, change)) {
+      continue;
+    }
+    change.matchedLoss = true;
+    screenChange.remaining -= lost.amount;
+  }
+  if (screenChange.remaining <= 0 || !cursor) {
+    return;
+  }
+  for (const change of cursorChanges) {
+    if (screenChange.remaining <= 0) {
+      return;
+    }
+    if (change.kind !== "release" || change.matched) {
+      continue;
+    }
+    if (
+      stackType(change.item) !== screenChange.typeId ||
+      stackAmount(change.item) > screenChange.remaining
+    ) {
+      continue;
+    }
+    if (!container || !effects.returnToInventory(container, change.item)) {
+      continue;
+    }
+    change.matched = true;
+    screenChange.remaining -= stackAmount(change.item);
+  }
+}
+
+
+export function recordScreenItemChange(
+  changes: ScreenItemChange[],
+  before: ItemStack | undefined,
+  after: ItemStack | undefined,
+): void {
+  const beforeType = stackType(before);
+  const afterType = stackType(after);
+  if (beforeType !== undefined && beforeType === afterType) {
+    const lost = stackAmount(before) - stackAmount(after);
+    if (lost > 0) {
+      changes.push({ kind: "take", typeId: beforeType, remaining: lost });
+    } else if (lost < 0) {
+      changes.push({
+        kind: "placement",
+        typeId: afterType,
+        remaining: -lost,
+      });
+    }
+    return;
+  }
+  if (beforeType !== undefined) {
+    changes.push({
+      kind: "take",
+      typeId: beforeType,
+      remaining: stackAmount(before),
+    });
+  }
+  if (afterType !== undefined) {
+    changes.push({
+      kind: "placement",
+      typeId: afterType,
+      remaining: stackAmount(after),
+    });
+  }
+}
+
+
+export function pruneGuardRecords(playerChanges: PlayerSlotChangeRecord[], cursorChanges: CursorItemChangeRecord[], dropChanges: DroppedItemChangeRecord[]): void {
+  const drop = (length: number, limit: number): number =>
+    length <= limit ? 0 : length - limit;
+  const playerDrop = drop(playerChanges.length, MAX_SCREEN_GUARD_RECORDS);
+  if (playerDrop > 0) {
+    playerChanges.splice(0, playerDrop);
+  }
+  const cursorDrop = drop(cursorChanges.length, MAX_SCREEN_GUARD_RECORDS);
+  if (cursorDrop > 0) {
+    cursorChanges.splice(0, cursorDrop);
+  }
+  const entityDrop = drop(dropChanges.length, MAX_SCREEN_GUARD_RECORDS);
+  if (entityDrop > 0) {
+    dropChanges.splice(0, entityDrop);
+  }
 }
