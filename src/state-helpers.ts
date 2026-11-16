@@ -1,7 +1,33 @@
 /** State validation, identity normalization, and serialization helpers. */
 import { createJsonCloner, hasOwn, isPlainObject, MAX_JSON_DEPTH } from "./json.js";
-import type { GuiState, GuiStatePatch, GuiStateField, StateSnapshot, StateScope, StateLifetime, StateAcquireOptions, StateMigrationOptions, StateAutoMigration, StateRemoveOptions, StateManagerOptions, StateStore, StoredGuiState, StateHandle, StateListener, StateUnsubscribe, StateMigration, StateErrorCode } from "./state-types.js";
-import { StateValidationError, StateConflictError, StateCorruptionError, StateReleasedError, StateError, STATE_STORAGE_VERSION } from "./state-types.js";
+import type {
+  GuiState,
+  GuiStatePatch,
+  GuiStateField,
+  StateSnapshot,
+  StateScope,
+  StateLifetime,
+  StateAcquireOptions,
+  StateMigrationOptions,
+  StateAutoMigration,
+  StateRemoveOptions,
+  StateManagerOptions,
+  StateStore,
+  StoredGuiState,
+  StateHandle,
+  StateListener,
+  StateUnsubscribe,
+  StateMigration,
+  StateErrorCode,
+} from "./state-types.js";
+import {
+  StateValidationError,
+  StateConflictError,
+  StateCorruptionError,
+  StateReleasedError,
+  StateError,
+  STATE_STORAGE_VERSION,
+} from "./state-types.js";
 
 export const STATE_FIELDS: readonly GuiStateField[] = [
   "page",

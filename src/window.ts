@@ -24,19 +24,93 @@ import type {
   VirtualContainerItemChangeAfterEvent,
   VirtualContainerOptions,
 } from "@minecraft/server";
-import { WindowOpenRejectedError, WindowItemChangeDangerError, WindowStateSchemaChangedError, WindowOpenRenderLimitError } from "./window-types.js";
-import type { WindowCloseReason, WindowStatus, WindowErrorContext, WindowErrorHandler, WindowOpenHandler, WindowCloseHandler, WindowContainerCloseEvent, WindowContainerItemChangeEvent, WindowContainerCloseHandler, WindowContainerItemChangeHandler } from "./window-types.js";
+import {
+  WindowOpenRejectedError,
+  WindowItemChangeDangerError,
+  WindowStateSchemaChangedError,
+  WindowOpenRenderLimitError,
+} from "./window-types.js";
+import type {
+  WindowCloseReason,
+  WindowStatus,
+  WindowErrorContext,
+  WindowErrorHandler,
+  WindowOpenHandler,
+  WindowCloseHandler,
+  WindowContainerCloseEvent,
+  WindowContainerItemChangeEvent,
+  WindowContainerCloseHandler,
+  WindowContainerItemChangeHandler,
+} from "./window-types.js";
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
-import { lifecycleWindows, shutdownInProgress, readId, ensurePlayerLeaveSubscription, ensureEntityDieSubscription, ensurePlayerDimensionChangeSubscription, ensurePlayerGameModeChangeSubscription, ensureShutdownSubscription } from "./window-lifecycle.js";
+import {
+  lifecycleWindows,
+  shutdownInProgress,
+  readId,
+  ensurePlayerLeaveSubscription,
+  ensureEntityDieSubscription,
+  ensurePlayerDimensionChangeSubscription,
+  ensurePlayerGameModeChangeSubscription,
+  ensureShutdownSubscription,
+} from "./window-lifecycle.js";
 import { WindowItemGuard } from "./window-item-guard.js";
-import { playerSlotOffsets, MAX_SCREEN_GUARD_RECORDS, stackType, stackAmount, gainedBy, lostBy, playerInventoryContainer, readContainerItem, sameTypeAndAmount, sameItemContent, itemGuardWindows, ensureItemGuardSubscriptions } from "./window-item-guard.js";
-import type { ScreenItemChange, PlayerSlotChangeRecord, CursorItemChangeRecord, DroppedItemChangeRecord } from "./window-item-guard.js";
-export { WindowOpenRejectedError, WindowItemChangeDangerError, WindowStateSchemaChangedError, WindowOpenRenderLimitError } from "./window-types.js";
-export type { WindowCloseReason, WindowStatus, WindowErrorContext, WindowErrorHandler, WindowOpenHandler, WindowCloseHandler, WindowContainerCloseEvent, WindowContainerItemChangeEvent, WindowContainerCloseHandler, WindowContainerItemChangeHandler } from "./window-types.js";
-export { MinecraftVirtualContainerAdapter, minecraftVirtualContainerAdapter } from "./window-adapter.js";
+import {
+  playerSlotOffsets,
+  MAX_SCREEN_GUARD_RECORDS,
+  stackType,
+  stackAmount,
+  gainedBy,
+  lostBy,
+  playerInventoryContainer,
+  readContainerItem,
+  sameTypeAndAmount,
+  sameItemContent,
+  itemGuardWindows,
+  ensureItemGuardSubscriptions,
+} from "./window-item-guard.js";
+import type {
+  ScreenItemChange,
+  PlayerSlotChangeRecord,
+  CursorItemChangeRecord,
+  DroppedItemChangeRecord,
+} from "./window-item-guard.js";
+export {
+  WindowOpenRejectedError,
+  WindowItemChangeDangerError,
+  WindowStateSchemaChangedError,
+  WindowOpenRenderLimitError,
+} from "./window-types.js";
+export type {
+  WindowCloseReason,
+  WindowStatus,
+  WindowErrorContext,
+  WindowErrorHandler,
+  WindowOpenHandler,
+  WindowCloseHandler,
+  WindowContainerCloseEvent,
+  WindowContainerItemChangeEvent,
+  WindowContainerCloseHandler,
+  WindowContainerItemChangeHandler,
+} from "./window-types.js";
+export {
+  MinecraftVirtualContainerAdapter,
+  minecraftVirtualContainerAdapter,
+} from "./window-adapter.js";
 export type { WindowContainerAdapter } from "./window-adapter.js";
-import { isItemElement, isButtonElement, isInventoryLinkElement, isProvablyStateIndependent, schemaOf, schemaNodeOf, PHYSICAL_COLUMNS, sameSlotElements, sameClickableLayout, containerSizeOf, physicalSlotOf } from "./window-layout.js";
+import {
+  isItemElement,
+  isButtonElement,
+  isInventoryLinkElement,
+  isProvablyStateIndependent,
+  schemaOf,
+  schemaNodeOf,
+  PHYSICAL_COLUMNS,
+  sameSlotElements,
+  sameClickableLayout,
+  containerSizeOf,
+  physicalSlotOf,
+} from "./window-layout.js";
 import { defaultManager } from "./window-default-state.js";
 import { WindowBuilder, MergedWindowBuilder } from "./window-builder.js";
 import type { WindowConfig } from "./window-builder.js";

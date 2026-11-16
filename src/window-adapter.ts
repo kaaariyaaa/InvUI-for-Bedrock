@@ -1,7 +1,19 @@
 /** Minecraft VirtualContainer adapter and its event subscriptions. */
 import { world } from "@minecraft/server";
-import type { Player, ItemStack, VirtualContainer, VirtualContainerCloseAfterEvent, VirtualContainerCloseReason, VirtualContainerItemChangeAfterEvent, VirtualContainerOptions } from "@minecraft/server";
-import type { WindowCloseReason, WindowContainerCloseHandler, WindowContainerItemChangeHandler } from "./window-types.js";
+import type {
+  Player,
+  ItemStack,
+  VirtualContainer,
+  VirtualContainerCloseAfterEvent,
+  VirtualContainerCloseReason,
+  VirtualContainerItemChangeAfterEvent,
+  VirtualContainerOptions,
+} from "@minecraft/server";
+import type {
+  WindowCloseReason,
+  WindowContainerCloseHandler,
+  WindowContainerItemChangeHandler,
+} from "./window-types.js";
 
 /**
  * The boundary between Window and the Bedrock screen API.

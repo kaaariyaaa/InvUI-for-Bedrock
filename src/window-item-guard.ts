@@ -1,7 +1,18 @@
 /** Event capture and matching helpers for screen item restoration. */
 import * as server from "@minecraft/server";
 import { readId } from "./window-lifecycle.js";
-import type { Container, Entity, ItemStack, Player, PlayerCursorInventoryComponent, PlayerInventoryType, PlayerInventoryItemChangeAfterEvent, PlayerCursorItemGrabAfterEvent, PlayerCursorItemReleaseAfterEvent, EntityItemDropAfterEvent } from "@minecraft/server";
+import type {
+  Container,
+  Entity,
+  ItemStack,
+  Player,
+  PlayerCursorInventoryComponent,
+  PlayerInventoryType,
+  PlayerInventoryItemChangeAfterEvent,
+  PlayerCursorItemGrabAfterEvent,
+  PlayerCursorItemReleaseAfterEvent,
+  EntityItemDropAfterEvent,
+} from "@minecraft/server";
 import type { Window } from "./window.js";
 import { afterEventState, ensureAfterEventSubscription } from "./window-lifecycle.js";
 
