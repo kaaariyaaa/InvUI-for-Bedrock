@@ -11,8 +11,8 @@ interface SubscriptionHost {
   generation(): number;
   status(): WindowStatus;
   owns(container: VirtualContainer): boolean;
-  onClose(generation: number, event: WindowContainerCloseEvent, container: VirtualContainer): void;
-  onItemChange(generation: number, event: WindowContainerItemChangeEvent, container: VirtualContainer): void;
+  onClose(generation: number, event: WindowContainerCloseEvent, container?: VirtualContainer): void;
+  onItemChange(generation: number, event: WindowContainerItemChangeEvent, container?: VirtualContainer): void;
   onUnsubscribeError(error: unknown): void;
 }
 
