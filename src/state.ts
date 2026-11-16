@@ -1,4 +1,5 @@
 /** GUI state manager and lease lifecycle. */
+import { hasOwn, isPlainObject } from "./json.js";
 import type { GuiStatePatch, GuiStateField, StateSnapshot, StateScope, StateLifetime, StateAcquireOptions, StateMigrationOptions, StateRemoveOptions, StateManagerOptions, StateStore, StoredGuiState, StateHandle, StateListener, StateUnsubscribe, StateMigration } from "./state-types.js";
 import { StateValidationError, StateConflictError, StateCorruptionError, StateReleasedError, STATE_STORAGE_VERSION } from "./state-types.js";
 import { MANAGER_KEYS, EMPTY_STATE, MAX_QUARANTINE_SLOTS, cloneState, mergeState, normalizeAcquireOptions, normalizeRemoveOptions, normalizeMigrationOptions, normalizeAutoMigrations, identityOf, storageKeyOf, storedLifetimeOf, storedSchemaOf, describeIdentity } from "./state-helpers.js";
