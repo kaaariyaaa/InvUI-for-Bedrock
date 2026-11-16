@@ -1,7 +1,7 @@
 import { ItemStack } from "@minecraft/server";
 import type { Player } from "@minecraft/server";
-import { minecraftPeriodicScheduler } from "./periodic.js";
-import type { Window } from "./window.js";
+import { minecraftPeriodicScheduler } from "./render/periodic.js";
+import type { Window } from "./window/window.js";
 
 /**
  * Context handed to an Item click handler. The Window/EventRouter owns
@@ -75,12 +75,7 @@ function normalizeProvider(source: ItemProviderSource): ItemProviderFunction {
   throw new TypeError("InvUI: Item provider must be an ItemStack, function, or { provide() }.");
 }
 
-/**
- * The provider source a state diff can prove independent of Window state: a
- * fixed ItemStack is cloned per call and an ItemBuilder renders only its own
- * fields. Neither is given the Window or its state. Any function or custom
- * ItemProvider is opaque, so it must be treated as state-dependent.
- */
+/** Remember the source for render-time state-independence checks. */
 function fixedProviderSource(
   source: ItemProviderSource,
 ): ItemStack | ItemBuilder | undefined {
@@ -287,12 +282,8 @@ export class Item {
   }
 
   /**
-   * True when the display cannot change because of a Window state update: the
-   * provider source is a fixed ItemStack or an ItemBuilder with its original
-   * `provide`, neither of which receives the Window or its state. A function or
-   * custom ItemProvider is opaque and returns false, so a state diff
-   * re-evaluates it. A replaced `provide` and external mutation of the source
-   * also return false or require `notifyWindows()`.
+   * Fixed ItemStacks and unchanged ItemBuilder providers are state-independent.
+   * Opaque custom providers must be re-evaluated after state changes.
    */
   isStateIndependent(): boolean {
     const source = this.fixedSource;
@@ -364,10 +355,8 @@ export class Item {
   }
 
   /**
-   * Effective classification (design 7.1). Unset items keep the behavior they
-   * had before modes existed: handlers make a button, otherwise it is display.
-   * This is metadata plus an Item-level handler guard only; it does not prove
-   * or replace the JSON UI-side operation protection from design 7.2/10.1.
+   * Items with handlers default to button mode; otherwise they display only.
+   * Mode affects callback execution, not physical item movement.
    */
   getMode(): ItemMode {
     return this.explicitMode ?? (this.clickHandlers.length > 0 ? "button" : "display");

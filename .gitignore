@@ -4,3 +4,13 @@ result
 dist/
 *.tsbuildinfo
 *.tgz
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Local-only configuration
+.env.local
+.env.*.local

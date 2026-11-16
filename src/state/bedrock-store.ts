@@ -1,36 +1,7 @@
 /**
- * Minecraft Bedrock `StateStore` implementation (design 9.3 / 9.6).
- *
- * Backs persistent GUI state with **world dynamic properties**. The world (or
- * any object exposing the same two methods) is injected, so this module never
- * imports `@minecraft/server` and is testable outside Minecraft.
- *
- * Behaviour:
- * - `getItem` maps an absent property to `undefined` and rejects non-string
- *   values instead of coercing them (a coerced value would be persisted back
- *   and silently destroy the record).
- * - Every identifier this generation writes carries a generation marker that
- *   the legacy (variable-width) encoder cannot emit. The two generations use
- *   disjoint identifier spaces, so no read, write or removal of current state
- *   can touch a legacy property, and a legacy property can never be mistaken
- *   for the current value of a colliding key.
- * - `getItem` fails closed when the current identifier is absent but the
- *   legacy variable-width identifier holds a value: that value cannot be
- *   attributed to the key, so it is never read as a fallback and never
- *   modified. See {@link BedrockStoreErrorCode}.
- * - The encoded identifier (generation prefix included) is checked against the
- *   engine's 1024-character limit *before* any world call, so `getItem`,
- *   `setItem` and `removeItem` all fail on the same key without side effects.
- * - `setItem` enforces a local value guard before calling the world, counting
- *   UTF-8 bytes so it never over-admits a value the engine may count as bytes.
- *   That guard is not a verified engine limit; see
- *   {@link BEDROCK_MAX_DYNAMIC_PROPERTY_LENGTH}.
- * - Every world exception propagates unchanged. Nothing is caught, retried, or
- *   logged here: the caller (`StateManager` / `Window`) owns error reporting and
- *   the aborted commit.
- *
- * Not verified on a real device: whether the value guard's unit (bytes) matches
- * the engine's, and the exact accepted character set of the encoded identifier.
+ * World dynamic-property store for persistent GUI state.
+ * Versioned, fixed-width identifiers prevent collisions with legacy keys.
+ * Legacy data is detected but not silently read or migrated.
  */
 
 import type { StateStore } from "./state.js";
@@ -93,36 +64,12 @@ export interface BedrockStateStoreOptions {
   maxValueLength?: number;
 }
 
-/**
- * Marker on every identifier written by this generation.
- *
- * The legacy encoder only emits `%` immediately followed by a hex digit, so no
- * legacy identifier ever contains `%:`. Prefixing the fixed-width encoding
- * with this marker therefore puts the two generations in disjoint identifier
- * spaces even though the mappings themselves collide: the variable-width
- * escape for one key can equal the fixed-width escape for another (the legacy
- * `caféA` / `caf\u0E9A` collision), but never behind this marker. New state
- * cannot overwrite legacy state, and legacy state is never read as new state.
- */
+/** Separate current identifiers from the legacy encoding. */
 const IDENTIFIER_GENERATION_PREFIX = "%:";
 
 /**
- * Encodes `StateManager` keys as Bedrock dynamic property identifiers,
- * generation-tagged with {@link IDENTIFIER_GENERATION_PREFIX}.
- *
- * Safe ASCII (`A-Za-z0-9_.:-`) is kept literally; every other **UTF-16 code
- * unit** is escaped as `%` plus exactly four uppercase hex digits (`%0025` for
- * `%`, `%D83D%DE00` for `😀`). Fixed width is what makes the mapping injective:
- * the earlier variable-width encoding (`%E9`) collided across code-unit
- * boundaries (`caféA` vs `caf\u0E9A`, `%` vs `\u2525`, `Ø3DÞ00` vs `😀`).
- *
- * The output is ASCII, so its `String#length` is also its byte count and its
- * UTF-16 code-unit count.
- *
- * **Not compatible with the previous encoding.** Identifiers persisted by the
- * variable-width encoder are not read through this encoder. `getItem` detects
- * such a legacy identifier when the new one is absent and refuses to guess
- * (see {@link toLegacyIdentifier}); it never migrates it.
+ * Encode non-ASCII-safe UTF-16 units using fixed-width hexadecimal escapes.
+ * Legacy variable-width keys are not automatically migrated.
  */
 function toIdentifier(key: string): string {
   return (
@@ -135,18 +82,7 @@ function toIdentifier(key: string): string {
   );
 }
 
-/**
- * The previous, variable-width encoding (no zero padding). Kept only to
- * *detect* state written before the encoding change — never to read it.
- *
- * It is not injective: two different keys can produce the same identifier
- * (`caféA` and `caf\u0E9A` both become `caf%E9A`, `Ø3DÞ00` and `😀` both
- * become `%D83D%DE00`). So a non-absent value at a legacy identifier that
- * differs from the current one cannot be attributed to this key.
- *
- * Legacy output never contains `%:`, so it can never equal an identifier
- * produced by {@link toIdentifier}.
- */
+/** Legacy encoder, retained only to detect incompatible stored records. */
 function toLegacyIdentifier(key: string): string {
   return key.replace(
     /[^A-Za-z0-9_.:-]/g,

@@ -1,12 +1,6 @@
 import * as server from "@minecraft/server";
 
-/**
- * Runs a callback every N game ticks and returns a cancel function.
- *
- * Item uses this to start/stop `updatePeriodically()` work as display
- * subscriptions come and go (design 6.3 / 11.5). Tests replace the Minecraft
- * `system` module to drive ticks deterministically.
- */
+/** Schedule repeated game-tick work and return a cancellation function. */
 export interface PeriodicScheduler {
   schedule(callback: () => void, ticks: number): () => void;
 }

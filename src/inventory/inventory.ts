@@ -1,6 +1,6 @@
 import type { ItemStack } from "@minecraft/server";
 
-import { createJsonCloner, hasOwn, isPlainObject } from "./json.js";
+import { createJsonCloner, hasOwn, isPlainObject } from "../state/json.js";
 
 export interface InventoryChange {
   readonly inventory: Inventory;
@@ -12,17 +12,8 @@ export interface InventoryChange {
 export type InventoryListener = (change: InventoryChange) => void;
 
 /**
- * Explicit `ItemStack` <-> JSON value conversion for inventory persistence
- * (design 4.3 / 9.6).
- *
- * Bedrock's `ItemStack` cannot be exhaustively serialized: components, dynamic
- * properties, tags, and future fields are not one enumerable comparable value.
- * A codec is required instead of a built-in default so the caller decides what
- * to keep. Returning data that silently drops state is the caller's explicit
- * choice, not a library default. `encode()` receives a clone, so it cannot
- * mutate the inventory, and must return a JSON value (plain objects, arrays,
- * strings, finite numbers, booleans, or null); `serialize()` rejects and
- * deep-clones anything else. `decode()` must return a cloneable stack.
+ * Codec for inventory snapshots. ItemStack cannot be fully serialized;
+ * callers choose what to encode. Encoded values must be valid JSON.
  */
 export interface InventoryItemCodec<T = unknown> {
   encode(item: ItemStack): T;
