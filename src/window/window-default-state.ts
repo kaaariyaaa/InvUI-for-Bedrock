@@ -1,8 +1,8 @@
 /** Default state manager shared by Windows in one script generation. */
 import { world } from "@minecraft/server";
-import { BedrockWorldStateStore } from "./bedrock-store.js";
-import { StateManager } from "./state.js";
-import type { StateStore } from "./state.js";
+import { BedrockWorldStateStore } from "../state/bedrock-store.js";
+import { StateManager } from "../state/state.js";
+import type { StateStore } from "../state/state.js";
 
 export let defaultStateManager: StateManager | undefined;
 

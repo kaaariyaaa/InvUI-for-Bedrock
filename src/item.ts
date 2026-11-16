@@ -1,7 +1,7 @@
 import { ItemStack } from "@minecraft/server";
 import type { Player } from "@minecraft/server";
-import { minecraftPeriodicScheduler } from "./periodic.js";
-import type { Window } from "./window.js";
+import { minecraftPeriodicScheduler } from "./render/periodic.js";
+import type { Window } from "./window/window.js";
 
 /**
  * Context handed to an Item click handler. The Window/EventRouter owns

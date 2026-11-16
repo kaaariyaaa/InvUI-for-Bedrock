@@ -1,6 +1,6 @@
 import type { ItemStack } from "@minecraft/server";
 
-import { createJsonCloner, hasOwn, isPlainObject } from "./json.js";
+import { createJsonCloner, hasOwn, isPlainObject } from "../state/json.js";
 
 export interface InventoryChange {
   readonly inventory: Inventory;

@@ -4,7 +4,7 @@ Public exports: [`src/index.ts`](../src/index.ts). Package version: `0.1.0-beta.
 
 ## GUI
 
-[`src/gui.ts`](../src/gui.ts)
+[`src/gui.ts`](../src/gui/gui.ts)
 
 | API | Description |
 | --- | --- |
@@ -67,7 +67,7 @@ const item = Item.builder()
 
 ## Windows
 
-[`src/window.ts`](../src/window.ts)
+[`src/window.ts`](../src/window/window.ts)
 
 ### `WindowBuilder`
 
@@ -122,7 +122,7 @@ The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters imple
 
 ## Inventories
 
-[`src/inventory.ts`](../src/inventory.ts) · [`src/player-inventory.ts`](../src/player-inventory.ts)
+[`src/inventory.ts`](../src/inventory/inventory.ts) · [`src/player-inventory.ts`](../src/inventory/player-inventory.ts)
 
 | API | Description |
 | --- | --- |
@@ -139,7 +139,7 @@ The default adapter is `minecraftVirtualContainerAdapter`. Custom adapters imple
 
 ## State
 
-[`src/state.ts`](../src/state.ts) · [`src/bedrock-store.ts`](../src/bedrock-store.ts)
+[`src/state.ts`](../src/state/state.ts) · [`src/bedrock-store.ts`](../src/state/bedrock-store.ts)
 
 ```ts
 import { StateManager } from "invui-bedrock";

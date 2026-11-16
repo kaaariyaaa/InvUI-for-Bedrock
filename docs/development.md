@@ -42,7 +42,7 @@ The CLI checks `manifest.json`, the script entry, and the Script API dependency 
 
 ## Repository
 
-- `src/`: library
+- `src/`: public entry point and Item API; `window/`, `gui/`, `state/`, `inventory/`, and `render/` contain implementation modules
 - `bin/`: CLI
 - `docs/`: API, status, and development documentation
 - `.github/workflows/`: build and package checks

@@ -1,7 +1,7 @@
 /** GUI layout calculation, independent of Minecraft runtime APIs. */
-import type { Item } from "./item.js";
-import type { InventoryLink } from "./inventory.js";
-import type { GuiState, GuiStatePatch } from "./state.js";
+import type { Item } from "../item.js";
+import type { InventoryLink } from "../inventory/inventory.js";
+import type { GuiState, GuiStatePatch } from "../state/state.js";
 import { resolveGui } from "./gui-resolve.js";
 
 export type GuiKind = "normal" | "paged" | "scroll" | "tab";

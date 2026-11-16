@@ -1,7 +1,7 @@
 /** Pure resolution of GUI structures into slot layouts. */
 import { GuiLink, ScrollGui, TabGui, Markers } from "./gui.js";
 import type { Gui, Structure, SlotElement, ResolvedGuiLayout } from "./gui.js";
-import type { GuiState, GuiStatePatch } from "./state.js";
+import type { GuiState, GuiStatePatch } from "../state/state.js";
 
 /* Layout resolution                                                          */
 /* -------------------------------------------------------------------------- */

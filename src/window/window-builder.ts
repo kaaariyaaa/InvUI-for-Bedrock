@@ -1,8 +1,8 @@
 /** Fluent configuration for Window and merged Window construction. */
 import type { Player } from "@minecraft/server";
-import type { Gui } from "./gui.js";
-import { StateManager } from "./state.js";
-import type { StateScope, StateLifetime } from "./state.js";
+import type { Gui } from "../gui/gui.js";
+import { StateManager } from "../state/state.js";
+import type { StateScope, StateLifetime } from "../state/state.js";
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
 import type { WindowOpenHandler, WindowCloseHandler, WindowErrorHandler } from "./window-types.js";

@@ -116,13 +116,13 @@ import { WindowBuilder, MergedWindowBuilder } from "./window-builder.js";
 import type { WindowConfig } from "./window-builder.js";
 export { WindowBuilder, MergedWindowBuilder } from "./window-builder.js";
 export type { WindowConfig } from "./window-builder.js";
-import { GuiLink, ScrollGui, TabGui } from "./gui.js";
-import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
-import type { InventoryLink } from "./inventory.js";
-import type { Item } from "./item.js";
-import { BedrockWorldStateStore } from "./bedrock-store.js";
-import { SlotWriteCache } from "./render-cache.js";
-import { StateManager } from "./state.js";
+import { GuiLink, ScrollGui, TabGui } from "../gui/gui.js";
+import type { Gui, ResolvedGuiLayout, SlotElement } from "../gui/gui.js";
+import type { InventoryLink } from "../inventory/inventory.js";
+import type { Item } from "../item.js";
+import { BedrockWorldStateStore } from "../state/bedrock-store.js";
+import { SlotWriteCache } from "../render/render-cache.js";
+import { StateManager } from "../state/state.js";
 import type {
   GuiStateField,
   GuiStatePatch,
@@ -131,7 +131,7 @@ import type {
   StateScope,
   StateSnapshot,
   StateStore,
-} from "./state.js";
+} from "../state/state.js";
 
 function assertErrorHandler(handler: WindowErrorHandler): void {
   if (typeof handler !== "function") {

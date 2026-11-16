@@ -1,8 +1,8 @@
 /** Layout identity, slot mapping, and element classification for Window. */
-import { GuiLink, ScrollGui, TabGui } from "./gui.js";
-import type { Gui, ResolvedGuiLayout, SlotElement } from "./gui.js";
-import type { Item } from "./item.js";
-import type { InventoryLink } from "./inventory.js";
+import { GuiLink, ScrollGui, TabGui } from "../gui/gui.js";
+import type { Gui, ResolvedGuiLayout, SlotElement } from "../gui/gui.js";
+import type { Item } from "../item.js";
+import type { InventoryLink } from "../inventory/inventory.js";
 
 export function isItemElement(element: SlotElement | null | undefined): element is Item {
   return typeof (element as Item | null | undefined)?.resolve === "function";
