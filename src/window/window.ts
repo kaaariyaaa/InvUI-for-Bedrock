@@ -42,6 +42,7 @@ import type {
   WindowContainerCloseHandler,
   WindowContainerItemChangeHandler,
 } from "./window-types.js";
+import { WindowContainerSubscriptions } from "./window-container-subscriptions.js";
 import { minecraftVirtualContainerAdapter } from "./window-adapter.js";
 import type { WindowContainerAdapter } from "./window-adapter.js";
 import {
@@ -248,13 +249,7 @@ export class Window {
   #stateLifetime: StateLifetime;
   #stateManager: StateManager;
   #adapter: WindowContainerAdapter;
-  /**
-   * True when the adapter limits every event subscription to one container
-   * (see `WindowContainerAdapter.filtersContainerEvents`). The Window then
-   * subscribes per container and attributes the event to that container
-   * instead of trusting `event.container` to be the same reference.
-   */
-  #filtersContainerEvents: boolean;
+  readonly #containerSubscriptions: WindowContainerSubscriptions;
   #openHandlers: readonly WindowOpenHandler[];
   #closeHandlers: readonly WindowCloseHandler[];
   #errorHandler: WindowErrorHandler | undefined;
@@ -298,16 +293,6 @@ export class Window {
     number,
     { element: SlotElement; unsubscribe: () => void }
   >();
-  /** Adapter close/itemChange unsubscribe functions, removed on close or failure. */
-  #eventUnsubscribers: Array<() => void> = [];
-  /**
-   * Per-container adapter unsubscribers for a filter-capable adapter, keyed by
-   * the container whose events they receive. A container the Window no longer
-   * owns is released immediately (see #releaseContainerEventSubscriptions): its
-   * filter would otherwise keep the container and its engine subscription
-   * alive for the rest of the Window's life.
-   */
-  #containerEventUnsubscribers = new Map<VirtualContainer, Array<() => void>>();
   /** Set once `openContainer` has been called, before the screen may emit events. */
   #screenRequested = false;
   readonly #itemGuard: WindowItemGuard;
@@ -378,7 +363,16 @@ export class Window {
     this.#stateLifetime = config.stateLifetime;
     this.#stateManager = config.stateManager ?? defaultManager();
     this.#adapter = config.adapter;
-    this.#filtersContainerEvents = config.adapter.filtersContainerEvents === true;
+    this.#containerSubscriptions = new WindowContainerSubscriptions(config.adapter, {
+      generation: () => this.#generation,
+      status: () => this.#status,
+      owns: (container) => this.#ownsContainer(container),
+      onClose: (generation, event, container) =>
+        this.#onContainerClose(generation, event, container),
+      onItemChange: (generation, event, container) =>
+        this.#onContainerItemChange(generation, event, container),
+      onUnsubscribeError: (error) => this.#report(error, "unsubscribe"),
+    });
     this.#openHandlers = config.openHandlers;
     this.#closeHandlers = config.closeHandlers;
     this.#errorHandler = config.errorHandler;
@@ -584,8 +578,8 @@ export class Window {
       // filter-capable adapter is subscribed per container once the first one
       // exists, because the beta filter needs the container itself.
       if (
-        !this.#filtersContainerEvents &&
-        !this.#subscribeToContainerEvents(generation)
+        !this.#containerSubscriptions.filtersContainerEvents &&
+        !this.#containerSubscriptions.subscribeGlobal(generation)
       ) {
         return;
       }
@@ -628,7 +622,7 @@ export class Window {
       }
       let container = createContainer(size);
       this.#container = container;
-      if (!this.#subscribeFilteredContainer(container, generation)) {
+      if (!this.#containerSubscriptions.subscribeFiltered(container, generation)) {
         return;
       }
 
@@ -655,13 +649,13 @@ export class Window {
           const replaced = container;
           container = createContainer(size);
           this.#container = container;
-          if (!this.#subscribeFilteredContainer(container, generation)) {
+          if (!this.#containerSubscriptions.subscribeFiltered(container, generation)) {
             return;
           }
           // The replaced container was never shown and will never be shown, so
           // its subscription can never act: do not keep it (or the container it
           // filters on) alive for the rest of the open.
-          this.#releaseContainerEventSubscriptions(replaced);
+          this.#containerSubscriptions.release(replaced);
           // A failed release is reported, and that handler may close and
           // reopen the Window. The rest of this pass belongs to the generation
           // that is gone: re-applying its layout and starting its render batch
@@ -863,7 +857,7 @@ export class Window {
     try {
       // The replacement is not shown yet, but its close/item events must be
       // attributable before it is opened, without trusting object identity.
-      if (!this.#subscribeFilteredContainer(nextContainer, generation)) {
+      if (!this.#containerSubscriptions.subscribeFiltered(nextContainer, generation)) {
         return;
       }
       this.#applyLayout(layout);
@@ -896,7 +890,7 @@ export class Window {
         this.#applyLayout(previousLayout);
         // The replacement was never shown and the old container is current
         // again: its subscription must not outlive the failed swap.
-        this.#releaseContainerEventSubscriptions(nextContainer);
+        this.#containerSubscriptions.release(nextContainer);
         this.#scheduleRefresh();
       }
       if (reportBeforeCloseFailure) {
@@ -980,7 +974,7 @@ export class Window {
     // keeping one engine subscription (and container reference) per replaced
     // screen for the rest of the Window's life. Released after the open so an
     // unsubscribe failure reported from here cannot race the screen swap.
-    this.#releaseContainerEventSubscriptions(previousContainer);
+    this.#containerSubscriptions.release(previousContainer);
   }
 
   /**
@@ -1822,10 +1816,9 @@ export class Window {
     // close event synchronously and must not run this path twice.
     if (restricted) {
       // Drop the local handles without calling them; see above.
-      this.#eventUnsubscribers = [];
-      this.#containerEventUnsubscribers.clear();
+      this.#containerSubscriptions.clear();
     } else {
-      this.#unsubscribeFromContainerEvents();
+      this.#containerSubscriptions.unsubscribeAll();
       // An unsubscribe failure is reported, and the error handler may have
       // closed and reopened the Window: the rest of this close belongs to a
       // generation that is gone, and its teardown must not destroy the
@@ -2067,148 +2060,6 @@ export class Window {
   }
 
   /**
-   * Subscribes a filtered adapter to one container, or does nothing for an
-   * adapter that cannot filter (the old global hook is installed by
-   * {@link #subscribeToContainerEvents} instead).
-   */
-  #subscribeFilteredContainer(
-    container: VirtualContainer,
-    generation: number,
-  ): boolean {
-    if (!this.#filtersContainerEvents) {
-      return true;
-    }
-    return this.#subscribeContainerEvents(container, generation);
-  }
-
-  /**
-   * Subscribes close/itemChange for exactly one container through the beta
-   * `{ containers: [container] }` filter. The handler remembers `container`, so
-   * a delivered event belongs to it even when `event.container` is a different
-   * wrapper object. Returns false when an event delivered during subscription
-   * already closed the Window; partial subscriptions are always removed.
-   */
-  #subscribeContainerEvents(
-    container: VirtualContainer,
-    generation: number,
-  ): boolean {
-    const unsubscribers: Array<() => void> = [];
-    const track = (unsubscribe: unknown, kind: string): void => {
-      if (typeof unsubscribe !== "function") {
-        throw new TypeError(
-          `InvUI: adapter ${kind} subscription must return an unsubscribe function.`,
-        );
-      }
-      unsubscribers.push(unsubscribe as () => void);
-    };
-    // A title/size regeneration subscribes while already `open`, not only
-    // while `opening`.
-    const active = (): boolean =>
-      generation === this.#generation &&
-      (this.#status === "opening" || this.#status === "open");
-
-    try {
-      if (this.#adapter.subscribeClose) {
-        track(
-          this.#adapter.subscribeClose(
-            (event) => this.#onContainerClose(generation, event, container),
-            container,
-          ),
-          "close",
-        );
-      }
-      // A handler may have closed the Window while the first subscription was
-      // being installed; do not install the second one then.
-      if (!active()) {
-        this.#disposeEventSubscriptions(unsubscribers);
-        return false;
-      }
-      if (this.#adapter.subscribeItemChange) {
-        track(
-          this.#adapter.subscribeItemChange(
-            (event) => this.#onContainerItemChange(generation, event, container),
-            container,
-          ),
-          "itemChange",
-        );
-      }
-    } catch (error) {
-      this.#disposeEventSubscriptions(unsubscribers);
-      throw error;
-    }
-
-    if (!active()) {
-      this.#disposeEventSubscriptions(unsubscribers);
-      return false;
-    }
-    // Group by container so a container the Window stops owning can release
-    // exactly its own subscriptions (see #releaseContainerEventSubscriptions).
-    const existing = this.#containerEventUnsubscribers.get(container);
-    if (existing) {
-      existing.push(...unsubscribers);
-    } else {
-      this.#containerEventUnsubscribers.set(container, unsubscribers);
-    }
-    return true;
-  }
-
-  /**
-   * Subscribes to the adapter's optional close/itemChange hooks before opening.
-   * Returns false when an event delivered during subscription already closed
-   * the Window. Subscriptions made before a failure are always removed.
-   *
-   * Used only for adapters without `filtersContainerEvents`: the global hooks
-   * cannot be limited to a container, so the handlers fall back to comparing
-   * the event's `container` reference.
-   */
-  #subscribeToContainerEvents(generation: number): boolean {
-    const unsubscribers: Array<() => void> = [];
-    const track = (unsubscribe: unknown, kind: string): void => {
-      if (typeof unsubscribe !== "function") {
-        throw new TypeError(
-          `InvUI: adapter ${kind} subscription must return an unsubscribe function.`,
-        );
-      }
-      unsubscribers.push(unsubscribe as () => void);
-    };
-
-    try {
-      if (this.#adapter.subscribeClose) {
-        track(
-          this.#adapter.subscribeClose((event) =>
-            this.#onContainerClose(generation, event),
-          ),
-          "close",
-        );
-      }
-      // A handler may have closed the Window while the first subscription was
-      // being installed; do not install the second one then.
-      if (generation !== this.#generation || this.#status !== "opening") {
-        this.#disposeEventSubscriptions(unsubscribers);
-        return false;
-      }
-      if (this.#adapter.subscribeItemChange) {
-        track(
-          this.#adapter.subscribeItemChange((event) =>
-            this.#onContainerItemChange(generation, event),
-          ),
-          "itemChange",
-        );
-      }
-    } catch (error) {
-      this.#disposeEventSubscriptions(unsubscribers);
-      throw error;
-    }
-
-    if (generation !== this.#generation || this.#status !== "opening") {
-      this.#disposeEventSubscriptions(unsubscribers);
-      return false;
-    }
-    this.#eventUnsubscribers = unsubscribers;
-    return true;
-  }
-
-  /**
    * Show `container`, retrying only `PreviousScreenClosing` on later ticks.
    * `VirtualContainer.close()` returns before the client has finished closing
    * its screen, so an immediate regeneration or reopen can hit that documented
@@ -2247,53 +2098,6 @@ export class Window {
         (this.#status !== "opening" && this.#status !== "open")
       ) {
         return;
-      }
-    }
-  }
-
-  #unsubscribeFromContainerEvents(): void {
-    const unsubscribers = this.#eventUnsubscribers;
-    this.#eventUnsubscribers = [];
-    const containerUnsubscribers = [
-      ...this.#containerEventUnsubscribers.values(),
-    ];
-    this.#containerEventUnsubscribers.clear();
-    this.#disposeEventSubscriptions(unsubscribers);
-    for (const perContainer of containerUnsubscribers) {
-      this.#disposeEventSubscriptions(perContainer);
-    }
-  }
-
-  /**
-   * Remove the close/itemChange subscriptions of one container the Window no
-   * longer owns: a replacement discarded before it was shown, or the previous
-   * screen of a finished regeneration. The handler ignores such a container's
-   * events anyway (see #ownsContainer), so keeping the subscription would only
-   * pin the container and its engine filter until the Window closes.
-   *
-   * A container that is still shown or still retiring is left alone: its
-   * events still belong to this Window.
-   */
-  #releaseContainerEventSubscriptions(container: VirtualContainer): void {
-    if (container === this.#container || container === this.#retiringContainer) {
-      return;
-    }
-    const unsubscribers = this.#containerEventUnsubscribers.get(container);
-    if (!unsubscribers) {
-      return;
-    }
-    this.#containerEventUnsubscribers.delete(container);
-    this.#disposeEventSubscriptions(unsubscribers);
-  }
-
-  #disposeEventSubscriptions(unsubscribers: Array<() => void>): void {
-    for (const unsubscribe of unsubscribers) {
-      try {
-        unsubscribe();
-      } catch (error) {
-        // A broken unsubscribe must not keep the Window open or mask the
-        // original open/close failure.
-        this.#report(error, "unsubscribe");
       }
     }
   }
@@ -3114,12 +2918,8 @@ export class Window {
     // reopened generation then installs its own state/GUI/element subscriptions
     // while this teardown is still releasing the old ones. Clearing the fields
     // first keeps the reentrant generation out of this teardown entirely.
-    const eventUnsubscribers = restricted ? [] : this.#eventUnsubscribers;
-    this.#eventUnsubscribers = [];
-    const containerEventUnsubscribers = restricted
-      ? []
-      : [...this.#containerEventUnsubscribers.values()];
-    this.#containerEventUnsubscribers.clear();
+    const { eventUnsubscribers, containerEventUnsubscribers } =
+      this.#containerSubscriptions.detach(restricted);
     const stateSubscription = this.#stateSubscription;
     this.#stateSubscription = undefined;
     const guiSubscription = this.#guiSubscription;
@@ -3143,9 +2943,9 @@ export class Window {
     this.#pendingSlotRenders.clear();
     this.#slotRenderTokens.clear();
 
-    this.#disposeEventSubscriptions(eventUnsubscribers);
+    this.#containerSubscriptions.dispose(eventUnsubscribers);
     for (const perContainer of containerEventUnsubscribers) {
-      this.#disposeEventSubscriptions(perContainer);
+      this.#containerSubscriptions.dispose(perContainer);
     }
     stateSubscription?.();
     guiSubscription?.();
