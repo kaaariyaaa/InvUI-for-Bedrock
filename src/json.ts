@@ -1,11 +1,6 @@
 /**
- * Internal strict-JSON validation shared by `inventory.ts` and `state.ts`.
- * It is not re-exported from `src/index.ts`, so it stays out of the public API.
- *
- * Both callers need the same walk: only plain objects, arrays, strings, finite
- * numbers, booleans, and null; no circular references; bounded depth; data
- * properties only. They deliberately differ on what counts as a lossy shape
- * and on whether the clone is frozen, so that lives in {@link JsonClonePolicy}.
+ * Strict JSON validation shared by inventory and state persistence.
+ * Clone policies determine lossy-shape checks and freezing.
  */
 
 /** Maximum nesting depth accepted by {@link createJsonCloner}. */

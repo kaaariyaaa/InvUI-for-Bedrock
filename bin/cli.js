@@ -1,12 +1,6 @@
 #!/usr/bin/env node
 /*
- * invui-bedrock setup helper (static inspection)
- *
- * 重要な前提:
- * - VirtualContainer は Bedrock Preview/Beta の Experimental API を前提とした設計。
- * - クリック / アイテム保護 / JSON UI / InventoryLink は実機未検証であり、
- *   この時点で「安全に利用できる機能」として扱わない。
- * - この CLI は Behavior Pack を静的に検査して手動作業を表示するだけで、ファイルを変更しない。
+ * Read-only Behavior Pack inspector; does not install or modify files.
  */
 
 import fs from 'node:fs';

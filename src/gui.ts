@@ -1,11 +1,4 @@
-/**
- * GUI layout calculation for InvUI for Bedrock.
- *
- * This module is deliberately free of Bedrock runtime dependencies so the
- * layout rules in design chapter 5 can be exercised with plain Node tests.
- * A Window passes its per-player state into `resolve(viewer, state)`; no GUI
- * instance keeps page/line/tab state of its own.
- */
+/** GUI layout calculation, independent of Minecraft runtime APIs. */
 import type { Item } from "./item.js";
 import type { InventoryLink } from "./inventory.js";
 import type { GuiState, GuiStatePatch } from "./state.js";

@@ -1,23 +1,6 @@
 /**
- * Read-only `Inventory` view of a player's 36-slot inventory (design 3.6 and
- * 7.4). This is the "logical association" half of the lower inventory: a
- * `PlayerInventory` can be used with `InventoryLink` to show a player's own
- * slots in the upper GUI.
- *
- * Writes are deliberately rejected. Bedrock item-move safety is unverified
- * (design 7.3 / 0.2), so this adapter must not become a write path that looks
- * like a safe transfer. Do not add `setItem()`/`clear()` implementations here
- * until the manual safety tests exist.
- *
- * Bedrock has no documented change event that guarantees the same absolute
- * slot index this adapter uses for the container (`PlayerInventoryType` splits
- * hotbar and main inventory, and the index space is not specified). Automatic
- * event wiring would therefore be a guess. Instead, a caller that has verified
- * the mapping supplies {@link PlayerInventoryChangeSource}; without one,
- * `subscribe()` reports no changes (the GUI still renders on refresh).
- * {@link createPlayerInventoryChangeSource} connects
- * `playerInventoryItemChange` only when the caller also supplies that verified
- * mapping; it forwards notifications and never touches a container.
+ * Read-only view of a player's 36-slot inventory.
+ * Change notifications require a caller-supplied event slot mapper.
  */
 
 import type {
@@ -158,26 +141,8 @@ function readEventPlayerId(player: Player | undefined): string | undefined {
 }
 
 /**
- * Opt-in `PlayerInventoryChangeSource` over
- * `world.afterEvents.playerInventoryItemChange`.
- *
- * The caller still owns the untested part: `mapSlot` must translate the
- * event's `inventoryType`/`slot` pair to the absolute container index, because
- * Bedrock does not document that mapping. The bridge only forwards
- * notifications. It never reads from or writes to a container, so it cannot
- * move, duplicate, or lose items; the `PlayerInventory` it feeds stays
- * read-only.
- *
- * Events are dropped when the player id is unreadable (for example after
- * leaving), when `mapSlot` throws or returns a non-integer/negative slot, when
- * the signal's unsubscribe is not a function, and when an event stack cannot be
- * cloned safely (so a live stack never reaches a listener). The mapper error is
- * logged.
- *
- * The beta signal's `subscribe()` returns the callback, not an unsubscribe
- * function, so the returned value is never called. Teardown goes through
- * `signal.unsubscribe(callback)`, and the returned unsubscribe function is
- * idempotent so a double detach cannot re-run the callback as a fake event.
+ * Adapt playerInventoryItemChange using a caller-provided slot mapper.
+ * Invalid events are ignored; teardown unsubscribes the original callback.
  */
 export function createPlayerInventoryChangeSource(
   signal: PlayerInventoryItemChangeSignal,
