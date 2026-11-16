@@ -1,10 +1,4 @@
-/**
- * GUI state management (design chapters 9 and 12).
- *
- * This module is intentionally independent from the Bedrock Script API. All
- * persistence is delegated to an injected synchronous string store, which keeps
- * the state machine testable outside Minecraft.
- */
+/** GUI state management with optional synchronous persistence. */
 
 import {
   createJsonCloner,
@@ -60,19 +54,8 @@ export interface StoredGuiState {
 }
 
 /**
- * Synchronous persistence port. `getItem` returns `null`/`undefined` when the
- * key is absent. Implementations may throw; a `setItem` failure is reported
- * through {@link StateManagerOptions.onError} (or the log when none is
- * configured) and then propagates to the caller, and the in-memory state is
- * not committed. The last successfully written record stays in the store, so
- * the change can be retried and a reload restores that record.
- *
- * Writes are not rolled back. A store that throws after partially applying a
- * write can leave the new record in place while the in-memory state keeps the
- * old value, so a later `acquire` may load data the manager never committed.
- * Implement `setItem` as one atomic write of the whole value to avoid that.
- * `removeItem` has the same caveat: a store that deleted the record and then
- * threw leaves it gone, and the deletion is not restored.
+ * Store methods may throw and are not rolled back.
+ * Use atomic writes to keep in-memory and stored state consistent.
  */
 export interface StateStore {
   getItem(key: string): string | null | undefined;
@@ -91,51 +74,13 @@ export interface StateManagerOptions {
    */
   onError?: (error: unknown) => void;
   /**
-   * Opt-in automatic recovery of corrupt persisted records. When `acquire`
-   * cannot decode or validate a stored record, its raw string is copied to a
-   * free `...:quarantine` key next to the record, the original key is removed,
-   * and the corruption is reported through {@link onError}. The acquire then
-   * starts from `initial` and persists it, as if no record existed.
-   *
-   * Defaults to false: the record is left untouched and `acquire` throws a
-   * {@link StateCorruptionError}, so a human can inspect it. Recovery applies
-   * only to `acquire`; `migrate` still fails closed. The raw value that failed
-   * decoding is copied verbatim. If the copy fails, the store error propagates
-   * and the original record is untouched. If the copy succeeds but the deletion
-   * fails, both remain and a retry reuses the existing backup. A value that
-   * changed between decoding and deletion is never deleted. A store that
-   * reports every quarantine key as occupied fails closed after a bounded
-   * number of attempts.
-   *
-   * The identity stays locked while the copy, the deletion, and the
-   * {@link onError} report run: a reentrant `acquire`, `migrate`, or `remove`
-   * for it (from the store or from the callback) throws a `LIVE_STATE`
-   * {@link StateConflictError}, so recovery cannot leave a second live entry
-   * behind.
+   * Optionally back up a corrupt persistent record before resetting its state.
+   * Disabled by default; copy or removal errors interrupt recovery.
    */
   quarantineCorrupt?: boolean;
   /**
-   * Declarative migrations that {@link StateManager.acquire} applies
-   * automatically to a persisted record whose stored `version`/`schema`
-   * exactly matches a declared source and whose declared target `schema`
-   * equals the schema being acquired. This is the automatic counterpart to
-   * the explicit {@link StateManager.migrate} call.
-   *
-   * Defaults to none: a version/schema mismatch fails closed with
-   * {@link StateConflictError}, exactly as before. A match is applied only to
-   * `persistent` registrations, and only to a record whose identity and
-   * lifetime already match. A record without `lifetime`/`schema` is the design
-   * 9.6 shape and is read as persistent and schema-less, so declaring
-   * `fromSchema: null` migrates it even when its stored version is already
-   * current. The decoded legacy record (any shape) is passed
-   * to the callback; the returned GUI state is validated and the migrated
-   * record is written only after both succeed, so a throwing or invalid
-   * callback leaves the stored record untouched. The callback runs under the
-   * same identity lock as `migrate`: a reentrant `acquire`/`migrate`/`remove`
-   * for the identity fails with `LIVE_STATE`.
-   *
-   * At most one migration may be declared per identity and source
-   * version/schema; a duplicate is rejected at construction.
+   * Apply declared migrations for exact persistent version/schema matches.
+   * Validate migrated values before writing; unmatched records are rejected.
    */
   migrations?: readonly StateAutoMigration[];
 }
@@ -229,47 +174,16 @@ export interface StateHandle {
   get(): StateSnapshot;
 
   /**
-   * Merge a validated patch synchronously. Persistent states are written to
-   * the store before the change is committed, and subscribers are notified
-   * afterwards.
-   *
-   * A throwing store write aborts the commit: in-memory state and subscribers
-   * stay on the previous value, and the failure is reported through
-   * {@link StateManagerOptions.onError} (or logged when none is configured)
-   * before the original error propagates. The last committed record stays in
-   * the store, so the caller can retry the same patch and a reload restores
-   * that record. The write itself is not rolled back, so a store that partially
-   * applied it and then threw may already hold the new record (see
-   * {@link StateStore}).
-   *
-   * The identity is locked while the store write runs: a store hook that
-   * reentrantly calls `acquire`, `migrate`, `remove`, or `set` for the same
-   * identity gets a `LIVE_STATE` {@link StateConflictError}. Without that lock
-   * the reentrant commit would be overwritten by this one after the store
-   * returned, silently losing it (and leaving memory and the record disagree).
-   *
-   * Notification is synchronous. A subscriber may call `set` reentrantly; that
-   * newer commit supersedes the notification in progress, so every remaining
-   * subscriber receives the newer snapshot instead of finishing on a stale
-   * one. Remaining subscribers also receive the union of the fields changed by
-   * the superseded commits, since they never saw those notifications.
+   * Persist changes before publishing state or notifying listeners.
+   * A failed store write leaves the live state unchanged.
    */
   set(patch: GuiStatePatch): StateSnapshot;
 
   subscribe(listener: StateListener): StateUnsubscribe;
 
   /**
-   * Queue work against this handle's state identity. Tasks for the same name
-   * run strictly one after another; tasks for different identities may overlap.
-   * Queued tasks are rejected with {@link StateReleasedError} if this handle
-   * (or a `window`-lifetime state) is released before they start.
-   *
-   * The queue is FIFO, so awaiting another `enqueue` or `update` for the same
-   * identity from inside a queued task deadlocks: the inner call cannot start
-   * until the outer task settles, and the outer task is waiting for it.
-   *
-   * `enqueue` only serializes tasks; it does not make read-modify-write atomic.
-   * When the result depends on the current state, use {@link update}.
+   * Run tasks for one identity sequentially; do not await a nested task
+   * queued on the same identity. Use update() for read-modify-write.
    */
   enqueue<T>(task: () => T | Promise<T>): Promise<T>;
 
@@ -920,14 +834,8 @@ export class StateManager {
   readonly #migrations: readonly NormalizedAutoMigration[];
   readonly #entries = new Map<string, StateEntry>();
   /**
-   * Identities whose record is being mutated: a running migration callback, a
-   * running `store.removeItem`, the load/seed phase of an `acquire` (which may
-   * quarantine a corrupt record), or the `store.setItem` of a persistent
-   * `set`. `acquire`, `migrate`, `remove`, and `_set` reject these so a
-   * reentrant call from inside a callback or a store hook cannot resurrect a
-   * stale entry, register a lease that survives the mutation, delete a record
-   * the mutation is still writing, or overwrite a reentrant commit after the
-   * store accepted it.
+   * Lock an identity during persistence, migration, and recovery to reject
+   * reentrant changes.
    */
   readonly #mutating = new Set<string>();
 
@@ -981,19 +889,8 @@ export class StateManager {
   }
 
   /**
-   * Registers a Window's interest in a state identity and returns its lease.
-   * The state starts from the live value, then persisted data (applying a
-   * declared {@link StateManagerOptions.migrations} match when one exists),
-   * then `initial`. A persistent `initial` is written before the handle is
-   * returned; if that write fails, the failure is reported through
-   * {@link StateManagerOptions.onError} (or logged) and `acquire` throws
-   * without registering the state, so a retry starts from the store again.
-   *
-   * Acquiring an identity whose automatic-migration callback,
-   * {@link migrate} callback, {@link remove} store call, persistent
-   * {@link StateHandle.set} store write, or `quarantineCorrupt` recovery is
-   * running throws a `LIVE_STATE` {@link StateConflictError}; other identities
-   * are unaffected.
+   * Acquire from existing state, stored values, or initial state.
+   * Initial persistent values are stored before the handle is returned.
    */
   acquire(options: StateAcquireOptions): StateHandle {
     const optionsInput: unknown = options;
@@ -1073,33 +970,8 @@ export class StateManager {
   }
 
   /**
-   * Explicitly replaces an older persisted record with a current-version one.
-   * The caller must state the exact source `version`/`schema` it expects and
-   * the target schema. Every identity field stored in the record is verified
-   * before the callback runs, so a record that does not match the declaration
-   * (or is already current) is rejected before any write. `migrate` receives
-   * the decoded old value (any shape) and must return the GUI state for
-   * {@link STATE_STORAGE_VERSION}. The record is written only after the
-   * callback and validation succeed, so a decoding, callback, or validation
-   * error leaves the stored value untouched. A store error is not rolled back:
-   * if the store partially applied the write before throwing, the record may
-   * already mix old and new data. `migrate` never deletes the record (use
-   * {@link remove} for that), and {@link acquire} never invokes it
-   * automatically.
-   *
-   * Any released zero-handle entry for the identity is evicted before the
-   * callback runs. A failed migration therefore cannot leave an old in-memory
-   * state that a later `acquire` reuses to overwrite the persisted record; the
-   * next acquisition reloads from the store.
-   *
-   * While the callback and the write run, this identity is locked: a reentrant
-   * `acquire` or `migrate` for it throws a `LIVE_STATE`
-   * {@link StateConflictError}, so the callback cannot register a lease that
-   * survives the migration and later writes the old schema back. The lock is
-   * cleared even when the callback throws, and other identities are unaffected.
-   *
-   * Call before acquiring, or after releasing every handle. A live state, or a
-   * non-persistent registration on the same identity, blocks migration.
+   * Migrate only when the record's identity, schema, and version match.
+   * Validate the result before writing; store writes are not rolled back.
    */
   migrate(options: StateMigrationOptions, migrate: StateMigration): void {
     const normalized = normalizeMigrationOptions(options);
@@ -1171,32 +1043,8 @@ export class StateManager {
   }
 
   /**
-   * Deletes the persisted record for an identity. This is the supported escape
-   * hatch for a record that {@link acquire} rejects as corrupt or for an
-   * incompatible schema; without it a caller has to reach into the injected
-   * store and reproduce {@link storageKeyOf} by hand.
-   *
-   * The stored value is not decoded or validated first: removal works on
-   * unreadable data. A missing record is not an error, so calling this twice is
-   * safe. The identity must not be live: a state with handles, a non-persistent
-   * registration, or an identity whose migration/removal is already running is
-   * rejected with a `LIVE_STATE` {@link StateConflictError}. Any released
-   * zero-handle persistent entry is evicted before the store call; if the store
-   * then throws, the record may still be present but the next `acquire` reloads
-   * it from the store instead of reusing stale memory.
-   *
-   * While `store.removeItem` runs, this identity is locked like a running
-   * {@link migrate}: a reentrant `acquire`, `migrate`, or `remove` for it throws
-   * a `LIVE_STATE` {@link StateConflictError}, so the injected store cannot
-   * register a fresh lease and have its record (or its write) deleted by the
-   * removal in progress. The lock is cleared even when the store throws, and
-   * other identities are unaffected.
-   *
-   * A store error is not rolled back: a store that deleted the record and then
-   * threw leaves it gone even though `remove` throws, so the caller cannot tell
-   * "not removed" from "removed, error reported" by the exception alone. The
-   * in-memory entry is evicted either way, so memory never resurrects a value
-   * the store rejected.
+   * Remove stored records, including corrupt data, only when no state
+   * handle is active. Missing records are allowed.
    */
   remove(options: StateRemoveOptions): void {
     const normalized = normalizeRemoveOptions(options);
@@ -1757,18 +1605,8 @@ export class StateManager {
   }
 
   /**
-   * Copies the raw record at `identity` to the first free `...:quarantine`
-   * key, then removes the original. The caller holds the identity lock.
-   *
-   * Quarantine keys are prefixed with the record's own storage key, which is
-   * `invui:gui-state:<JSON identity>` and therefore always ends in `]`. A
-   * normal storage key can never equal `<base>:quarantine` (that suffix is not
-   * part of a JSON identity), so a backup never shadows another record; the
-   * bounded slot scan below stays inside the same namespace.
-   *
-   * The copy is written before the removal, and the removal re-checks that the
-   * value is still the one that failed to decode, so a failing or changing
-   * store never destroys un-backed-up data.
+   * Back up the raw record to a free quarantine key before deletion.
+   * Recheck that the source value has not changed.
    */
   #quarantine(identity: string, raw: unknown): void {
     const store = this.#store;
